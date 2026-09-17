@@ -18,6 +18,17 @@ PageBase {
         }
     ]
     readonly property list<string> fullscreenValues: ["off", "on"]
+    readonly property list<MenuItem> monitorItems: [
+        MenuItem {
+            text: qsTr("All screens")
+            icon: "devices"
+        },
+        MenuItem {
+            text: qsTr("Focused screen")
+            icon: "desktop_windows"
+        }
+    ]
+    readonly property list<string> monitorValues: ["all", "focused"]
     readonly property list<MenuItem> positionItems: [
         MenuItem {
             text: qsTr("Auto")
@@ -74,6 +85,14 @@ PageBase {
         }
 
         SelectRow {
+            label: qsTr("Display on screen")
+            subtext: qsTr("Which screens show notification popups")
+            menuItems: root.monitorItems
+            active: root.monitorItems[Math.max(0, root.monitorValues.indexOf(GlobalConfig.notifs.monitor))]
+            onSelected: item => GlobalConfig.notifs.monitor = root.monitorValues[root.monitorItems.indexOf(item)]
+        }
+
+        SelectRow {
             label: qsTr("Position")
             subtext: qsTr("Where notification popups appear")
             menuItems: root.positionItems
@@ -116,6 +135,16 @@ PageBase {
         }
 
         StepperRow {
+            label: qsTr("Max popup notifications")
+            subtext: qsTr("Only the newest popups are shown; the rest stay in the sidebar")
+            value: GlobalConfig.notifs.maxPopups
+            from: 0
+            to: 30
+            stepSize: 1
+            onMoved: value => GlobalConfig.notifs.maxPopups = Math.round(value)
+        }
+
+        StepperRow {
             last: true
             label: qsTr("Max stored notifications")
             subtext: qsTr("Older notifications are dropped when the limit is reached")
@@ -124,6 +153,47 @@ PageBase {
             to: 2000
             stepSize: 50
             onMoved: value => GlobalConfig.notifs.maxNotifs = Math.round(value)
+        }
+
+        SectionHeader {
+            text: qsTr("Interaction")
+        }
+
+        ToggleRow {
+            first: true
+            text: qsTr("Click to activate")
+            subtext: qsTr("Activate the notification action on click")
+            checked: GlobalConfig.notifs.actionOnClick
+            onToggled: GlobalConfig.notifs.actionOnClick = checked
+        }
+
+        StepperRow {
+            label: qsTr("Expand threshold")
+            subtext: qsTr("Hover pixels before a docked notification expands")
+            value: GlobalConfig.notifs.expandThreshold
+            from: 5
+            to: 100
+            stepSize: 5
+            onMoved: value => GlobalConfig.notifs.expandThreshold = Math.round(value)
+        }
+
+        StepperRow {
+            label: qsTr("Fullscreen timeout")
+            subtext: qsTr("Milliseconds a notification stays over a fullscreen app")
+            value: GlobalConfig.notifs.fullscreenExpireTimeout / 1000
+            from: 1
+            to: 30
+            stepSize: 1
+            onMoved: value => GlobalConfig.notifs.fullscreenExpireTimeout = Math.round(value * 1000)
+        }
+
+        SliderRow {
+            last: true
+            label: qsTr("Clear threshold")
+            subtext: qsTr("Swipe distance before a notification is dismissed")
+            valueLabel: Math.round(value * 100) + "%"
+            value: GlobalConfig.notifs.clearThreshold
+            onMoved: value => GlobalConfig.notifs.clearThreshold = value
         }
 
         SectionHeader {

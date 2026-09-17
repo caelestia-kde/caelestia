@@ -16,6 +16,7 @@ Item {
     required property var bar
     required property ShellScreen screen
     required property bool fullscreen
+    Config.screen: root.screen.name
     readonly property int barThickness: bar.thickness
 
     implicitWidth: container.implicitWidth
@@ -33,9 +34,20 @@ Item {
             return Config.bar.workspaces.shown;
         }
         property int activeWsId: {
-            if (typeof KWinWorkspaceState !== "undefined" && KWinWorkspaceState.activeId > 0) {
+            if (typeof KWinWorkspaceState === "undefined")
+                return 1;
+            // With KWin's per-output virtual desktops each screen has its own
+            // current desktop, and activeId -- which comes from D-Bus -- only
+            // ever reports the focused screen's. Reading it here showed that one
+            // on every bar, and made all of them appear to switch whenever the
+            // pointer crossed to another monitor.
+            const perOutput = KWinWorkspaceState.activeByOutput[root.screen.name];
+            if (perOutput > 0)
+                return perOutput;
+            // Nothing from the tracker yet, or per-output desktops are off, in
+            // which case one current desktop is the truth for every screen.
+            if (KWinWorkspaceState.activeId > 0)
                 return KWinWorkspaceState.activeId;
-            }
             return 1;
         }
         readonly property var occupied: {
@@ -48,6 +60,14 @@ Item {
             if (kwinList) {
                 for (let i = 0; i < kwinList.length; ++i) {
                     const w = kwinList[i];
+                    // KDE's virtual desktops span every screen, so a desktop is
+                    // "occupied" globally the moment anything is on it anywhere.
+                    // This bar belongs to one screen, and saying a desktop is
+                    // busy because of a window the user cannot see from here is
+                    // not useful -- it reports a full desktop as full and an
+                    // empty one as full too.
+                    if (w.output !== root.screen.name)
+                        continue;
                     if (w.workspace && typeof w.workspace.id === "number") {
                         occ[w.workspace.id] = true;
                     }
@@ -64,7 +84,7 @@ Item {
         }
         readonly property int groupOffset: Math.floor((activeWsId - 1) / container.workspaceCount) * container.workspaceCount
         property real blur: onSpecial ? 1 : 0
-        readonly property bool isHorizontal: Config.bar.position === "top" || Config.bar.position === "bottom"
+        readonly property bool isHorizontal: root.bar.isHorizontal
         // Force QML dependency tracker to bind to windowList correctly
         property var kwinWindowList: KWinActiveWindowBridge.windowList
 
@@ -121,8 +141,9 @@ Item {
 
                     Workspace {
                         activeWsId: container.activeWsId
-                        occupied: container.occupied
                         groupOffset: container.groupOffset
+                        occupied: container.occupied
+                        screenName: root.screen.name
                     }
                 }
             }
@@ -136,6 +157,7 @@ Item {
                     workspaces: workspaces
                     mask: layout
                     fullscreen: root.fullscreen
+                    screenName: root.screen.name
                 }
             }
             MouseArea {

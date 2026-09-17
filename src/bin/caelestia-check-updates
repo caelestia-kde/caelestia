@@ -29,7 +29,7 @@ fi
 export GIT_TERMINAL_PROMPT=0
 GIT_TIMEOUT=30
 
-if ! timeout ${GIT_TIMEOUT} git ls-remote --exit-code --heads https://github.com/ladybug-me/caelestia-dots-kde.git "$BRANCH" >/dev/null 2>&1; then
+if ! timeout ${GIT_TIMEOUT} git ls-remote --exit-code --heads https://github.com/ladybug-me/caelestia-kde.git "$BRANCH" >/dev/null 2>&1; then
     BRANCH="main"
     mkdir -p "$HOME/.config/quickshell/caelestia"
     echo "$BRANCH" > "$HOME/.config/quickshell/caelestia/.update_branch"
@@ -40,7 +40,7 @@ CAELESTIA_PENDING=0
 
 if [ -n "$_localCommit" ]; then
     if [ ! -d "$REPO" ]; then
-        timeout ${GIT_TIMEOUT} git clone --bare --filter=blob:none https://github.com/ladybug-me/caelestia-dots-kde.git "$REPO" >/dev/null 2>&1 || true
+        timeout ${GIT_TIMEOUT} git clone --bare --filter=blob:none https://github.com/ladybug-me/caelestia-kde.git "$REPO" >/dev/null 2>&1 || true
     else
         timeout ${GIT_TIMEOUT} git -C "$REPO" fetch --force origin "$BRANCH:$BRANCH" >/dev/null 2>&1 || true
     fi
@@ -108,14 +108,18 @@ if [ "$CAELESTIA_PENDING" -gt "${OLD_C:-0}" ] || [ "$SYSTEM_PENDING" -gt "${OLD_
             LAST_ID=$(cat "$NOTIF_ID_FILE")
         fi
 
-        NOTIF_ARGS=( -p -u normal -i system-software-update -a "Caelestia Updates" )
+        # -t expires the toast so the Type=oneshot timer unit never stays active
+        # forever on an ignored notification, which would pause all future
+        # update checks.
+        NOTIF_ARGS=( -w -p -u normal -i system-software-update -a "Caelestia Updates" -t 300000 )
         if [ -n "$LAST_ID" ]; then
             NOTIF_ARGS+=( -r "$LAST_ID" )
         fi
         
         NOTIF_ARGS+=( -A "run=Install Updates" -A "close=Close" )
         
-        # This will block until the user clicks an action or dismisses it
+        # -w/--wait blocks until the user clicks an action or dismisses the
+        # notification, and prints the clicked action key so it can be captured.
         NOTIF_OUT=$(notify-send "${NOTIF_ARGS[@]}" "$TITLE" "$BODY")
         
         # Save new ID (first line of output) for next time

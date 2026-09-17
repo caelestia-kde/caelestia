@@ -4,7 +4,7 @@ import QtQuick
 import QtQuick.Effects
 import Quickshell
 import Caelestia.Config
-import Caelestia.Internal
+import Caelestia.Components
 import Caelestia.Services
 import qs.components
 import qs.services
@@ -105,7 +105,10 @@ Item {
                     }
                 }
                 FrameAnimation {
-                    running: root.opacity > 0 && !bars.settled
+                    // Nothing to advance while the audio service reports no values,
+                    // and spinning here is not free: this surface is the whole
+                    // desktop, so every frame repaints the wallpaper and its blur.
+                    running: root.opacity > 0 && !bars.settled && (Audio.cava?.values?.length ?? 0) > 0
                     onTriggered: bars.advance(frameTime)
                 }
             }

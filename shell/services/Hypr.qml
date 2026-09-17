@@ -6,7 +6,7 @@ import Quickshell.Io
 import Quickshell.Wayland
 import Caelestia
 import Caelestia.Config
-import Caelestia.Internal
+import Caelestia.Services
 import Caelestia.Services
 import qs.components.misc
 import qs.services
@@ -121,7 +121,6 @@ Singleton {
     readonly property string defaultKbLayout: ""
     readonly property string kbLayoutFull: KbLayout.activeLabel
     readonly property string kbLayout: KbLayout.activeShortLabel
-    readonly property var kbMap: new Map()
 
     readonly property alias extras: extras
     readonly property alias options: extras.options
@@ -160,11 +159,16 @@ Singleton {
     function hasFullscreen(): bool {
         if (typeof KWinActiveWindowBridge !== "undefined") {
             const wins = KWinActiveWindowBridge.windowList || [];
+            const activeWsId = (typeof KWinWorkspaceState !== "undefined")
+                ? KWinWorkspaceState.activeId : -1;
             // KWin serialises fullscreen as a boolean, not Hyprland's integer
             // level (0/1/2), so `> 1` is always false. Use === true instead.
             for (let i = 0; i < wins.length; i++) {
-                if (wins[i].fullscreen === true)
+                if (wins[i].fullscreen === true && !wins[i].minimized) {
+                    if (activeWsId !== -1 && wins[i].workspace?.id !== activeWsId && wins[i].workspace?.id !== -1)
+                        continue;
                     return true;
+                }
             }
             return false;
         }
@@ -193,12 +197,12 @@ Singleton {
             const activeWsId = (typeof KWinWorkspaceState !== "undefined")
                 ? KWinWorkspaceState.activeId : -1;
             for (let i = 0; i < wins.length; i++) {
-                if (!wins[i].fullscreen)
+                if (!wins[i].fullscreen || wins[i].minimized)
                     continue;
                 if (wins[i].output !== screenName)
                     continue;
                 // Only count windows on the active workspace (ignore other desktops).
-                if (activeWsId !== -1 && wins[i].workspace?.id !== activeWsId)
+                if (activeWsId !== -1 && wins[i].workspace?.id !== activeWsId && wins[i].workspace?.id !== -1)
                     continue;
                 return true;
             }
@@ -232,29 +236,57 @@ Singleton {
             return false;
 
         const wins = KWinActiveWindowBridge.windowList || [];
-        const activeWsId = (typeof KWinWorkspaceState !== "undefined") ? KWinWorkspaceState.activeId : -1;
-        const activeAddr = focusedOnly ? String(KWinActiveWindowBridge.activeWindow?.address ?? "") : "";
+        const activeWindow = KWinActiveWindowBridge.activeWindow;
+        const activeAddr = activeWindow ? String(activeWindow.address ?? "") : "";
 
-        // Nothing focused means nothing to dodge, rather than everything.
-        if (focusedOnly && !activeAddr)
-            return false;
+        // Resolve the workspace currently visible on this specific screen.
+        // activeByOutput is populated by the workspace-tracker KWin effect and
+        // gives each screen's desktop independently. Fall back to the global
+        // activeId (which follows the focused output) when the effect hasn't
+        // connected yet — imperfect for per-monitor setups but safe.
+        let screenWsId = -1;
+        if (typeof KWinWorkspaceState !== "undefined") {
+            const byOutput = KWinWorkspaceState.activeByOutput;
+            if (byOutput && byOutput[screenName] !== undefined)
+                screenWsId = byOutput[screenName];
+            else
+                screenWsId = KWinWorkspaceState.activeId;
+        }
+
+        // If dodging only focused windows, only apply that filter on the screen
+        // that currently has focus and only if the focused window is actually on
+        // this screen's visible workspace. On other screens (or during workspace
+        // transitions before focus moves to the newly active desktop), fall back
+        // to checking all visible windows on that workspace — a maximized window
+        // on an inactive screen or during a workspace transition should still
+        // trigger the dodge.
+        const activeWinWsId = activeWindow?.workspace?.id ?? -1;
+        const activeOnThisWs = activeWinWsId === -1 || screenWsId === -1 || activeWinWsId === screenWsId;
+        const isActiveScreen = screenName && activeWindow && activeWindow.output === screenName && activeOnThisWs;
+        const applyFocusedOnly = focusedOnly && isActiveScreen && activeAddr.length > 0;
 
         for (let i = 0; i < wins.length; i++) {
             const win = wins[i];
             if (win.minimized === true)
                 continue;
-            if (focusedOnly && String(win.address) !== activeAddr)
+            // Skip windows on a different workspace than what this screen is
+            // currently showing. Sticky windows (workspace.id === -1) are visible
+            // on all desktops and are never skipped.
+            const winWsId = win.workspace?.id ?? -1;
+            if (screenWsId !== -1 && winWsId !== -1 && winWsId !== screenWsId)
                 continue;
-            if (screenName && win.output !== screenName)
+            if (applyFocusedOnly && String(win.address) !== activeAddr)
                 continue;
-            if (activeWsId !== -1 && win.workspace?.id !== activeWsId)
-                continue;
-            // Touching edges are not an overlap, hence the strict comparisons.
+            // AABB intersection: dodgeRect is in absolute multi-monitor coordinates,
+            // exactly matching the coordinates KWin reports for window geometry.
+            // A window that doesn't physically cover this bar's strip cannot affect it.
             if (win.x < x + width && win.x + win.width > x && win.y < y + height && win.y + win.height > y)
                 return true;
         }
         return false;
     }
+
+
 
     function dispatch(request: string): void {
         const isKDE = typeof KWinActiveWindowBridge !== "undefined";
@@ -418,41 +450,6 @@ Singleton {
         hadKeyboard = kbLayoutFull.length > 0;
     }
 
-
-
-    FileView {
-        id: kbLayoutFile
-
-        path: Quickshell.env("CAELESTIA_XKB_RULES_PATH") || "/usr/share/X11/xkb/rules/base.lst"
-        onLoaded: {
-            const layoutMatch = text().match(/! layout\n([\s\S]*?)\n\n/);
-            if (layoutMatch) {
-                const lines = layoutMatch[1].split("\n");
-                for (const line of lines) {
-                    if (!line.trim() || line.trim().startsWith("!"))
-                        continue;
-
-                    const match = line.match(/^\s*([a-z]{2,})\s+([a-zA-Z() ]+)$/);
-                    if (match)
-                        root.kbMap.set(match[2], match[1]);
-                }
-            }
-
-            const variantMatch = text().match(/! variant\n([\s\S]*?)\n\n/);
-            if (variantMatch) {
-                const lines = variantMatch[1].split("\n");
-                for (const line of lines) {
-                    if (!line.trim() || line.trim().startsWith("!"))
-                        continue;
-
-                    const match = line.match(/^\s*([a-zA-Z0-9_-]+)\s+([a-z]{2,}): (.+)$/);
-                    if (match)
-                        root.kbMap.set(match[3], match[2]);
-                }
-            }
-        }
-    }
-
     IpcHandler {
         function refreshDevices(): void {
             extras.refreshDevices();
@@ -489,7 +486,7 @@ Singleton {
     CustomShortcut {
         // qmllint enable unresolved-type
         name: "refreshDevices"
-        description: "Reload devices"
+        description: qsTr("Reload devices")
         onPressed: extras.refreshDevices()
         onReleased: extras.refreshDevices()
     }

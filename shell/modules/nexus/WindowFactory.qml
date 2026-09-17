@@ -11,8 +11,26 @@ import qs.modules.nexus
 Singleton {
     id: root
 
+    // The one detached Nexus window, if open. Reused so repeated detach /
+    // "Open Updates" clicks navigate the existing window instead of stacking.
+    property var openWindow: null
+
     function create(parent: Item, props: var): var {
-        return nexusComp.createObject(parent ?? dummy, props);
+        props = props || {};
+        if (root.openWindow) {
+            const win = root.openWindow;
+            // Handles the sub-page as well: the page swap is animated, so
+            // opening it straight after the page change reaches the page that
+            // is on its way out instead of the one arriving.
+            if (props.initialPageIdx !== undefined)
+                win.nexus.nState.goToSubPage(props.initialPageIdx, props.initialSubPageIdx ?? -1);
+            win.visible = true;
+            win.raise();
+            return win;
+        }
+        const win = nexusComp.createObject(parent ?? dummy, props);
+        root.openWindow = win;
+        return win;
     }
 
     QtObject {
@@ -24,16 +42,21 @@ Singleton {
 
         FloatingWindow {
             id: win
-            
+
             property alias nexus: nexus
-            
+
             property int initialPageIdx: 0
             property int initialSubPageIdx: -1
+
+            Component.onDestruction: {
+                if (root.openWindow === win)
+                    root.openWindow = null;
+            }
 
             color: Colours.tPalette.m3surface
             // Commented because nexus bg depends on the above
             // color: GlobalConfig.appearance.transparency.enabled ? Qt.alpha(Colours.tPalette.m3surface, 0) : Colours.tPalette.m3surface
-            
+
             surfaceFormat.opaque: false
 
             BackgroundEffect.blurRegion: Region {
@@ -64,7 +87,7 @@ Singleton {
             contentItem.Config.screen: screen.name
             contentItem.Tokens.screen: screen.name
 
-            title: qsTr("Nexus — %1").arg(PageRegistry.pages[nexus.nState.currentPageIdx].label)
+            title: qsTr("%1").arg(PageRegistry.pages[nexus.nState.currentPageIdx].label)
 
             Nexus {
                 id: nexus

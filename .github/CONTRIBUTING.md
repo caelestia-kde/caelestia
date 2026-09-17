@@ -1,18 +1,21 @@
-# Contributing to Caelestia KDE
+# Contributing to Caelestia
 
 We're glad you're here! This guide covers everything you need to start contributing.
 
 ## Quick start
 
 ```bash
-git clone https://github.com/ladybug-me/caelestia-dots-kde ~/caelestia-dots-kde
-cd ~/caelestia-dots-kde
-bash setup.sh          # Full install - do this at least once
+git clone https://github.com/ladybug-me/caelestia-kde ~/caelestia-kde
+cd ~/caelestia-kde
+bash scripts/setup.sh  # Full install - do this at least once
 ```
 
 Make your changes in the cloned repo, test them (see below), then open a PR. That's it.
 
 ## What makes a good PR?
+
+> [!WARNING]
+> Only PRs to **dev** branch are accepted!
 
 - **One thing at a time.** If you have three features, send three PRs - it's much faster to review.
 - **Keep your personal config out.** Don't include your wallpaper path, custom keybinds, or local settings.
@@ -22,11 +25,12 @@ Make your changes in the cloned repo, test them (see below), then open a PR. Tha
 ## Where stuff lives
 
 | Area | Directory | Tech |
-|------|-----------|------|
+| ------ | ----------- | ------ |
 | Shell UI (launcher, bar, notifications, etc.) | `shell/` | QML + Quickshell |
+| Lock screen greeter (Plasma 6 shell) | `src/kde/shells/caelestia.desktop/` | QML + KDE ScreenLocker |
 | KWin plugin (window management, shortcuts) | `shell/plugin/` | C++ |
-| TUI installer | `installer/src/` | C++ |
-| Installer theme & menus | `installer/theme.json`, `installer/menu.json` | JSON |
+| TUI installer | `installer/tui/` | C++ |
+| Installer theme & menus | `installer/data/theme.json`, `installer/data/menu.json` | JSON |
 | Install step scripts | `scripts/` | Bash |
 | User-facing update scripts | `src/bin/` | Bash |
 
@@ -34,38 +38,80 @@ Make your changes in the cloned repo, test them (see below), then open a PR. Tha
 
 ### For QML / shell changes
 
-Edit files in `~/.config/quickshell/caelestia/`. Changes reload automatically - no restart needed.
+Edit files in `~/.config/quickshell/caelestia/`. Restart the shell.
 
 ```bash
+# Restart the shell cleanly
+~/.config/quickshell/caelestia/scripts/restart_shell.sh
+
 # View live logs
 caelestia-shell-ipc log
-
-# Restart the shell cleanly
-caelestia shell -k && caelestia shell -d
 ```
 
 **Editor setup:**
+
 - Run `touch ~/.config/quickshell/caelestia/.qmlls.ini` for QML language server support
 - In VS Code, install the "Qt Qml" extension and set the `qmlls` path to `/usr/bin/qmlls6`
+
 
 ### For C++ plugin changes
 
 ```bash
 bash scripts/08-build-shell.sh   # Recompiles and installs the plugins
-caelestia shell -k && caelestia shell -d   # Restart to pick up the new .so
+bash shell/scripts/restart_shell.sh  # Restart to pick up the new .so
+```
+
+The build keeps one core free and runs at a lower priority so the session stays
+usable. Set `CAELESTIA_BUILD_JOBS` to override the job count.
+
+### For Lock screen changes
+
+The lock screen is a native KDE Plasma 6 shell package located in `src/kde/shells/caelestia.desktop/`.
+
+```bash
+# Copy the files to the local Plasma shells directory
+mkdir -p ~/.local/share/plasma/shells/
+cp -r src/kde/shells/caelestia.desktop ~/.local/share/plasma/shells/
+
+# Set the shell package (if not already set)
+kwriteconfig6 --file plasmashellrc --group "Shell" --key "ShellPackage" "caelestia.desktop"
+
+# Test the lock screen safely in an interactive window (without locking your session)
+/usr/lib/kscreenlocker_greet --testing
 ```
 
 ### For installer changes
 
 ```bash
-cd installer
-cmake -B build && cmake --build build   # Compile
-./build/caelestia-install               # Run (use with care!)
+cmake -B installer/build -S installer/tui && cmake --build installer/build   # Compile
+./installer/build/caelestia-install "$PWD"    # Run from the repo root (use with care!)
 ```
+
+The installer reads `installer/data/theme.json` and `installer/data/menu.json`
+relative to its bundle directory, which is the executable's own directory unless
+you pass one as the first argument. That is why the run above passes `$PWD`;
+`setup.sh` copies the binary to the repo root instead, where no argument is
+needed.
+
+### For translation changes
+
+```bash
+tools/update-translations.sh          # refresh every catalog
+tools/update-translations.sh es       # start a new one (Spanish here)
+```
+
+Translate `shell/translations/caelestia_<code>.ts`, rebuild the shell, then pick
+the language in Nexus -> Language & region. See
+[Translations](../docs/translations.md) for the full guide.
+
+### For creating plugins
+
+Head to [caelestia-kde-plugins](https://github.com/ladybug-me/caelestia-kde-plugins) for the plugin templates and guidelines.
 
 ## Code style (the short version)
 
 **QML:**
+
 - Spaces between operators: `if (condition) {` not `if(condition){`
 - Prefer early returns: `if (!ok) return;` over deep nesting
 - Group related properties with blank lines
@@ -73,6 +119,7 @@ cmake -B build && cmake --build build   # Compile
 - Run `python3 shell/scripts/qml-lint-conventions.py` - it catches most issues
 
 **Shell scripts:**
+
 - Use `set -euo pipefail` at the top
 - Prefer `[[ ]]` over `[ ]`
 - Quote variables: `"$VAR"` not `$VAR`
@@ -80,21 +127,25 @@ cmake -B build && cmake --build build   # Compile
 
 ## Security
 
-- When calling shell commands from QML, pass arguments as an array - never concatenate strings:
+- When calling shell commands from QML, pass arguments as an array - never
+  concatenate strings:
+
   ```js
   // Good
   Quickshell.execDetached(["bash", "-c", "echo \"$1\"", "--", myVar])
   // Bad
   Quickshell.execDetached(["bash", "-c", "echo " + myVar])
   ```
+
 - Use `Paths.runtimeTemp("filename")` for temporary files - not hardcoded `/tmp/` paths.
 
 ## Architecture docs
 
-- [KWin port architecture](docs/kwin_port_architecture.md) - C++ plugin design and QML APIs
-- [Installer configuration](docs/installer_config.md) - theme.json and menu.json reference
-- [Lock screen architecture](docs/lockscreen_architecture.md) - lockscreen.qml design
+- [Brand rules](../docs/brand.md) - the name, palette, logo and voice every user-facing change must follow
+- [KWin port architecture](../docs/architecture/kwin_port_architecture.md) - C++ plugin design and QML APIs
+- [Lock screen architecture](../docs/architecture/lockscreen_architecture.md) - native Plasma 6 greeter design and component structure
+- [Translations](../docs/translations.md) - i18n pipeline and how to add a language
 
 ## Stuck?
 
-Open a [Discussion](https://github.com/ladybug-me/caelestia-dots-kde/discussions) or ask in an issue - we're happy to help.
+Open a [Discussion](https://github.com/ladybug-me/caelestia-kde/discussions) or ask in an issue - we're happy to help.

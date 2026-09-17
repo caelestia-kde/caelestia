@@ -17,6 +17,7 @@ Item {
 
     required property DrawerVisibilities visibilities
     required property var panels
+    required property real maxWidth
     required property real maxHeight
 
     readonly property int padding: Tokens.padding.large
@@ -34,9 +35,10 @@ Item {
             Quickshell.execDetached(command);
     }
 
-    Connections {
-        target: Clipboard
+    implicitWidth: listWrapper.width + padding * 2
+    implicitHeight: listWrapper.height + sessionFooter.height + searchWrapper.height + listWrapper.anchors.bottomMargin + sessionFooter.anchors.bottomMargin + searchWrapper.anchors.bottomMargin
 
+    Connections {
         function onClearHistoryFinished(success: bool): void {
             if (success) {
                 if (GlobalConfig.utilities.toasts.clipboardChanged)
@@ -45,11 +47,9 @@ Item {
                 Toaster.toast(qsTr("Failed to clear clipboard history"), "", "error");
             }
         }
+
+        target: Clipboard
     }
-
-    implicitWidth: listWrapper.width + padding * 2
-
-    implicitHeight: listWrapper.height + sessionFooter.height + searchWrapper.height + listWrapper.anchors.bottomMargin + sessionFooter.anchors.bottomMargin + searchWrapper.anchors.bottomMargin
 
     Item {
         id: listWrapper
@@ -67,6 +67,7 @@ Item {
             content: root
             visibilities: root.visibilities
             panels: root.panels
+            maxWidth: root.maxWidth - root.padding * 2
             maxHeight: root.maxHeight - searchWrapper.implicitHeight - sessionFooter.implicitHeight - root.padding * 2 - (sessionFooter.visible ? root.footerSpacing * 2 : root.footerSpacing)
             search: search
             padding: root.padding
@@ -187,6 +188,11 @@ Item {
             placeholderText: qsTr("Type \"%1\" for commands").arg(GlobalConfig.launcher.actionPrefix)
 
             onAccepted: {
+                if (list.showAppsBrowser) {
+                    list.currentList?.activateCurrent();
+                    return;
+                }
+
                 const currentItem = list.currentList?.currentItem;
                 if (currentItem) {
                     if (list.showWallpapers) {
@@ -208,20 +214,93 @@ Item {
                 }
             }
 
-            Keys.onUpPressed: list.currentList?.decrementCurrentIndex()
-            Keys.onDownPressed: list.currentList?.incrementCurrentIndex()
+            Keys.onUpPressed: {
+                if (!list.showWallpapers)
+                    list.currentList?.decrementCurrentIndex();
+            }
+            Keys.onDownPressed: {
+                if (!list.showWallpapers)
+                    list.currentList?.incrementCurrentIndex();
+            }
+            Keys.onLeftPressed: event => {
+                if (list.showWallpapers) {
+                    list.currentList?.decrementCurrentIndex();
+                    event.accepted = true;
+                } else if (list.showAppsBrowser) {
+                    list.currentList?.moveLeft();
+                    event.accepted = true;
+                } else {
+                    event.accepted = false;
+                }
+            }
+            Keys.onRightPressed: event => {
+                if (list.showWallpapers) {
+                    list.currentList?.incrementCurrentIndex();
+                    event.accepted = true;
+                } else if (list.showAppsBrowser) {
+                    list.currentList?.moveRight();
+                    event.accepted = true;
+                } else {
+                    event.accepted = false;
+                }
+            }
 
-            Keys.onEscapePressed: root.visibilities.launcher = false
+            Keys.onEscapePressed: {
+                KWinActiveWindowBridge.clearHighlight();
+                root.visibilities.launcher = false;
+            }
 
             Keys.onReleased: event => {
-                if (event.key === Qt.Key_Alt && text.startsWith(`${GlobalConfig.launcher.actionPrefix}windows `)) {
-                    Windows.focusSelectedWindow();
-                    root.visibilities.launcher = false;
-                    event.accepted = true;
+                if (text.startsWith(`${GlobalConfig.launcher.actionPrefix}windows `)) {
+                    const switcherKey = (typeof KeybindsModel !== "undefined" && KeybindsModel.getKey("windowSwitcher")) || "Alt+Tab";
+                    if (!CUtils.isShortcutModifierPressed(switcherKey)) {
+                        Windows.focusSelectedWindow();
+                        root.visibilities.launcher = false;
+                        event.accepted = true;
+                    }
                 }
             }
 
             Keys.onPressed: event => {
+                if (text.startsWith(`${GlobalConfig.launcher.actionPrefix}windows `)) {
+                    if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
+                        if (event.modifiers & Qt.ShiftModifier || event.key === Qt.Key_Backtab) {
+                            Windows.triggerCyclePrev();
+                        } else {
+                            Windows.triggerCycleNext();
+                        }
+                        event.accepted = true;
+                        return;
+                    }
+                    if (event.key === Qt.Key_Left || event.key === Qt.Key_Up) {
+                        Windows.triggerCyclePrev();
+                        event.accepted = true;
+                        return;
+                    }
+                    if (event.key === Qt.Key_Right || event.key === Qt.Key_Down) {
+                        Windows.triggerCycleNext();
+                        event.accepted = true;
+                        return;
+                    }
+                    if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter || event.key === Qt.Key_Space) {
+                        Windows.focusSelectedWindow();
+                        root.visibilities.launcher = false;
+                        event.accepted = true;
+                        return;
+                    }
+                    if (event.key === Qt.Key_Escape) {
+                        root.visibilities.launcher = false;
+                        event.accepted = true;
+                        return;
+                    }
+                }
+
+                if (list.showAppsBrowser && event.key === Qt.Key_Tab) {
+                    list.currentList?.toggleFocus();
+                    event.accepted = true;
+                    return;
+                }
+
                 if (!GlobalConfig.launcher.vimKeybinds)
                     return;
 
@@ -263,6 +342,8 @@ Item {
                         // commits the window switcher is delivered to this field,
                         // the switcher would stay open and stop cycling.
                         search.forceActiveFocus();
+                    } else {
+                        KWinActiveWindowBridge.clearHighlight();
                     }
                 }
 
@@ -272,6 +353,20 @@ Item {
                 }
 
                 target: root.visibilities
+            }
+
+            Connections {
+                function onModifierReleased(): void {
+                    if (root.visibilities.launcher && search.text.startsWith(`${GlobalConfig.launcher.actionPrefix}windows `)) {
+                        const switcherKey = (typeof KeybindsModel !== "undefined" && KeybindsModel.getKey("windowSwitcher")) || "Alt+Tab";
+                        if (!CUtils.isShortcutModifierPressed(switcherKey)) {
+                            Windows.focusSelectedWindow();
+                            root.visibilities.launcher = false;
+                        }
+                    }
+                }
+
+                target: CUtils
             }
         }
 

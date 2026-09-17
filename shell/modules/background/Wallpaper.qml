@@ -21,6 +21,11 @@ Item {
     property bool skipTransition: false
     property var screen: null
 
+    // True once this wallpaper has something to show, or has nothing to load at
+    // all. Background.qml keeps its fallback black until then, so a shell that is
+    // still starting does not paint the desktop black while the image decodes.
+    readonly property bool shown: root.current ? (root.current.shown || root.source === "") : false
+
     function isVideo(path: string): bool {
         if (!path)
             return false;
@@ -149,6 +154,13 @@ Item {
         property string videoPath: ""
         property bool isVideoImage: root.isVideo(root.source)
         property var screen: null
+        // Content is on screen for this element: an image reports it through the
+        // decode status, a video through playback actually starting.
+        readonly property bool shown: {
+            if (root.source === "")
+                return false;
+            return img.isVideoImage ? wallpaperVideo.playing : wallpaperImage.status === Image.Ready;
+        }
         readonly property real maxRadius: Math.sqrt(width * width + height * height)
         property real maskRadius: root.skipTransition ? maxRadius : 0
         readonly property var shapes: [
@@ -162,6 +174,10 @@ Item {
         readonly property bool isDynamicScheme: currentSchemeName.startsWith("dynamic")
         readonly property bool isDynamicMonochrome: isDynamicScheme && currentVariantName === "monochrome"
         readonly property bool needsMask: img.z === 1 && maskAnim.running
+        readonly property bool tiled: {
+            const m = Config.background.wallpaperFillMode;
+            return m === Image.Tile || m === Image.TileVertically || m === Image.TileHorizontally;
+        }
         readonly property bool shouldRecolor: Config.background.wallpaperRecolor
 
         function update(): void {
@@ -278,24 +294,47 @@ Item {
                 fillMode: Config.background.wallpaperFillMode
                 source: img.imagePath || ""
                 playing: true
-                // Decode at the size actually being drawn. Without this the full
-                // image is decoded whatever its resolution: an 8K wallpaper costs
-                // ~132MB of pixels and a slow decode, twice over while the old and
-                // new ones overlap during the reveal — a visible hitch on every
-                // change. JPEG can scale during decode, so asking for the screen
-                // size makes it both quicker and far smaller. Every other wallpaper
-                // view already does this; only the one drawing the biggest image
-                // did not.
-                // sourceSize: {
-                //     const dpr = (QsWindow.window as QsWindow)?.devicePixelRatio ?? 1;
-                //     return Qt.size(wallpaperImage.width * dpr, wallpaperImage.height * dpr);
-                // }
+                // Decode near the size actually drawn. Left alone, the image is
+                // decoded at whatever resolution it happens to be: an 8K wallpaper
+                // is ~132MB of pixels and a slow decode, paid twice over while the
+                // outgoing and incoming images overlap through the reveal — which
+                // is the hitch on every wallpaper change. Every other wallpaper
+                // view already asks for a size; only the one drawing the biggest
+                // image did not.
+                //
+                // Only the width is given. Setting both dimensions scales the
+                // decode to exactly that box and drops the aspect ratio, which
+                // turns a 16:9 wallpaper into a square — fillMode is configurable
+                // and PreserveAspectCrop then shows that square pillarboxed. With
+                // one dimension the other follows the image's own aspect.
+                //
+                // It asks for half again the long edge so the result still covers
+                // the item under PreserveAspectCrop even for footage much wider
+                // than the screen; Qt never upscales a decode, so nothing is lost
+                // on images that are already smaller. An 8K wallpaper on this
+                // screen still comes down from ~33MP to under 7MP.
+                //
+                // Tiling is left unconstrained: there the decode size is the tile
+                // size, so capping it would change how the wallpaper looks.
+                sourceSize: {
+                    // Nothing to size when this element is not the one drawing:
+                    // for a video the source here is empty, and handing a decode
+                    // size to an AnimatedImage in that state leaves the wallpaper
+                    // blank.
+                    if (img.isVideoImage || img.imagePath === "" || img.tiled)
+                        return Qt.size(0, 0);
+                    const dpr = wallpaperImage.Screen.devicePixelRatio || 1;
+                    const edge = Math.ceil(Math.max(wallpaperImage.width, wallpaperImage.height) * dpr * 1.5);
+                    return edge > 0 ? Qt.size(edge, 0) : Qt.size(0, 0);
+                }
                 onStatusChanged: {
                     if (status === Image.Ready && !img.isVideoImage)
                         root.current = img;
                 }
             }
             CachingVideo {
+                id: wallpaperVideo
+
                 anchors.fill: parent
                 path: img.videoPath
                 screen: root.screen

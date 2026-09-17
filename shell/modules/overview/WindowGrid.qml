@@ -1,6 +1,5 @@
 pragma ComponentBehavior: Bound
 
-import org.kde.pipewire as Pipewire
 import QtQuick
 import QtQuick.Layouts
 import Quickshell
@@ -20,16 +19,137 @@ Item {
     property var cardItems: []
     property var activeInfoClient: null
     property var panels: null
-    readonly property int activeWsId: typeof KWinWorkspaceState !== "undefined" ? KWinWorkspaceState.activeId : 1
+    /// The screen this overview belongs to. Everything below is scoped to it:
+    /// KWin gives each output its own current desktop, and each window lives on
+    /// one output, so an overview that ignores this shows the other monitor's
+    /// desktop and the other monitor's windows.
+    required property ShellScreen screen
+    property var closingWindows: []
+    property alias indicatorContainer: indicatorContainer
+    readonly property real overviewBorderThickness: Math.min(width, height) * 0.15
+    readonly property real indicatorSpace: indicatorContainer.height + Tokens.padding.large * 2
+    readonly property real verticalOffset: indicatorSpace - overviewBorderThickness
+    readonly property int activeWsId: {
+        if (typeof KWinWorkspaceState === "undefined")
+            return 1;
+        // activeId comes from D-Bus, which exposes a single current desktop and
+        // reports whichever output is focused. Per screen, only the tracker
+        // knows.
+        const perOutput = KWinWorkspaceState.activeByOutput[root.screen.name];
+        if (perOutput > 0)
+            return perOutput;
+        return KWinWorkspaceState.activeId > 0 ? KWinWorkspaceState.activeId : 1;
+    }
     property bool ignoreNextSwitch: false
     property bool _initialized: false
     property bool isDragging: false
+    /// -1 while a drag rests against the left edge, +1 against the right, 0
+    /// otherwise. Drives the dwell that pages through workspaces.
+    ///
+    /// Read from the drag's own position rather than from drop areas at the
+    /// edges. Those reported entry and exit, and paging moves the grid under the
+    /// pointer, which counted as leaving -- so the second page never came while
+    /// the drag was held perfectly still. A position cannot be confused that way.
+    /// How far in from a screen edge counts as resting against it. Wide enough
+    /// to be reachable without pressing the pointer into the very last pixels:
+    /// on a shared edge the pointer glides onto the next monitor rather than
+    /// stopping, so a narrow band leaves almost nothing to aim at. The dwell,
+    /// not the width, is what keeps passing through from paging.
+    readonly property real edgeBand: 140
+    readonly property int edgeDirection: {
+        if (!root.isDragging || Visibilities.dragAddress === "" || Visibilities.dragOriginScreen !== root.screen.name)
+            return 0;
+        // Screen coordinates on both sides. The published position is relative
+        // to the window, which covers the screen; root is an item inside it and
+        // narrower, so measuring one against the other put the edge in the wrong
+        // place -- far enough out that it was never reached.
+        const local = Visibilities.dragX - root.screen.x;
+        const span = root.screen.width;
+        if (local < 0 || local >= span)
+            return 0; // gone to another screen; that is a move, not a page
+        if (local < root.edgeBand)
+            return -1;
+        if (local > span - root.edgeBand)
+            return 1;
+        return 0;
+    }
+    readonly property real hoverScale: 1.02
+    property int selectedIndex: -1
+    readonly property var currentWindows: {
+        if (typeof KWinWorkspaceState === "undefined" || listView.currentIndex < 0)
+            return [];
+        const wsList = KWinWorkspaceState.workspaces;
+        if (listView.currentIndex >= wsList.length)
+            return [];
+        const wsId = wsList[listView.currentIndex].index;
+        // windowsForWorkspace already scopes to the workspace; the overview is
+        // per-screen, so drop anything living on another output.
+        return typeof KWinActiveWindowBridge !== "undefined"
+            ? KWinActiveWindowBridge.windowsForWorkspace(wsId, false).filter(w => w.output === root.screen.name)
+            : [];
+    }
 
     signal requestWindowInfo(var client)
     signal requestClose()
 
+    /// The screen containing a point in global coordinates, or null.
+    function screenAtGlobal(gx: real, gy: real): var {
+        const all = Quickshell.screens;
+        for (let i = 0; i < all.length; ++i) {
+            const s = all[i];
+            if (gx >= s.x && gx < s.x + s.width && gy >= s.y && gy < s.y + s.height)
+                return s;
+        }
+        return null;
+    }
+
+    // Resolve an icon for a window card, mirroring the dock: prefer an icon
+    // extracted from the window's own _NET_WM_ICON (apps with no desktop
+    // entry, e.g. Steam games or Minecraft), then fall back to the themed
+    // desktop-entry icon lookup the overview already used.
+    function windowIconSource(client: var): string {
+        if (!client)
+            return "";
+        const wp = WinIcons.paths[WinIcons.keyFor(client.class, client.pid ?? 0)];
+        if (wp)
+            return "file://" + wp;
+        return client.iconName ? Icons.getAppIcon(client.iconName, "image-missing")
+                               : (client.class ? Icons.getAppIcon(client.class, "image-missing") : "");
+    }
+
+    function cycleSelection(backwards: bool): void {
+        const n = root.currentWindows.length;
+        if (n === 0)
+            return;
+        if (backwards)
+            root.selectedIndex = root.selectedIndex <= 0 ? n - 1 : root.selectedIndex - 1;
+        else
+            root.selectedIndex = root.selectedIndex >= n - 1 ? 0 : root.selectedIndex + 1;
+    }
+    function activateSelected(): void {
+        const wins = root.currentWindows;
+        if (root.selectedIndex < 0 || root.selectedIndex >= wins.length)
+            return;
+        const addr = wins[root.selectedIndex].address;
+        if (!addr)
+            return;
+        if (typeof KWinActiveWindowBridge !== "undefined")
+            KWinActiveWindowBridge.focusWindow(addr);
+        if (typeof KWinWorkspaceState !== "undefined" && listView.currentIndex >= 0)
+            KWinWorkspaceState.switchTo(KWinWorkspaceState.workspaces[listView.currentIndex].index, root.screen.name);
+        root.requestClose();
+    }
     function syncPage() {
         if (typeof KWinWorkspaceState === "undefined") return;
+        // Never while a window is being dragged. The page a drag has reached is
+        // chosen by the drag itself, but activeWsId only catches up once the
+        // compositor has switched and the tracker's payload has come back over
+        // its socket -- and any activeWsId notification arriving before that
+        // still carries the desktop the drag started on. Acting on it snaps the
+        // view back to that page, so the drop then finds the window already
+        // where it is and does nothing: the card flies home and the drag looks
+        // like it was ignored.
+        if (root.isDragging) return;
         for (let i = 0; i < KWinWorkspaceState.workspaces.length; ++i) {
             const wId = KWinWorkspaceState.workspaces[i].index;
             if (wId === activeWsId) {
@@ -45,6 +165,31 @@ Item {
         root._initialized = true;
     }
 
+    onOpacityChanged: {
+        if (opacity <= 0) {
+            selectedIndex = -1;
+            // A card destroyed mid-drag never reports the drag ending, and a
+            // stuck flag would leave syncPage() disabled for good.
+            root.isDragging = false;
+        } else {
+            if (Visibilities.preOverviewActiveWindowAddress !== "") {
+                const targetAddress = Visibilities.preOverviewActiveWindowAddress;
+                let foundIndex = -1;
+                const wins = root.currentWindows;
+                if (wins) {
+                    for (let i = 0; i < wins.length; ++i) {
+                        if (wins[i].address === targetAddress) {
+                            foundIndex = i;
+                            break;
+                        }
+                    }
+                }
+                root.selectedIndex = foundIndex; // -1 if not found
+            } else {
+                root.selectedIndex = -1;
+            }
+        }
+    }
     onActiveWsIdChanged: Qt.callLater(syncPage)
     Component.onCompleted: {
         if (typeof KWinWorkspaceState !== "undefined") {
@@ -58,6 +203,41 @@ Item {
         Qt.callLater(syncPage);
     }
 
+    Connections {
+        function onCycleOverview(backwards) {
+            if (root.opacity > 0)
+                root.cycleSelection(backwards);
+        }
+
+        target: Visibilities
+    }
+    Shortcut {
+        sequences: ["Return", "Enter"]
+        enabled: root.opacity > 0
+        onActivated: root.activateSelected()
+    }
+    Shortcut {
+        sequences: {
+            const s = ["Tab", "Right", "Down"];
+            if (GlobalConfig.launcher.vimKeybinds) {
+                s.push("Ctrl+J", "Ctrl+N");
+            }
+            return s;
+        }
+        enabled: root.opacity > 0
+        onActivated: root.cycleSelection(false)
+    }
+    Shortcut {
+        sequences: {
+            const s = ["Shift+Tab", "Backtab", "Left", "Up"];
+            if (GlobalConfig.launcher.vimKeybinds) {
+                s.push("Ctrl+K", "Ctrl+P");
+            }
+            return s;
+        }
+        enabled: root.opacity > 0
+        onActivated: root.cycleSelection(true)
+    }
     ListModel {
         id: workspaceModel
     }
@@ -77,45 +257,83 @@ Item {
     ListView {
         id: listView
 
+        property real rawSwipeOffset: typeof KWinWorkspaceState !== "undefined" ? (KWinWorkspaceState.swipeOffsetByOutput?.[root.screen.name] ?? KWinWorkspaceState.swipeOffset) : 0.0
+
+        property real targetContentX: (currentIndex + rawSwipeOffset) * width
+
         anchors.fill: parent
+        anchors.topMargin: -verticalOffset
+        anchors.bottomMargin: verticalOffset
         orientation: ListView.Horizontal
-        snapMode: ListView.SnapOneItem
-        highlightRangeMode: ListView.StrictlyEnforceRange
+        highlightRangeMode: ListView.NoHighlightRange
         cacheBuffer: 100000 // Keep all pages instantiated to prevent drag-and-drop interruption
-        interactive: !root.isDragging // Prevent ListView from stealing grab during drag
-        preferredHighlightBegin: 0
-        preferredHighlightEnd: 0
-        highlightMoveDuration: root._initialized ? 250 : 0
         boundsBehavior: Flickable.StopAtBounds
+        interactive: false // Disable native scroll to prevent fighting KWin swipe tracking
+        contentX: root._initialized ? targetContentX : currentIndex * width
+        model: workspaceModel
+
         onCountChanged: Qt.callLater(root.syncPage)
         onCurrentIndexChanged: {
             if (root.ignoreNextSwitch) return;
+            // Not while a window is being dragged. Switching the compositor's
+            // desktop cancels the pointer grab the drag is riding on, so the
+            // drag ended the instant the first page turned and the window was
+            // dropped on the page it had just reached -- holding on could never
+            // carry it further. The view still pages; the desktop catches up
+            // once the drag is over.
+            if (root.isDragging) return;
             switchTimer.restart();
         }
-        model: workspaceModel
+
         delegate: Item {
             id: page
 
             required property int index
-            readonly property int wsId: typeof KWinWorkspaceState !== "undefined" ? KWinWorkspaceState.workspaces[index].index : index + 1
-            readonly property string wsName: typeof KWinWorkspaceState !== "undefined" ? KWinWorkspaceState.workspaces[index].name : wsId.toString()
-            readonly property var wsWindows: {
+            readonly property int wsId: (typeof KWinWorkspaceState !== "undefined" && KWinWorkspaceState.workspaces && index < KWinWorkspaceState.workspaces.length) ? KWinWorkspaceState.workspaces[index].index : index + 1
+            readonly property string wsName: (typeof KWinWorkspaceState !== "undefined" && KWinWorkspaceState.workspaces && index < KWinWorkspaceState.workspaces.length) ? KWinWorkspaceState.workspaces[index].name : wsId.toString()
+            property var wsWindows: []
+            readonly property var _winTrigger: typeof KWinActiveWindowBridge !== "undefined" ? KWinActiveWindowBridge.windowList : null
+            readonly property var _hyprTrigger: (typeof Hypr !== "undefined" && Hypr.toplevels) ? Hypr.toplevels.values : null
+
+            function _updateWsWindows() {
                 const kwinList = typeof KWinActiveWindowBridge !== "undefined" ? KWinActiveWindowBridge.windowList : null;
+                const hyprList = (typeof Hypr !== "undefined" && Hypr.toplevels) ? Hypr.toplevels.values : null;
+
                 let arr = [];
                 if (kwinList) {
-                    for (let i = 0; i < kwinList.length; ++i) {
-                        const w = kwinList[i];
-                        if (w.workspace && (w.workspace.id === wsId || w.workspace.index === wsId)) {
+                    arr = KWinActiveWindowBridge.windowsForWorkspace(wsId, false).filter(w => w.output === root.screen.name);
+                } else if (hyprList) {
+                    for (let i = 0; i < hyprList.length; ++i) {
+                        const w = hyprList[i];
+                        if (w.workspace && w.workspace.id === wsId) {
                             arr.push(w);
                         }
                     }
                 }
-                return arr;
+
+                let changed = arr.length !== wsWindows.length;
+                if (!changed) {
+                    for (let i = 0; i < arr.length; ++i) {
+                        if (arr[i].address !== wsWindows[i].address) {
+                            changed = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (changed) {
+                    wsWindows = arr;
+                }
             }
+
+            on_WinTriggerChanged: _updateWsWindows()
+            on_HyprTriggerChanged: _updateWsWindows()
+            onWsIdChanged: _updateWsWindows()
 
             width: listView.width
             height: listView.height
             Component.onCompleted: {
+                _updateWsWindows();
                 //console.log("WindowGrid Page initialized. wsId:", wsId, "windows found:", wsWindows.length, "Total windows globally:", typeof KWinActiveWindowBridge !== "undefined" ? KWinActiveWindowBridge.windowList.length : -1);
             }
             onWsWindowsChanged: {
@@ -127,29 +345,43 @@ Item {
             }
             DropArea {
                 anchors.fill: parent
+                // Accepted only when this page actually took the window in.
+                //
+                // Qt re-resolves which DropArea a drag is over on drag movement,
+                // not when the scene moves underneath it. Paging by holding the
+                // drag against an edge does exactly that -- the pages scroll
+                // while the pointer is deliberately still -- so the drag is
+                // still registered against the page it started on. Accepting
+                // there regardless reported the drop as handled, and the card's
+                // own release path, which goes by the page actually on screen,
+                // never ran: the workspace changed and the window stayed behind.
                 onDropped: drop => {
                     const sourceItem = drop.source;
                     if (sourceItem && sourceItem.clientAddress) {
                         if (sourceItem.wsId !== undefined && sourceItem.wsId !== page.wsId) {
                             sourceItem.visible = false;
-                            if (typeof KWinActiveWindowBridge !== "undefined") {
-                                KWinActiveWindowBridge.setWindowDesktop(sourceItem.clientAddress, page.wsId);
-                            } else {
-                                Hypr.dispatch(Hypr.usingLua ? `hl.dsp.movetoworkspace({ workspace = "${page.wsId}", window = "address:0x${sourceItem.clientAddress}" })` : `movetoworkspace ${page.wsId},address:0x${sourceItem.clientAddress}`);
-                            }
+                            const addr = sourceItem.clientAddress;
+                            const targetId = page.wsId;
+                            Qt.callLater(() => {
+                                if (typeof KWinActiveWindowBridge !== "undefined") {
+                                    KWinActiveWindowBridge.setWindowDesktop(addr, targetId);
+                                } else {
+                                    Hypr.dispatch(Hypr.usingLua ? `hl.dsp.movetoworkspace({ workspace = "${targetId}", window = "address:0x${addr}" })` : `movetoworkspace ${targetId},address:0x${addr}`);
+                                }
+                            });
+                            drop.accept();
                         }
-                        drop.accept();
                     }
                 }
             }
             Item {
                 id: gridItem
 
+                readonly property real hoverHeadroom: Math.ceil(Math.max(parent.width, parent.height) * (root.hoverScale - 1) / 2)
                 property var windowLayout: Config.overview.layoutType === 0 ? LayoutKde.calculateLayout(page.wsWindows, width, height, Tokens.spacing.large, Tokens.spacing.large) : LayoutGnome.calculateLayout(page.wsWindows, width, height, Tokens.spacing.large, Tokens.spacing.large)
 
                 anchors.fill: parent
-                anchors.bottomMargin: workspaceIndicator.implicitHeight * 2
-                // Behaviors for smooth resizing of the whole container if needed (though it fills parent)
+                anchors.margins: (root.panels ? root.panels.overviewBorderThickness : Tokens.padding.extraLarge) + hoverHeadroom
 
                 Repeater {
                     model: page.wsWindows
@@ -157,25 +389,80 @@ Item {
                         id: activeWin
 
                         required property var modelData
+                        required property int index
                         readonly property string clientAddress: modelData.address
                         readonly property int wsId: page.wsId
                             readonly property var layoutProps: gridItem.windowLayout && gridItem.windowLayout[modelData.address] ? gridItem.windowLayout[modelData.address] : { x: 0, y: 0, width: 200, height: 150 }
-                            readonly property int cardWidth: layoutProps.width
-                            readonly property int thumbHeight: layoutProps.height
                             readonly property real windowAspect: {
                                 const w = modelData.width;
                                 const h = modelData.height;
                                 return (w > 0 && h > 0) ? (w / h) : (16.0 / 10.0);
                             }
+                            readonly property bool isSelected: page.index === listView.currentIndex && activeWin.index === root.selectedIndex && !root.activeInfoClient
+                            readonly property bool showCaption: height > 96 && (hover.hovered || isSelected)
+
+                            property bool closing: false
+                            property url infoScreenshot: ""
+                            /// Set by a workspace thumbnail's DropArea while the
+                            /// card hovers it, so the card shrinks to the size it
+                            /// would occupy there. 0 means "not over one".
+                            property real dropTargetScale: 0
+                            /// Over a workspace thumbnail: the preview collapses
+                            /// into the application's icon, the way a window does
+                            /// when it is dropped onto a workspace in GNOME. It is
+                            /// what the slot will actually contain once dropped, so
+                            /// the drag shows its own result; dragging back out
+                            /// reverses it.
+                            readonly property bool morphed: dragHandler.active && activeWin.dropTargetScale > 0
+
+                            // The pointer, not the card's middle. The card is held
+                            // wherever it was grabbed, so its centre sits at an
+                            // offset that drifts across boundaries on its own --
+                            // enough to cross the screen edge while the pointer was
+                            // still well inside it, which read as leaving the screen
+                            // and reset the edge dwell every time it wobbled.
+                            function publishDrag(): void {
+                                if (!dragHandler.active)
+                                    return;
+                                const p = dragHandler.centroid.scenePosition;
+                                Visibilities.setDrag(activeWin.clientAddress, root.screen.x + p.x, root.screen.y + p.y, activeWin.width, activeWin.height, root.screen.name);
+                            }
 
                             x: dragHandler.active ? x : layoutProps.x
                             y: dragHandler.active ? y : layoutProps.y
-                            implicitWidth: cardLayout.implicitWidth + Tokens.padding.medium * 2
-                            implicitHeight: cardLayout.implicitHeight + Tokens.padding.medium * 2
-                            color: "transparent"
+                            width: layoutProps.width
+                            height: layoutProps.height
+                            color: activeWin.morphed ? "transparent" : Colours.palette.m3surfaceContainer
                             radius: Tokens.rounding.large
+                            scale: {
+                                if (closing)
+                                    return 0;
+                                // Dragged onto a workspace thumbnail: shrink to
+                                // roughly what it will look like once dropped, so
+                                // the target reads as a target rather than the
+                                // card just floating over it.
+                                if (dragHandler.active && activeWin.dropTargetScale > 0)
+                                    return activeWin.dropTargetScale;
+                                return activeWin.isSelected && !dragHandler.active ? root.hoverScale : 1;
+                            }
+                            // Once the drag is over another screen that screen
+                            // draws it, and the half still poking out here would
+                            // otherwise sit there as a stream-less icon.
+                            opacity: closing || Visibilities.streamClaim === activeWin.clientAddress ? 0 : 1
+                            border.width: activeWin.isSelected && !activeWin.morphed ? 2 : 0
+                            border.color: Colours.palette.m3primary
+
+                            // Published on every move so the screen the pointer
+                            // has reached can draw what is coming; this one cannot
+                            // draw past its own edge.
+                            onXChanged: activeWin.publishDrag()
+                            onYChanged: activeWin.publishDrag()
+
                             Component.onCompleted: {
                                 root.cardItems = [...root.cardItems, activeWin];
+                                if (modelData && !DesktopEntries.heuristicLookup(modelData.iconName || modelData.class || "")) {
+                                    WinIcons.request(modelData.class, modelData.title, modelData.pid ?? 0, modelData.address ? String(modelData.address) : "");
+                                }
                             }
                             Component.onDestruction: {
                                 root.cardItems = root.cardItems.filter(x => x !== activeWin);
@@ -201,26 +488,226 @@ Item {
                                 onActiveChanged: {
                                     root.isDragging = active;
                                     if (!active) {
+                                        activeWin.dropTargetScale = 0;
+                                        Visibilities.clearDrag();
+                                        // Held back for the length of the drag; the
+                                        // desktop follows the page the drag landed on.
+                                        switchTimer.restart();
+
+                                        if (typeof KWinWorkspaceState === "undefined" || typeof KWinActiveWindowBridge === "undefined") return;
+
+                                        // Checked before Drag.drop(), not after.
+                                        // Each screen has its own overview in its
+                                        // own window, so a drag can never be handed
+                                        // to the other one's drop areas -- but the
+                                        // pointer does travel there and the card
+                                        // goes with it, so where it was let go is
+                                        // enough to act on. This one's drop areas
+                                        // still claim a release out there, though,
+                                        // and one of them answering first is what
+                                        // made a window dragged to the next monitor
+                                        // land on a workspace of the monitor it came
+                                        // from. Leaving the screen is the stronger
+                                        // signal, so it is read first.
+                                        const target = root.screenAtGlobal(Visibilities.dragX, Visibilities.dragY);
+                                        if (target && target.name !== root.screen.name) {
+                                            const addr = clientAddress;
+                                            activeWin.Drag.cancel();
+                                            activeWin.visible = false;
+                                            Qt.callLater(() => {
+                                                KWinActiveWindowBridge.sendToOutput(addr, target.name);
+                                            });
+                                            return;
+                                        }
+
                                         let dropAction = activeWin.Drag.drop();
                                         if (dropAction !== Qt.IgnoreAction) {
                                             return; // Handled by DropArea
                                         }
-                                        
-                                        if (typeof KWinWorkspaceState === "undefined" || typeof KWinActiveWindowBridge === "undefined") return;
+
                                         const targetWsId = KWinWorkspaceState.workspaces[listView.currentIndex].index;
                                         if (targetWsId !== page.wsId) {
                                             activeWin.visible = false;
-                                            KWinActiveWindowBridge.setWindowDesktop(clientAddress, targetWsId);
+                                            const addr = clientAddress;
+                                            Qt.callLater(() => {
+                                                KWinActiveWindowBridge.setWindowDesktop(addr, targetWsId);
+                                            });
                                         }
                                     }
                                 }
                             }
+                            Behavior on scale {
+                                // Slower while a drag is in progress: this is the
+                                // preview collapsing into its icon and opening back
+                                // out, which is meant to be read, not the snap of a
+                                // hover highlight.
+                                Anim {
+                                    type: dragHandler.active ? Anim.SlowSpatial : Anim.DefaultSpatial
+                                }
+                            }
+                            Behavior on opacity {
+                                NumberAnimation {
+                                    id: opacityAnim
+
+                                    duration: 250
+                                    easing.type: Easing.OutCubic
+                                }
+                            }
+                            Connections {
+                                function onRunningChanged() {
+                                    if (!opacityAnim.running && activeWin.closing) {
+                                        if (typeof KWinActiveWindowBridge !== "undefined") {
+                                            KWinActiveWindowBridge.closeWindow(modelData.address);
+                                        } else {
+                                            Hypr.dispatch(Hypr.usingLua ? `hl.dsp.window.close({ window = "address:0x${modelData.address}" })` : `closewindow address:0x${modelData.address}`);
+                                        }
+                                    }
+                                }
+
+                                target: opacityAnim
+                            }
                             Behavior on x { enabled: !dragHandler.active && root.opacity > 0.5; NumberAnimation { duration: 250; easing.type: Easing.OutQuad } }
                             Behavior on y { enabled: !dragHandler.active && root.opacity > 0.5; NumberAnimation { duration: 250; easing.type: Easing.OutQuad } }
-                            HoverHandler { id: hover }
+                            HoverHandler {
+                                id: hover
+
+                                onHoveredChanged: {
+                                    if (page.index === listView.currentIndex) {
+                                        if (hovered) {
+                                            root.selectedIndex = activeWin.index;
+                                        } else if (root.selectedIndex === activeWin.index) {
+                                            root.selectedIndex = -1;
+                                        }
+                                    }
+                                }
+                            }
+
+                            // The icon the card collapses into over a workspace
+                            // thumbnail. Sized as a share of the card so that the
+                            // card's own drop scale carries it down to icon size --
+                            // one animation drives both, and they cannot drift.
+                            IconImage {
+                                anchors.centerIn: parent
+                                asynchronous: true
+                                implicitSize: Math.round(Math.min(activeWin.width, activeWin.height) * 0.62)
+                                opacity: activeWin.morphed ? 1 : 0
+                                source: modelData.iconName ? Icons.getAppIcon(modelData.iconName, "image-missing") : (modelData.class ? Icons.getAppIcon(modelData.class, "image-missing") : "")
+                                visible: opacity > 0.01
+                                z: 10
+
+                                Behavior on opacity {
+                                    Anim {
+                                        type: Anim.SlowEffects
+                                    }
+                                }
+                            }
+
+                            Item {
+                                id: cardLayout
+
+                                anchors.fill: parent
+                                anchors.margins: Tokens.padding.small
+                                opacity: activeWin.morphed ? 0 : 1
+                                visible: opacity > 0.01
+
+                                Behavior on opacity {
+                                    Anim {
+                                        type: Anim.SlowEffects
+                                    }
+                                }
+
+                                StyledClippingRect {
+                                    id: thumb
+
+                                    anchors.top: parent.top
+                                    anchors.left: parent.left
+                                    anchors.right: parent.right
+                                    height: parent.height - (caption.opacity * (caption.implicitHeight + Tokens.padding.extraSmall * 2))
+                                    color: Colours.tPalette.m3surfaceContainerHighest
+                                    radius: Tokens.rounding.medium
+
+                                    WindowPreview {
+                                        // Only the page in view and its immediate
+                                        // neighbours: a workspace three swipes away
+                                        // is not worth a stream. The window shown in
+                                        // the info panel is excluded too -- that
+                                        // panel puts up its own frozen frame. And
+                                        // not while something outside the grid has
+                                        // claimed the stream: KWin serves one node
+                                        // per window and a node feeds one consumer,
+                                        // so holding on would leave the other one
+                                        // drawing black.
+                                        // The neighbour rule is about pages that
+                                        // cannot be seen, so it must not apply to a
+                                        // card being carried: a drag held across two
+                                        // pages left its own page two away, and the
+                                        // card in the user's hand collapsed to an
+                                        // icon mid-gesture.
+                                        active: root.opacity > 0
+                                            && (dragHandler.active || Math.abs(page.index - listView.currentIndex) <= 1)
+                                            && !(root.activeInfoClient && root.activeInfoClient.address === modelData.address)
+                                            && Visibilities.streamClaim !== modelData.address
+                                        address: modelData.address ?? ""
+                                        width: {
+                                            const wAspect = activeWin.windowAspect;
+                                            const containerAspect = thumb.width / Math.max(1, thumb.height);
+                                            return (wAspect > containerAspect) ? thumb.height * wAspect : thumb.width;
+                                        }
+                                        height: {
+                                            const wAspect = activeWin.windowAspect;
+                                            const containerAspect = thumb.width / Math.max(1, thumb.height);
+                                            return (wAspect > containerAspect) ? thumb.height : thumb.width / wAspect;
+                                        }
+                                        anchors.centerIn: parent
+                                        fallbackIcon: root.windowIconSource(modelData)
+                                        sourceAspect: activeWin.windowAspect
+                                    }
+
+                                    Image {
+                                        anchors.fill: parent
+                                        source: activeWin.infoScreenshot
+                                        visible: root.activeInfoClient && root.activeInfoClient.address === modelData.address && activeWin.infoScreenshot !== ""
+                                        fillMode: Image.PreserveAspectCrop
+                                    }
+                                }
+                                RowLayout {
+                                    id: caption
+
+                                    spacing: Tokens.spacing.small
+                                    opacity: activeWin.showCaption ? 1 : 0
+                                    visible: opacity > 0.01
+                                    anchors.left: parent.left
+                                    anchors.right: parent.right
+                                    anchors.bottom: parent.bottom
+                                    anchors.leftMargin: Tokens.padding.extraSmall
+                                    anchors.rightMargin: Tokens.padding.extraSmall
+                                    anchors.bottomMargin: Tokens.padding.extraSmall
+
+                                    Behavior on opacity { Anim {} }
+
+                                    IconImage {
+                                        implicitSize: Math.round(titleText.implicitHeight * 1.1)
+                                        asynchronous: true
+                                        source: root.windowIconSource(modelData)
+                                    }
+                                    StyledText {
+                                        id: titleText
+
+                                        text: modelData.title || modelData.class || ""
+                                        color: Colours.palette.m3primary
+                                        font: Tokens.font.body.small
+                                        elide: Text.ElideRight
+                                        Layout.fillWidth: true
+                                    }
+
+                                    Behavior on opacity { Anim {} }
+                                }
+                            }
+
                             StateLayer {
                                 anchors.fill: parent
                                 radius: Tokens.rounding.large
+                                stateOpacity: containsMouse || manualHoverOverride ? 0.02 : 0
                                 onClicked: {
                                     if (modelData.address) {
                                         if (typeof KWinActiveWindowBridge !== "undefined") {
@@ -229,158 +716,79 @@ Item {
                                             Hypr.dispatch(Hypr.usingLua ? `hl.dsp.focus({ window = "address:0x${modelData.address}" })` : `focuswindow address:0x${modelData.address}`);
                                         }
                                         if (typeof KWinWorkspaceState !== "undefined") {
-                                            KWinWorkspaceState.switchTo(page.wsId);
+                                            KWinWorkspaceState.switchTo(page.wsId, root.screen.name);
                                         }
                                     }
-                                    const v = typeof Visibilities !== "undefined" ? Visibilities.getForActive() : null;
-                                    if (v) v.overview = false;
+                                    if (typeof Visibilities !== "undefined")
+                                        Visibilities.setOverview(false);
                                 }
                             }
-                            ColumnLayout {
-                                id: cardLayout
 
-                                anchors.centerIn: parent
+                            RowLayout {
+                                anchors.top: cardLayout.top
+                                anchors.right: cardLayout.right
+                                anchors.margins: Tokens.padding.small
                                 spacing: Tokens.spacing.small
+                                // Hidden for the whole drag: it belongs to the
+                                // card sitting in the grid, and left up it hovers
+                                // over the collapsed icon with nothing to act on.
+                                opacity: hover.hovered && !dragHandler.active ? 1 : 0
+                                visible: opacity > 0.01
 
-                                StyledClippingRect {
-                                    id: thumb
+                                Behavior on opacity { Anim {} }
+                                StyledRect {
+                                    implicitWidth: infoIcon.implicitHeight + Tokens.padding.small * 2
+                                    implicitHeight: infoIcon.implicitHeight + Tokens.padding.small * 2
+                                    radius: Tokens.rounding.small
+                                    color: Colours.palette.m3secondaryContainer
 
-                                    property var streamRequest: null
-                                    readonly property int screencastSerial: streamRequest ? (streamRequest.objectSerial || streamRequest.nodeId) : 0
+                                    StateLayer {
+                                        anchors.fill: parent
+                                        radius: Tokens.rounding.small
 
-                                    function updateStream() {
-                                        const isStolen = root.activeInfoClient && root.activeInfoClient.address === modelData.address;
-                                        if (root.opacity > 0 && modelData.address && !isStolen) {
-                                            if (!streamRequest) {
-                                                streamRequest = ScreencastManager.requestStream(modelData.address);
-                                            }
-                                        } else {
-                                            if (streamRequest) {
-                                                ScreencastManager.releaseStream(modelData.address);
-                                                streamRequest = null;
-                                            }
+                                        onClicked: {
+                                            thumb.grabToImage(function(result) {
+                                                activeWin.infoScreenshot = result.url;
+                                                root.requestWindowInfo(modelData);
+                                            });
                                         }
                                     }
+                                    MaterialIcon {
+                                        id: infoIcon
 
-                                    color: Colours.tPalette.m3surfaceContainerHighest
-                                    radius: Tokens.rounding.large
-                                    Component.onCompleted: updateStream()
-                                    Component.onDestruction: {
-                                        if (streamRequest && modelData.address) {
-                                            ScreencastManager.releaseStream(modelData.address);
-                                        }
-                                    }
-
-                                    Connections {
-                                        function onOpacityChanged() {
-                                            thumb.updateStream();
-                                        }
-                                        function onActiveInfoClientChanged() {
-                                            thumb.updateStream();
-                                        }
-
-                                        target: root
-                                    }
-                                    IconImage {
                                         anchors.centerIn: parent
-                                        implicitSize: thumb.height * 0.5
-                                        asynchronous: true
-                                        visible: thumb.screencastSerial === 0
-                                        source: modelData.iconName ? Icons.getAppIcon(modelData.iconName, "image-missing") : (modelData.class ? Icons.getAppIcon(modelData.class, "image-missing") : "")
+                                        text: "chevron_right"
+                                        color: Colours.palette.m3onSecondaryContainer
+                                        fontStyle.pointSize: Tokens.font.body.medium.pointSize
                                     }
-                                    Pipewire.PipeWireSourceItem {
-                                        width: {
-                                            const wAspect = activeWin.windowAspect;
-                                            const containerAspect = thumb.width / Math.max(1, thumb.height);
-                                            return (wAspect > containerAspect) ? thumb.width : thumb.height * wAspect;
-                                        }
-                                        height: {
-                                            const wAspect = activeWin.windowAspect;
-                                            const containerAspect = thumb.width / Math.max(1, thumb.height);
-                                            return (wAspect > containerAspect) ? thumb.width / wAspect : thumb.height;
-                                        }
-                                        anchors.centerIn: parent
-                                        visible: thumb.screencastSerial !== 0
-                                        Component.onCompleted: {
-                                        if ("objectSerial" in this) {
-                                            this.objectSerial = Qt.binding(() => thumb.streamRequest ? thumb.streamRequest.objectSerial : 0)
-                                        } else if ("nodeId" in this) {
-                                            this.nodeId = Qt.binding(() => thumb.streamRequest ? thumb.streamRequest.nodeId : 0)
-                                        }
-                                    }
-                                    }
-                                    RowLayout {
-                                        anchors.top: parent.top
-                                        anchors.right: parent.right
-                                        anchors.margins: Tokens.padding.small
-                                        spacing: Tokens.spacing.small
-                                        opacity: hover.hovered ? 1 : 0
-                                        visible: opacity > 0.01
-
-                                        Behavior on opacity { Anim {} }
-                                        StyledRect {
-                                            implicitWidth: infoIcon.implicitHeight + Tokens.padding.small * 2
-                                            implicitHeight: infoIcon.implicitHeight + Tokens.padding.small * 2
-                                            radius: Tokens.rounding.small
-                                            color: Colours.palette.m3secondaryContainer
-
-                                            StateLayer {
-                                                anchors.fill: parent
-                                                radius: Tokens.rounding.small
-                                                onClicked: root.requestWindowInfo(modelData)
-                                            }
-                                            MaterialIcon {
-                                                id: infoIcon
-
-                                                anchors.centerIn: parent
-                                                text: "chevron_right"
-                                                color: Colours.palette.m3onSecondaryContainer
-                                                fontStyle.pointSize: Tokens.font.body.medium.pointSize
-                                            }
-                                        }
-                                        StyledRect {
-                                            implicitWidth: closeIcon.implicitHeight + Tokens.padding.small * 2
-                                            implicitHeight: closeIcon.implicitHeight + Tokens.padding.small * 2
-                                            radius: Tokens.rounding.small
-                                            color: Colours.palette.m3errorContainer
-
-                                            StateLayer {
-                                                anchors.fill: parent
-                                                radius: Tokens.rounding.small
-                                                onClicked: {
-                                                    if (modelData.address) {
-                                                        if (typeof KWinActiveWindowBridge !== "undefined") {
-                                                            KWinActiveWindowBridge.closeWindow(modelData.address);
-                                                        } else {
-                                                            Hypr.dispatch(Hypr.usingLua ? `hl.dsp.window.close({ window = "address:0x${modelData.address}" })` : `closewindow address:0x${modelData.address}`);
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            MaterialIcon {
-                                                id: closeIcon
-
-                                                anchors.centerIn: parent
-                                                text: "close"
-                                                color: Colours.palette.m3onErrorContainer
-                                                fontStyle.pointSize: Tokens.font.body.medium.pointSize
-                                            }
-                                        }
-                                    }
-                                    Layout.preferredWidth: activeWin.cardWidth
-                                    Layout.preferredHeight: activeWin.thumbHeight
                                 }
-                                StyledText {
-                                    id: titleText
+                                StyledRect {
+                                    implicitWidth: closeIcon.implicitHeight + Tokens.padding.small * 2
+                                    implicitHeight: closeIcon.implicitHeight + Tokens.padding.small * 2
+                                    radius: Tokens.rounding.small
+                                    color: Colours.palette.m3errorContainer
 
-                                    text: modelData.title || ""
-                                    color: Colours.palette.m3onSurfaceVariant
-                                    font: Tokens.font.body.small
-                                    elide: Text.ElideRight
-                                    horizontalAlignment: Text.AlignHCenter
-                                    Layout.preferredWidth: activeWin.cardWidth
+                                    StateLayer {
+                                        anchors.fill: parent
+                                        radius: Tokens.rounding.small
+                                        onClicked: {
+                                            if (modelData.address) {
+                                                activeWin.closing = true;
+                                                root.closingWindows = root.closingWindows.concat([modelData.address]);
+                                            }
+                                        }
+                                    }
+                                    MaterialIcon {
+                                        id: closeIcon
+
+                                        anchors.centerIn: parent
+                                        text: "close"
+                                        color: Colours.palette.m3onErrorContainer
+                                        fontStyle.pointSize: Tokens.font.body.medium.pointSize
+                                    }
                                 }
                             }
+
                             Drag.active: dragHandler.active
                             Drag.source: activeWin
                             Drag.hotSpot: dragHandler.centroid.position
@@ -388,6 +796,7 @@ Item {
                     }
                 }
             }
+
         Timer {
             id: switchTimer
 
@@ -395,8 +804,13 @@ Item {
             onTriggered: {
                 if (typeof KWinWorkspaceState !== "undefined" && KWinWorkspaceState.workspaces.length > listView.currentIndex) {
                     const wId = KWinWorkspaceState.workspaces[listView.currentIndex].index;
-                    if (KWinWorkspaceState.activeId !== wId) {
-                        KWinWorkspaceState.switchTo(wId);
+                    // Compared against this screen's desktop, not the global
+                    // activeId: with per-output desktops the global one belongs
+                    // to whichever screen is focused, so testing against it made
+                    // this fire on the screen that had not moved and stay quiet
+                    // on the one that had.
+                    if (root.activeWsId !== wId) {
+                        KWinWorkspaceState.switchTo(wId, root.screen.name);
                     }
                 }
             }
@@ -406,7 +820,7 @@ Item {
             acceptedButtons: Qt.NoButton
             onWheel: event => {
                 if (!Config.bar.scrollActions.workspaces) return;
-                
+
                 if (event.angleDelta.y > 0 || event.angleDelta.x > 0) {
                     if (listView.currentIndex > 0) {
                         listView.currentIndex -= 1;
@@ -418,7 +832,16 @@ Item {
                 }
             }
         }
+
+        Behavior on contentX {
+            enabled: root._initialized
+
+            NumberAnimation {
+                duration: rawSwipeOffset === 0.0 ? 300 : 0
+                easing.type: rawSwipeOffset === 0.0 ? Easing.OutCubic : Easing.Linear
+            }
         }
+    }
     StyledRect {
         id: indicatorContainer
 
@@ -435,8 +858,10 @@ Item {
 
             anchors.centerIn: parent
             maxWidth: Math.max(200, root.width - 100)
+            screenName: root.screen.name
             count: listView.count
             currentIndex: listView.currentIndex
+            closingWindows: root.closingWindows
             onWorkspaceSelected: index => {
                 root.ignoreNextSwitch = false;
                 listView.currentIndex = index;
@@ -459,33 +884,106 @@ Item {
         interval: 500
         onTriggered: root.ignoreNextSwitch = false
     }
-    Timer {
-        id: edgeScrollCooldown
+    // What a drag arriving from another screen looks like here.
+    //
+    // The card itself belongs to the overview it started in and is clipped at
+    // that screen's edge, so without this a window dragged across simply
+    // disappears halfway and is released onto nothing visible. This follows the
+    // published pointer position and shows the same live preview the card was
+    // showing, so the window keeps its identity across the gap rather than
+    // turning into an icon on the way.
+    Item {
+        id: incoming
 
-        interval: 1000
-    }
-    DropArea {
-        anchors.left: parent.left
-        anchors.top: parent.top
-        anchors.bottom: parent.bottom
-        width: 100
-        onEntered: {
-            if (!edgeScrollCooldown.running && listView.currentIndex > 0) {
-                listView.currentIndex -= 1;
-                edgeScrollCooldown.start();
+        readonly property var window: {
+            const addr = Visibilities.dragAddress;
+            if (!addr || typeof KWinActiveWindowBridge === "undefined")
+                return null;
+            const all = KWinActiveWindowBridge.windowList || [];
+            for (let i = 0; i < all.length; ++i)
+                if (all[i].address === addr)
+                    return all[i];
+            return null;
+        }
+        readonly property bool arriving: Visibilities.dragAddress !== ""
+            && Visibilities.dragOriginScreen !== root.screen.name
+            && Visibilities.dragX >= root.screen.x
+            && Visibilities.dragX < root.screen.x + root.screen.width
+            && Visibilities.dragY >= root.screen.y
+            && Visibilities.dragY < root.screen.y + root.screen.height
+        readonly property real aspect: {
+            const w = incoming.window;
+            if (w && w.width > 0 && w.height > 0)
+                return w.width / w.height;
+            return 16 / 9;
+        }
+
+        // The size the card had on the screen it left, so crossing the gap does
+        // not resize the thing being carried.
+        height: Visibilities.dragHeight > 0 ? Visibilities.dragHeight : Math.round(width / Math.max(0.2, incoming.aspect))
+        opacity: arriving ? 1 : 0
+        visible: opacity > 0.01
+        width: Visibilities.dragWidth > 0 ? Visibilities.dragWidth : Math.round(Math.min(root.width, root.height) * 0.32)
+        x: Visibilities.dragX - root.screen.x - width / 2
+        y: Visibilities.dragY - root.screen.y - height / 2
+        z: 1000
+
+        // Claimed while it is here so the card back on the origin screen gives
+        // the stream up; a node feeds one consumer.
+        onArrivingChanged: Visibilities.streamClaim = incoming.arriving ? Visibilities.dragAddress : ""
+
+        Behavior on opacity {
+            Anim {
+                type: Anim.DefaultEffects
+            }
+        }
+
+        StyledClippingRect {
+            anchors.fill: parent
+            color: Colours.palette.m3surfaceContainer
+            radius: Tokens.rounding.large
+
+            WindowPreview {
+                active: incoming.arriving
+                address: Visibilities.dragAddress
+                anchors.fill: parent
+                fallbackIcon: {
+                    const w = incoming.window;
+                    if (!w)
+                        return "";
+                    return w.iconName ? Icons.getAppIcon(w.iconName, "image-missing") : (w.class ? Icons.getAppIcon(w.class, "image-missing") : "");
+                }
+                sourceAspect: incoming.aspect
             }
         }
     }
-    DropArea {
-        anchors.right: parent.right
-        anchors.top: parent.top
-        anchors.bottom: parent.bottom
-        width: 100
-        onEntered: {
-            if (!edgeScrollCooldown.running && listView.currentIndex < listView.count - 1) {
+
+    // Holding a drag against an edge pages through workspaces, one step at a
+    // time for as long as it is held.
+    //
+    // It used to page the instant the drag touched the edge, which made the
+    // edge unusable as a way off the screen: on a side with another monitor,
+    // simply travelling towards it paged a workspace on the way past. Waiting
+    // for the drag to actually rest there separates the two gestures -- pass
+    // through and you reach the next monitor, stop and you page -- so both work
+    // on the same edge without a mode.
+    Timer {
+        id: edgeDwell
+
+        // running is bound rather than started and stopped by hand. A drag
+        // released while still inside an edge area never delivers an exit, so
+        // the stop call that was meant to pair with the start never arrived and
+        // the timer kept paging on its own long after the pointer was gone --
+        // workspaces flipping by themselves with nothing held. Tying it to the
+        // drag itself means it cannot outlive one.
+        interval: 900
+        repeat: true
+        running: root.isDragging && root.edgeDirection !== 0
+        onTriggered: {
+            if (root.edgeDirection < 0 && listView.currentIndex > 0)
+                listView.currentIndex -= 1;
+            else if (root.edgeDirection > 0 && listView.currentIndex < listView.count - 1)
                 listView.currentIndex += 1;
-                edgeScrollCooldown.start();
-            }
         }
     }
     StyledRect {

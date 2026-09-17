@@ -12,14 +12,16 @@ import qs.services
 Item {
     id: root
 
+    required property string screenName
     property int count: 0
     property int currentIndex: 0
     readonly property int activeWsId: currentIndex + 1
     property int maxWidth: 1000
     readonly property real requiredWidth: (count + 1) * 200 + count * Tokens.spacing.small
     readonly property real scaleFactor: requiredWidth > maxWidth ? maxWidth / requiredWidth : 1.0
-    property real swipeOffset: typeof KWinWorkspaceState !== "undefined" ? KWinWorkspaceState.swipeOffset : 0.0
+    property real swipeOffset: typeof KWinWorkspaceState !== "undefined" ? (KWinWorkspaceState.swipeOffsetByOutput?.[screenName] ?? KWinWorkspaceState.swipeOffset) : 0.0
     property bool isSwiping: false
+    property var closingWindows: []
     readonly property var occupied: {
         let occ = {};
         for (let i = 1; i <= root.count; ++i) {
@@ -29,6 +31,11 @@ Item {
         if (kwinList) {
             for (let i = 0; i < kwinList.length; ++i) {
                 const w = kwinList[i];
+                // Each window lives on one output; this strip describes one
+                // screen. Counting the other monitor's windows makes a desktop
+                // that is empty here look busy.
+                if (w.output !== root.screenName)
+                    continue;
                 if (w.workspace) {
                     const wid = typeof w.workspace.id === "number" ? w.workspace.id : (typeof w.workspace.index === "number" ? w.workspace.index : null);
                     if (wid !== null) occ[wid] = true;
@@ -101,6 +108,7 @@ Item {
                 activeWsId: root.activeWsId
                 workspaces: workspaces
                 mask: layout
+                screenName: root.screenName
             }
         }
         GridLayout {
@@ -121,10 +129,12 @@ Item {
                 WsComponents.Workspace {
                     scaleFactor: root.scaleFactor
                     activeWsId: root.activeWsId
+                    screenName: root.screenName
                     occupied: root.occupied
                     groupOffset: 0
                     swipeOffset: root.swipeOffset
                     isSwiping: root.isSwiping
+                    closingWindows: root.closingWindows
                     onSelected: root.workspaceSelected(ws - 1)
                     onReselected: root.workspaceReselected(ws - 1)
                 }
@@ -254,7 +264,7 @@ Item {
                                 }
                                 if (newActId !== actId) {
                                     const targetUuid = KWinWorkspaceState.workspaces[newActId - 1]?.id;
-                                    if (targetUuid) KWinWorkspaceState.switchTo(targetUuid);
+                                    if (targetUuid) KWinWorkspaceState.switchTo(targetUuid, root.screenName);
                                 }
                             }
                         }
