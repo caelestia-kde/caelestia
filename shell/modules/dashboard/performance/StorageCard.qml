@@ -1,3 +1,5 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Layouts
 import Quickshell
@@ -92,8 +94,8 @@ StyledRect {
                         if (!Storage.primaryDisk)
                             return qsTr("No disks detected");
 
-                        const fmt = UsageFmt.formatKib(Storage.primaryDisk.used, Storage.primaryDisk.total);
-                        return `${+fmt.value.toFixed(1)} / ${+fmt.total.toFixed(1)} ${fmt.unit}`;
+                        const fmt = Units.formatKibUsage(Storage.primaryDisk.used, Storage.primaryDisk.total);
+                        return fmt;
                     }
                     font: Tokens.font.body.large
                     color: root.accent

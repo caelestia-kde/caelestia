@@ -1,20 +1,20 @@
 pragma ComponentBehavior: Bound
 
+import QtQuick
 import QtQuick.Layouts
 import Caelestia.Config
+import qs.modules.bar
+import qs.modules.nexus
 import qs.modules.nexus.common
 
 PageBase {
     id: root
 
-    readonly property bool indicatorEnabled: {
-        const entries = GlobalConfig.bar.entries || [];
-        for (let i = 0; i < entries.length; i++) {
-            if (entries[i].id === "updateIndicator" && entries[i].enabled)
-                return true;
-        }
-        return false;
-    }
+    readonly property bool indicatorEnabled: BarPlacements.placementOf("updateIndicator") !== "off"
+
+    readonly property bool checkingOff: !GlobalConfig.general.checkUpdates
+
+    readonly property int updatesPageIdx: PageRegistry.updatesPageIdx
 
     title: qsTr("Updates")
     isSubPage: true
@@ -27,26 +27,27 @@ PageBase {
 
         ToggleRow {
             first: true
+            last: !root.checkingOff
             text: qsTr("Show update indicator")
-            subtext: qsTr("Always-visible icon in the taskbar that changes when a Caelestia update is available")
+            subtext: root.checkingOff
+                ? qsTr("Nothing to report while update checking is off")
+                : qsTr("Always-visible icon in the taskbar that changes when a Caelestia update is available")
             checked: root.indicatorEnabled
-            onToggled: {
-                const entries = GlobalConfig.bar.entries ? [...GlobalConfig.bar.entries] : [];
-                const idx = entries.findIndex(e => e.id === "updateIndicator");
-                if (idx >= 0)
-                    entries[idx] = { id: "updateIndicator", enabled: checked, zone: entries[idx].zone || "right" };
-                else
-                    entries.push({ id: "updateIndicator", enabled: checked, zone: "right" });
-                GlobalConfig.bar.entries = entries;
-            }
+            reset: ({
+                customGet: () => root.indicatorEnabled,
+                customDef: true,
+                customSet: v => BarPlacements.setShown("updateIndicator", v)
+            })
+            onToggled: BarPlacements.setShown("updateIndicator", checked)
         }
 
-        ToggleRow {
+        NavRow {
             last: true
-            text: qsTr("Enable update checking")
-            subtext: qsTr("Enables the update indicator and periodic checks (every 30 minutes)")
-            checked: GlobalConfig.general.checkUpdates
-            onToggled: GlobalConfig.general.checkUpdates = checked
+            visible: root.checkingOff
+            icon: "sync"
+            label: qsTr("Turn on update checking")
+            status: qsTr("Periodic checks and the indicator are off")
+            onClicked: root.nState.goToSubPage(root.updatesPageIdx, "updates")
         }
     }
 }

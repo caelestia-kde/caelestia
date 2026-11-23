@@ -20,10 +20,18 @@ namespace caelestia::config {
 
 ENUM(BarWorkspaceDisplay, Shapes, Text)
 ENUM(BarWorkspaceCapitalisation, Preserve, Upper, Lower)
+ENUM(DockWindowGrouping, Combined, PinnedFirst, Ungrouped)
+ENUM(LauncherBrowseLayout, Default, Simple, Compact)
+ENUM(LauncherNameOverflow, Tooltip, Shrink, Flip)
+ENUM(TabSwitchLayout, Caelestia, Grid)
 ENUM(LyricsBackend, Auto, Local, LRCLIB, NetEase)
 ENUM(GpuType, Auto, Nvidia, Generic, None)
 ENUM(NotifsFullscreen, On, Off)
 ENUM(NotifsMonitor, All, Focused)
+ENUM(TemperatureUnit, Auto, Celsius, Fahrenheit, Kelvin)
+ENUM(DataUnit, Binary, Decimal)
+ENUM(ClockFormat, Auto, TwelveHour, TwentyFourHour)
+ENUM(VisualiserInput, Output, Input)
 
 #undef ENUM
 

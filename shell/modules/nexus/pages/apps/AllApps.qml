@@ -8,12 +8,13 @@ import Caelestia.Config
 import qs.components
 import qs.services
 import qs.utils
+import qs.modules.launcher.services
 import qs.modules.nexus.common
 
 PageBase {
     id: root
 
-    title: qsTr("All apps")
+    title: qsTr("All Apps")
     isSubPage: true
 
     ColumnLayout {
@@ -25,7 +26,7 @@ PageBase {
         Repeater {
             id: list
 
-            model: [...DesktopEntries.applications.values].sort((a, b) => a.name.localeCompare(b.name))
+            model: Apps.alphaApps
 
             ConnectedRect {
                 id: appItem
@@ -41,7 +42,7 @@ PageBase {
                 StateLayer {
                     onClicked: {
                         root.nState.selectedApp = appItem.modelData;
-                        root.nState.openSubPage(2);
+                        root.nState.openSubPage("appInfo");
                     }
                 }
 
@@ -57,7 +58,7 @@ PageBase {
                     IconImage {
                         asynchronous: true
                         implicitSize: Math.round(Tokens.font.icon.large.pointSize * 1.8)
-                        source: Quickshell.iconPath(appItem.modelData.icon, "image-missing")
+                        source: WinIcons.sourceFor(appItem.modelData, "", appItem.modelData?.id ?? "", 0)
                     }
 
                     ColumnLayout {
@@ -76,7 +77,7 @@ PageBase {
                             visible: text
                             text: (appItem.modelData.comment || appItem.modelData.genericName) ?? ""
                             color: Colours.palette.m3onSurfaceVariant
-                            font: Tokens.font.label.small
+                            font: NexusStyle.secondaryFont
                             elide: Text.ElideRight
                         }
                     }

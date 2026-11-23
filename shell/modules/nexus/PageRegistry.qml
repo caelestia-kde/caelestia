@@ -3,90 +3,154 @@ pragma Singleton
 import QtQuick
 import qs.utils
 import "../../utils/scripts/fzf.js" as Fzf
+import qs.modules.nexus
 
 QtObject {
     id: root
 
-    readonly property list<var> pages: PageDictionary.pages
+    readonly property int updatesPageIdx: Math.max(0, PageCompRegistry.categoryIdxForKey("updates"))
+    readonly property var pages: PageCompRegistry.categories
 
     property var searchIndex: []
+    property var allPages: []
+    property var _entriesFinder: null
+    property var _pagesFinder: null
 
-    function buildIndex() {
+    function buildIndex(): void {
         let index = [];
-        pages.forEach((page, pageIdx) => {
-            // Add the parent page itself to the index
-            index.push({
-                settingLabel: page.label,
-                settingDescription: page.description || "",
-                pageIdx: pageIdx,
-                subPageIdx: -1,
-                pageLabel: qsTr("Main Page"),
-                pageIcon: page.icon,
-                searchText: [page.label, page.description, page.category].filter(Boolean).join(" ")
+        let indexedPages = [];
+        const categories = PageCompRegistry.categories;
+
+        for (let catIdx = 0; catIdx < categories.length; catIdx++) {
+            const cat = categories[catIdx];
+            indexedPages.push({
+                page: cat,
+                pageIdx: cat.categoryIdx
             });
 
-            if (!page.settings) return;
-            page.settings.forEach((setting) => {
-                const keywords = setting.keywords ? setting.keywords.join(" ") : "";
+            if (!cat.singlePage) {
                 index.push({
-                    settingLabel: setting.label,
-                    settingDescription: setting.description || "",
-                    pageIdx: pageIdx,
-                    subPageIdx: setting.subPageIdx !== undefined ? setting.subPageIdx : -1,
-                    pageLabel: page.label,
-                    pageIcon: page.icon,
-                    searchText: [setting.label, setting.description, page.label, page.category, keywords].filter(Boolean).join(" ")
+                    settingLabel: cat.label,
+                    settingDescription: cat.description || "",
+                    pageIdx: cat.categoryIdx,
+                    subPage: "hub",
+                    pageLabel: qsTr("Main Page"),
+                    pageIcon: cat.icon,
+                    searchText: [cat.label, cat.description, cat.key].filter(Boolean).join(" ")
                 });
+            }
+
+            const pages = cat.pages || [];
+            for (let pIdx = 0; pIdx < pages.length; pIdx++) {
+                const page = pages[pIdx];
+                const pageKeywords = (page.keywords || []).join(" ");
+
+                index.push({
+                    settingLabel: page.label,
+                    settingDescription: page.description || page.status || "",
+                    pageIdx: cat.categoryIdx,
+                    subPage: page.key,
+                    pageLabel: cat.label,
+                    pageIcon: cat.icon,
+                    sectionLabel: page.section || "",
+                    searchText: [page.label, page.description, page.status, cat.label, pageKeywords].filter(Boolean).join(" ")
+                });
+
+                const subs = page.subPages || [];
+                for (let sIdx = 0; sIdx < subs.length; sIdx++) {
+                    const sub = subs[sIdx];
+                    const subKeywords = (sub.keywords || []).join(" ");
+
+                    index.push({
+                        settingLabel: sub.label,
+                        settingDescription: "",
+                        pageIdx: cat.categoryIdx,
+                        subPage: sub.key,
+                        pageLabel: cat.label,
+                        pageIcon: cat.icon,
+                        sectionLabel: page.label,
+                        searchText: [sub.label, page.label, cat.label, subKeywords].filter(Boolean).join(" ")
+                    });
+                }
+            }
+        }
+
+        const named = {};
+        for (let i = 0; i < index.length; i++) {
+            const entry = index[i];
+            named[`${entry.pageIdx}|${entry.subPage}|${entry.settingLabel.toLowerCase()}`] = true;
+        }
+
+        PageRowIndex.rows.forEach(row => {
+            if (named[`${row.pageIdx}|${row.subPage}|${row.label.toLowerCase()}`])
+                return;
+            const cat = categories[row.pageIdx];
+            if (!cat)
+                return;
+            index.push({
+                settingLabel: row.label,
+                settingDescription: row.description || "",
+                pageIdx: row.pageIdx,
+                subPage: row.subPage,
+                pageLabel: cat.label,
+                pageIcon: cat.icon,
+                sectionLabel: row.section || "",
+                searchText: [row.label, row.description, row.section, cat.label].filter(Boolean).join(" ")
             });
         });
-        searchIndex = index;
-    }
 
-    Component.onCompleted: {
-        buildIndex();
+        allPages = indexedPages;
+        searchIndex = index;
+        _entriesFinder = new Fzf.Finder(searchIndex, {
+            selector: e => e.searchText
+        });
+        _pagesFinder = new Fzf.Finder(allPages, {
+            selector: e => [e.page.label, e.page.description, e.page.key].filter(Boolean).join(" ")
+        });
     }
 
     function fuzzyPages(query: string): list<var> {
-        const indexed = pages.map((page, pageIdx) => ({
-            page,
-            pageIdx
-        }));
-
         const search = query.trim().replace(/\s+/g, " ");
         if (!search)
-            return indexed;
+            return allPages;
+        if (!_pagesFinder)
+            return [];
 
-        const selector = e => [e.page.label, e.page.description, e.page.category].filter(Boolean).join(" ");
-        const finder = new Fzf.Finder(indexed, {
-            selector
-        });
-        return finder.find(search).sort((a, b) => {
-            if (a.score === b.score)
-                return selector(a.item).trim().length - selector(b.item).trim().length;
+        const results = _pagesFinder.find(search);
+        results.sort((a, b) => {
+            if (a.score === b.score) {
+                const aLen = [a.item.page.label, a.item.page.description, a.item.page.key].filter(Boolean).join(" ").length;
+                const bLen = [b.item.page.label, b.item.page.description, b.item.page.key].filter(Boolean).join(" ").length;
+                return aLen - bLen;
+            }
             return b.score - a.score;
-        }).map(r => r.item);
+        });
+        return results.slice(0, 30).map(r => r.item);
     }
 
     function fuzzyEntries(query: string): list<var> {
         const search = query.trim().replace(/\s+/g, " ");
-        if (!search)
+        if (!search || !_entriesFinder)
             return [];
 
-        const selector = e => e.searchText;
-        const finder = new Fzf.Finder(searchIndex, {
-            selector
-        });
-        return finder.find(search).sort((a, b) => {
+        const results = _entriesFinder.find(search);
+        results.sort((a, b) => {
             if (a.score === b.score)
-                return selector(a.item).trim().length - selector(b.item).trim().length;
+                return a.item.searchText.trim().length - b.item.searchText.trim().length;
             return b.score - a.score;
-        }).map(r => r.item);
+        });
+        return results.slice(0, 30).map(r => r.item);
     }
 
     function indexForKey(key: string): int {
-        for (let i = 0; i < pages.length; i++) {
-            if (pages[i].key === key) return i;
-        }
-        return -1;
+        return PageCompRegistry.categoryIdxForKey(key);
+    }
+
+    function defaultSubPageForKey(key: string): string {
+        return PageCompRegistry.defaultPageForCategoryKey(key);
+    }
+
+    Component.onCompleted: {
+        buildIndex();
     }
 }

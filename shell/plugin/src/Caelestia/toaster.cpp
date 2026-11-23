@@ -14,21 +14,19 @@ Toast::Toast(const QString& title, const QString& message, const QString& icon, 
     , m_icon(icon)
     , m_type(type)
     , m_timeout(timeout) {
-    QTimer::singleShot(timeout, this, &Toast::close);
-
     if (m_icon.isEmpty()) {
         switch (m_type) {
         case Type::Success:
-            m_icon = "radio_button_checked_unread";
+            m_icon = QStringLiteral("radio_button_checked_unread");
             break;
         case Type::Warning:
-            m_icon = "warning";
+            m_icon = QStringLiteral("warning");
             break;
         case Type::Error:
-            m_icon = "error";
+            m_icon = QStringLiteral("error");
             break;
         default:
-            m_icon = "info";
+            m_icon = QStringLiteral("info");
             break;
         }
     }
@@ -46,6 +44,8 @@ Toast::Toast(const QString& title, const QString& message, const QString& icon, 
             break;
         }
     }
+
+    QTimer::singleShot(m_timeout, this, &Toast::close);
 }
 
 bool Toast::closed() const {

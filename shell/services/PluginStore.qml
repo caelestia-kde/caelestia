@@ -5,6 +5,8 @@ import QtQuick
 import QtCore
 import Quickshell
 import Quickshell.Io
+import Caelestia
+import Caelestia.Services
 
 Item {
     id: storeRoot
@@ -15,23 +17,61 @@ Item {
 
     property bool installing: false
     property string installProgress: ""
+    property string installError: ""
+
+    // id of the plugin currently being installed, for per-row progress feedback
+    property string installingId: ""
+    property var updatesAvailable: []
 
     property bool restartRequired: false
 
-    // Predicted installed state — seeded once from disk scan on startup,
-    // then mutated purely by user actions (no re-scanning at runtime).
     property var installedPluginIds: []
     property bool baselineLoaded: false
 
-    // Raw index from the server
     property var indexData: null
     property ListModel storePlugins: ListModel {}
 
     signal indexFetched()
     signal installedStateChanged()
 
+    function compareVersions(a, b) {
+        const pa = String(a || "").split(".");
+        const pb = String(b || "").split(".");
+        const len = Math.max(pa.length, pb.length);
+        for (let i = 0; i < len; i++) {
+            const na = parseInt(pa[i], 10);
+            const va = isNaN(na) ? 0 : na;
+            const nb = parseInt(pb[i], 10);
+            const vb = isNaN(nb) ? 0 : nb;
+            if (va !== vb)
+                return va < vb ? -1 : 1;
+        }
+        return 0;
+    }
+
+    function checkForUpdates() {
+        const installed = {};
+        for (let i = 0; i < CaelestiaApi.plugins.available.count; i++) {
+            const p = CaelestiaApi.plugins.available.get(i);
+            installed[p.id || p.name] = p.version || "";
+        }
+        const updates = [];
+        for (let i = 0; i < storePlugins.count; i++) {
+            const sp = storePlugins.get(i);
+            const id = sp.pluginId || sp.id;
+            if (id && installed[id] !== undefined && compareVersions(installed[id], sp.version) < 0)
+                updates.push(id);
+        }
+        updatesAvailable = updates;
+        if (updates.length === 1) {
+            Toaster.toast(qsTr("Plugin update available"), qsTr("1 plugin can be updated"), "update");
+        } else if (updates.length > 1) {
+            Toaster.toast(qsTr("Plugin updates available"), qsTr("%1 plugins can be updated").arg(updates.length), "update");
+        }
+    }
+
     function fetchIndex(branch) {
-        let fetchBranch = branch || "main";
+        let fetchBranch = isValidRef(branch) ? branch : "main";
         loading = true;
         error = false;
         errorMessage = "";
@@ -48,18 +88,51 @@ Item {
             console.log("PluginStore: baseline seeded in fetchIndex:", JSON.stringify(ids));
         }
 
-        fetchProc.command = ["curl", "-sfL", "https://raw.githubusercontent.com/ladybug-me/caelestia-kde-plugins/" + fetchBranch + "/index.json"];
+        fetchProc.command = ["curl", "-sfL", "https://raw.githubusercontent.com/caelestia-kde/plugins/" + fetchBranch + "/index.json"];
         fetchProc.running = true;
     }
 
+    // Store ids come from a remote index and become filesystem paths, so only
+    // plain directory names are accepted.
+    function isValidPluginId(id) {
+        return typeof id === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id) && !id.includes("..");
+    }
+
+    // The ref comes from the same remote index and is handed to git as a refspec. A name
+    // git would read as an option, or one carrying a range, is not a branch anyone
+    // publishes, so it is refused before it reaches the command line.
+    function isValidRef(ref) {
+        return typeof ref === "string" && ref.length <= 128 && /^[A-Za-z0-9][A-Za-z0-9._\/-]*$/.test(ref) && !ref.includes("..");
+    }
+
+    // A plugin is cloned from a URL the user typed. Only the two transports that name a
+    // host are offered, and nothing git or the shell would treat as an option.
+    function isValidGitUrl(url) {
+        if (typeof url !== "string" || url === "" || url.length > 2048)
+            return false;
+        if (/[\s]/.test(url) || url.startsWith("-") || url.includes(".."))
+            return false;
+        return /^https:\/\/[A-Za-z0-9._~:\/?#\[\]@!$&'()*+,;=%-]+$/.test(url)
+            || /^git@[A-Za-z0-9._-]+:[A-Za-z0-9._\/-]+$/.test(url);
+    }
+
     function installPlugin(id, repoPath, branch, restart) {
-        if (!id) return;
+        if (!isValidPluginId(id)) {
+            console.warn("PluginStore: refusing to install plugin with unsafe id:", id);
+            return;
+        }
 
-        let installBranch = branch || "main";
+        let installBranch = isValidRef(branch) ? branch : "main";
+        if (installBranch !== (branch || "main"))
+            console.warn("PluginStore: refusing unsafe branch name, using main instead:", branch);
 
-        let actualRepoPath = repoPath || ("plugins/" + id);
+        // repoPath must be a relative path inside the store repo. Installed plugins
+        // report an absolute *install* dir as their path, which must never be used
+        // here - it would make the clone step target itself and wipe the plugin.
+        let actualRepoPath = (typeof repoPath === "string" && repoPath !== "" && !repoPath.startsWith("/") && !repoPath.includes("..")) ? repoPath : ("plugins/" + id);
 
         installing = true;
+        installingId = id;
         installProgress = "Cloning plugin '" + id + "'...";
 
         let targetDir = (Quickshell.env("XDG_CONFIG_HOME") || (Quickshell.env("HOME") + "/.config")) + "/caelestia/plugins/" + id;
@@ -68,28 +141,40 @@ Item {
 TMP_DIR=$(mktemp -d)
 cd "$TMP_DIR"
 git init -q
-git remote add origin https://github.com/ladybug-me/caelestia-kde-plugins.git
+git remote add origin https://github.com/caelestia-kde/plugins.git
 git config core.sparseCheckout true
-echo "${actualRepoPath}/*" >> .git/info/sparse-checkout
-git fetch -q --depth 1 --filter=blob:none origin "${installBranch}"
-git reset --hard -q "origin/${installBranch}"
-mkdir -p "$(dirname "${targetDir}")"
-rm -rf "${targetDir}"
-mv "${actualRepoPath}" "${targetDir}"
+echo "$2/*" >> .git/info/sparse-checkout
+git fetch -q --depth 1 --filter=blob:none origin "$3"
+git reset --hard -q "origin/$3"
+test -d "$2"
+# The row the user approved named this id; a plugin whose own metadata claims another
+# one would be loaded under an identity nobody was shown.
+INSTALLED_ID=$(jq -r '.id // empty' "$2/metadata.json" 2>/dev/null || true)
+if [ "$INSTALLED_ID" != "$1" ]; then
+    echo "metadata.json names '$INSTALLED_ID', not '$1'" >&2
+    rm -rf "$TMP_DIR"
+    exit 1
+fi
+mkdir -p "$(dirname "$4")"
+rm -rf "$4"
+mv "$2" "$4"
 rm -rf "$TMP_DIR"
 echo "DONE"`;
 
         installProc.pendingId = id;
         installProc.pendingTargetDir = targetDir;
         installProc.pendingRestart = (restart === "true" || restart === true);
-        installProc.command = ["bash", "-c", script];
+        installProc.command = ["bash", "-c", script, "--", id, actualRepoPath, installBranch, targetDir];
         installProc.running = true;
     }
 
     function removePlugin(id) {
+        if (!isValidPluginId(id)) {
+            console.warn("PluginStore: refusing to remove plugin with unsafe id:", id);
+            return;
+        }
         let targetDir = (Quickshell.env("XDG_CONFIG_HOME") || (Quickshell.env("HOME") + "/.config")) + "/caelestia/plugins/" + id;
         removeProc.pendingId = id;
-        // Determine whether this plugin requires a restart when removed.
         let requiresRestart = false;
         for (let i = 0; i < CaelestiaApi.plugins.available.count; i++) {
             let p = CaelestiaApi.plugins.available.get(i);
@@ -107,9 +192,11 @@ echo "DONE"`;
         target: PluginLoader
 
         function onPluginsReloaded() {
-            // Only seed once from the startup scan
-            if (storeRoot.baselineLoaded)
+            if (storeRoot.baselineLoaded) {
+                if (storeRoot.indexData)
+                    storeRoot.checkForUpdates();
                 return;
+            }
             storeRoot.baselineLoaded = true;
             let ids = [];
             let av = CaelestiaApi.plugins.available;
@@ -119,8 +206,6 @@ echo "DONE"`;
             console.log("PluginStore: baseline loaded, installed:", JSON.stringify(ids));
         }
     }
-
-    // ── 1. Fetch store index ──────────────────────────────────────────────────
 
     Process {
         id: fetchProc
@@ -140,8 +225,6 @@ echo "DONE"`;
                     let plugins = storeRoot.indexData.plugins || [];
                     for (let i = 0; i < plugins.length; i++) {
                         let p = plugins[i];
-                        // Rename 'id' to 'pluginId' to avoid clash with QML's reserved 'id' keyword
-                        // in ComponentBehavior:Bound delegates
                         p.pluginId = p.id;
                         p.path = p.path || ("plugins/" + p.id);
                         p.mediaurl = p.mediaurl || "";
@@ -152,6 +235,7 @@ echo "DONE"`;
                         storeRoot.storePlugins.append(p);
                     }
                     storeRoot.indexFetched();
+                    storeRoot.checkForUpdates();
                 } catch (e) {
                     storeRoot.error = true;
                     storeRoot.errorMessage = "Failed to parse index JSON: " + e;
@@ -160,7 +244,60 @@ echo "DONE"`;
         }
     }
 
-    // ── 2. Install a plugin ───────────────────────────────────────────────────
+
+    function installFromUrl(url) {
+        if (!isValidGitUrl(url)) {
+            installError = qsTr("Enter a valid git URL");
+            return;
+        }
+
+        installing = true;
+        installError = "";
+        installProgress = qsTr("Cloning plugin...");
+
+        const targetBase = (Quickshell.env("XDG_CONFIG_HOME") || (Quickshell.env("HOME") + "/.config")) + "/caelestia/plugins";
+        const script = `set -e
+TMP_DIR=$(mktemp -d)
+git clone -q --depth 1 "$1" "$TMP_DIR"
+ID=$(jq -r .id "$TMP_DIR/metadata.json")
+if ! [[ "$ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || [[ "$ID" == *..* ]]; then echo "invalid plugin id: $ID" >&2; rm -rf "$TMP_DIR"; exit 1; fi
+mkdir -p "$2"
+rm -rf "$2/$ID"
+mv "$TMP_DIR" "$2/$ID"
+echo "INSTALLED:$ID:$2/$ID"`;
+
+        sourceProc.command = ["bash", "-c", script, "--", url, targetBase];
+        sourceProc.running = true;
+    }
+
+    Process {
+        id: sourceProc
+
+        stdout: StdioCollector { id: sourceOut }
+        stderr: StdioCollector { id: sourceErr }
+
+        onExited: (code) => {
+            storeRoot.installing = false;
+            if (code !== 0) {
+                const err = (sourceErr.text || sourceOut.text || "").trim().split("\n");
+                storeRoot.installError = err[err.length - 1] || qsTr("Install failed");
+                console.log("PluginStore: source install error:", sourceErr.text, sourceOut.text);
+            } else {
+                const match = /INSTALLED:([^:]+):(.+)/.exec(sourceOut.text || "");
+                if (!match) {
+                    storeRoot.installError = qsTr("Install failed");
+                    return;
+                }
+                console.log("PluginStore: source install success for", match[1]);
+                storeRoot.restartRequired = true;
+                let ids = storeRoot.installedPluginIds.slice();
+                if (ids.indexOf(match[1]) === -1)
+                    ids.push(match[1]);
+                storeRoot.installedPluginIds = ids;
+                PluginLoader.addPluginToAvailable(match[1], match[2], "user");
+            }
+        }
+    }
 
     Process {
         id: installProc
@@ -174,25 +311,22 @@ echo "DONE"`;
 
         onExited: (code) => {
             storeRoot.installing = false;
+            storeRoot.installingId = "";
             if (code !== 0) {
                 console.log("PluginStore: install error for", installProc.pendingId, ":", installErr.text, installOut.text);
             } else {
                 console.log("PluginStore: install success for", installProc.pendingId);
                 if (installProc.pendingRestart)
                     storeRoot.restartRequired = true;
-                // Track as installed for UI prediction (predicted post-restart state)
                 let ids = storeRoot.installedPluginIds.slice();
                 if (ids.indexOf(installProc.pendingId) === -1)
                     ids.push(installProc.pendingId);
                 storeRoot.installedPluginIds = ids;
                 console.log("PluginStore: installedPluginIds now:", JSON.stringify(ids));
-                // Also add to installed tab list
                 PluginLoader.addPluginToAvailable(installProc.pendingId, installProc.pendingTargetDir, "user");
             }
         }
     }
-
-    // ── 3. Remove a user plugin ───────────────────────────────────────────────
 
     Process {
         id: removeProc
@@ -203,13 +337,11 @@ echo "DONE"`;
         onExited: (code) => {
             if (removeProc.pendingRestart)
                 storeRoot.restartRequired = true;
-            // Remove from predicted installed set
             let ids = storeRoot.installedPluginIds.slice();
             let idx = ids.indexOf(removeProc.pendingId);
             if (idx !== -1) ids.splice(idx, 1);
             storeRoot.installedPluginIds = ids;
             console.log("PluginStore: removed", removeProc.pendingId, "installedPluginIds now:", JSON.stringify(ids));
-            // Also drop from the installed tab list model
             PluginLoader.removePluginFromAvailable(removeProc.pendingId);
         }
     }

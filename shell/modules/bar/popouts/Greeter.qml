@@ -18,7 +18,6 @@ Item {
 
     required property PopoutState popouts
 
-    // Injected by Content.qml's Popout.
     property real scaleOffset: 1.0
     property real fontScale: 1.0
     property bool _isSidebarOpen: false
@@ -255,7 +254,7 @@ Item {
             property: "maskRadius"
             from: 0
             to: mediaItem.maxRadius
-            duration: 1800
+            duration: Tokens.anim.duration(1800)
             easing.type: Easing.OutCubic
         }
     }

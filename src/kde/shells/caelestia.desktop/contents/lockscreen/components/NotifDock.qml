@@ -1,9 +1,4 @@
 
-/*
-    SPDX-FileCopyrightText: 2024 ladybug-me
-    SPDX-License-Identifier: GPL-3.0-or-later
-*/
-
 import QtQuick
 import ".."
 import QtQuick.Layouts
@@ -46,16 +41,16 @@ Rectangle {
     }
 
     function formatNotifTime(timeStr) {
-        if (!timeStr) return "now";
+        if (!timeStr) return qsTr("now");
         try {
             var t = new Date(timeStr);
             var diff = Math.floor((new Date() - t) / 1000);
-            if (isNaN(diff) || diff < 60) return "now";
-            if (diff < 3600) return Math.floor(diff / 60) + "m";
-            if (diff < 86400) return Math.floor(diff / 3600) + "h";
-            return Math.floor(diff / 86400) + "d";
+            if (isNaN(diff) || diff < 60) return qsTr("now");
+            if (diff < 3600) return Math.floor(diff / 60) + qsTr("m");
+            if (diff < 86400) return Math.floor(diff / 3600) + qsTr("h");
+            return Math.floor(diff / 86400) + qsTr("d");
         } catch(e) {
-            return "now";
+            return qsTr("now");
         }
     }
 
@@ -70,7 +65,7 @@ Rectangle {
         for (var i = 0; i < list.length; i++) {
             var n = list[i];
             if (n.closed) continue;
-            var app = n.appName || "Notifications";
+            var app = n.appName || qsTr("Notifications");
             if (!map[app]) {
                 map[app] = {
                     appName: app,
@@ -109,7 +104,6 @@ Rectangle {
     color: clSurfaceContainer
     clip: true
 
-    // Header
     RowLayout {
         id: headerRow
         anchors.left: parent.left
@@ -124,10 +118,10 @@ Rectangle {
             Text {
                 Layout.fillWidth: true
                 text: root.hideNotifs
-                      ? "Unlock for Notifications"
+                      ? qsTr("Unlock for Notifications")
                       : (root.liveNotifs.length > 0
-                          ? (root.liveNotifs.length + (root.liveNotifs.length === 1 ? " notification" : " notifications"))
-                          : "Notifications")
+                          ? (root.liveNotifs.length + (root.liveNotifs.length === 1 ? qsTr(" notification") : qsTr(" notifications")))
+                          : qsTr("Notifications"))
                 font { pixelSize: LockScreenConfig.sizeSmall; family: LockScreenConfig.fontBody; weight: Font.Medium }
                 color: root.clOutline
                 elide: Text.ElideRight
@@ -163,7 +157,6 @@ Rectangle {
             }
         }
 
-        // Empty/idle state: show DinoGame when there are no notifications.
         Loader {
             id: dinoLoader
             z: 1
@@ -174,7 +167,6 @@ Rectangle {
             anchors.margins: 16 * centerScale
             anchors.topMargin: 12 * centerScale
 
-            // Active when hideNotifs is set, or empty, or while game is running, or system DND is enabled
             active: root.hideNotifs || root.liveNotifs.length === 0 || isGameRunning || root.isSystemDndEnabled
             readonly property bool isGameRunning: item !== null && item.isPlaying === true
 
@@ -193,14 +185,12 @@ Rectangle {
                     anchors.centerIn: parent
                     width: dinoLoader.width
                     height: 200
-                    // Wire palette so the dino matches card colors
                     activeColor: root.clSurfaceVariantFg
                     isCaelestiaMode: root.isCaelestiaMode
                 }
             }
         }
 
-        // Categorized Notifications List
         ListView {
             id: notifListView
             anchors.left: parent.left
@@ -261,7 +251,6 @@ Rectangle {
                     anchors.margins: 12 * root.centerScale
                     spacing: 12 * root.centerScale
 
-                    // Icon / Image Container (44px)
                     Item {
                         Layout.alignment: Qt.AlignTop
                         implicitWidth: 44 * root.centerScale
@@ -300,7 +289,6 @@ Rectangle {
                             }
                         }
 
-                        // App Badge when both image and appIcon exist
                         Rectangle {
                             anchors.right: parent.right
                             anchors.bottom: parent.bottom
@@ -322,12 +310,10 @@ Rectangle {
                         }
                     }
 
-                    // Content Column
                     ColumnLayout {
                         Layout.fillWidth: true
                         spacing: 4 * root.centerScale
 
-                        // Group Header Row
                         RowLayout {
                             Layout.fillWidth: true
                             spacing: 8 * root.centerScale
@@ -346,7 +332,6 @@ Rectangle {
                                 color: root.clOutline
                             }
 
-                            // Expand / Collapse Pill Button (if > 3 notifications)
                             Rectangle {
                                 id: expandPill
                                 visible: modelData.notifs.length > 3
@@ -382,7 +367,6 @@ Rectangle {
                             }
                         }
 
-                        // Notification Lines
                         Repeater {
                             model: groupCard.expanded ? modelData.notifs : modelData.notifs.slice(0, 3)
 

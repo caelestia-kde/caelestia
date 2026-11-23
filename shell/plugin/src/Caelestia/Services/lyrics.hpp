@@ -1,11 +1,13 @@
 #pragma once
 
-#include "lyriccandidate.hpp"
-
 #include <qhash.h>
 #include <qjsonobject.h>
 #include <qnetworkaccessmanager.h>
 #include <qnetworkreply.h>
+
+#include <functional>
+
+#include "lyriccandidate.hpp"
 
 namespace caelestia::services {
 
@@ -20,6 +22,7 @@ class Lyrics : public QObject {
     QML_SINGLETON
 
     Q_PROPERTY(QStringList lyrics READ lyrics NOTIFY lyricsChanged)
+    Q_PROPERTY(bool romanizationAvailable READ romanizationAvailable CONSTANT)
     Q_PROPERTY(caelestia::services::LyricsBackend::Backend backend READ backend NOTIFY backendChanged)
     Q_PROPERTY(caelestia::services::LyricsBackend::Backend preferredBackend READ preferredBackend WRITE
             setPreferredBackend NOTIFY preferredBackendChanged)
@@ -28,7 +31,7 @@ class Lyrics : public QObject {
     Q_PROPERTY(caelestia::services::LyricCandidate selectedCandidate READ selectedCandidate WRITE setSelectedCandidate
             NOTIFY selectedCandidateChanged)
     Q_PROPERTY(bool loading READ loading NOTIFY loadingChanged)
-    Q_PROPERTY(bool hasLyrics READ hasLyrics NOTIFY lyricsChanged)
+    Q_PROPERTY(bool hasLyrics READ hasLyrics NOTIFY hasLyricsChanged)
     Q_PROPERTY(qreal offset READ offset WRITE setOffset NOTIFY offsetChanged)
     Q_PROPERTY(QString trackArtist READ trackArtist NOTIFY trackChanged)
     Q_PROPERTY(QString trackTitle READ trackTitle NOTIFY trackChanged)
@@ -37,6 +40,7 @@ public:
     explicit Lyrics(QObject* parent = nullptr);
 
     [[nodiscard]] QStringList lyrics() const;
+    [[nodiscard]] bool romanizationAvailable() const;
     [[nodiscard]] LyricsBackend::Backend backend() const;
     [[nodiscard]] LyricsBackend::Backend preferredBackend() const;
     void setPreferredBackend(LyricsBackend::Backend value);
@@ -70,10 +74,12 @@ signals:
     void trackChanged();
 
 private:
+    friend class LyricsTest;
     void setBackend(LyricsBackend::Backend value);
     void setLoading(bool value);
     void setLines(QVector<LyricLine> lines, LyricsBackend::Backend source);
     void clearLines();
+    void updateDisplayLyrics();
     void appendCandidates(const QList<LyricCandidate>& add);
     void clearCandidates();
 
@@ -82,12 +88,15 @@ private:
     void cancelInFlight();
     int newRequestId();
 
+    void tryPreferred(int reqId);
+    void candidateFailed(int reqId);
+    bool retryRequest(QNetworkReply* reply, int reqId, std::function<void()> retry);
     void tryLocal(int reqId);
     void tryLrclib(int reqId);
     void tryNetEase(int reqId);
     void chainNext(LyricsBackend::Backend just_failed, int reqId);
 
-    void searchLrclibCandidates(int reqId);
+    void searchLrclibCandidates(int reqId, bool fallback = false);
     void searchNetEaseCandidates(int reqId);
 
     void fetchLrclibById(const QString& id, int reqId);
@@ -142,6 +151,8 @@ private:
     QJsonObject m_lyricsMap;
     bool m_lyricsMapLoaded = false;
     bool m_settingFromPrefs = false;
+    bool m_restoringCandidate = false;
+    QHash<QUrl, int> m_retries;
 };
 
 } // namespace caelestia::services

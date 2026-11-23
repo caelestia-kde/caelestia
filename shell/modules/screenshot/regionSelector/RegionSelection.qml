@@ -6,7 +6,9 @@ import Qt.labs.synchronizer
 import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
+import Caelestia.Config
 import Caelestia.Services
+import qs.components
 import qs.services
 import qs.utils
 
@@ -18,7 +20,7 @@ PanelWindow {
     WlrLayershell.namespace: "osd"
     WlrLayershell.layer: WlrLayer.Overlay
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
-    
+
 
 
     exclusionMode: ExclusionMode.Ignore
@@ -43,15 +45,13 @@ PanelWindow {
 
     signal dismiss()
 
-    // Reset per-session state when the overlay is closed
     onDismiss: {
         root.snapshotWorkspaceId = 0;
         root.snapshotWorkspaceUuid = "";
         root.lastHoverFocusedAddress = "";
     }
 
-    // Styles
-    property string screenshotDir: `${Quickshell.env("XDG_RUNTIME_DIR") || "/tmp"}/caelestia-screenshot`
+    property string screenshotDir: Paths.runtimeTemp("screenshot")
 
     property color overlayColor: Qt.rgba("#000000".r, "#000000".g, "#000000".b, 1.0 - 0.4)
 
@@ -69,10 +69,6 @@ PanelWindow {
 
     property real targetRegionOpacity: 0.6
 
-    // Vars for indicators
-    // Snapshot of the active workspace when the overlay opened — used to filter
-    // windows so that hover-focus actions never cause workspace switching that
-    // would update this filter mid-session.
     property int snapshotWorkspaceId: 0
     property string snapshotWorkspaceUuid: ""
 
@@ -82,22 +78,18 @@ PanelWindow {
         const useSnapshot = root.snapshotWorkspaceId > 0 || root.snapshotWorkspaceUuid !== "";
         const target = useSnapshot
             ? (root.snapshotWorkspaceUuid !== "" ? root.snapshotWorkspaceUuid : root.snapshotWorkspaceId)
-            : (typeof KWinWorkspaceState !== "undefined" ? KWinWorkspaceState.activeId : 0);
+            : Kwin.activeWsId;
 
         // windowsForWorkspace owns the workspace-field semantics (numeric id /
         // uuid, -1 = all workspaces), so hover-focus cannot drift the filter.
-        const arr = Array.from(typeof KWinActiveWindowBridge !== "undefined"
-            ? KWinActiveWindowBridge.windowsForWorkspace(target)
-            : []);
+        const arr = Array.from(Kwin.windowsForWorkspace(target));
 
         return arr.sort((a, b) => {
-            // Sort floating=true windows before others
             if (a.floating === b.floating) return 0;
             return a.floating ? -1 : 1;
         });
     }
 
-    // Screen & interaction vars
     readonly property real monitorScale: (frozenImage.sourceSize.width > 0 && root.screen.width > 0) ? (frozenImage.sourceSize.width / root.screen.width) : (screen.devicePixelRatio || 1.0)
 
     readonly property real monitorOffsetX: screen.x || 0
@@ -141,14 +133,12 @@ PanelWindow {
         }
     })
 
-    // Config
     property bool isCircleSelection: (root.selectionMode === RegionSelection.SelectionMode.Circle)
 
     property bool showWindowOutlines: false
 
     property bool enableWindowRegions: showWindowOutlines && !isCircleSelection
 
-    // Target
     property real targetedRegionX: -1
 
     property real targetedRegionY: -1
@@ -157,13 +147,10 @@ PanelWindow {
 
     property real targetedRegionHeight: 0
 
-    // The address (uuid) of the window currently under the cursor in window-outline mode
     property string targetedWindowAddress: ""
 
-    // Tracks the last window we focused on hover — avoids redundant focus calls
     property string lastHoverFocusedAddress: ""
 
-    // Debounce timer: focus the hovered window shortly after the mouse enters it
     Timer {
         id: focusHoverTimer
 
@@ -172,12 +159,11 @@ PanelWindow {
         onTriggered: {
             if (root.showWindowOutlines && root.targetedWindowAddress
                     && root.targetedWindowAddress !== root.lastHoverFocusedAddress) {
-                // Verify the window is still on the current workspace before focusing
                 const stillVisible = root.windowRegions.some(
                     r => r.address === root.targetedWindowAddress
                 );
                 if (stillVisible) {
-                    KWinActiveWindowBridge.focusWindow(root.targetedWindowAddress);
+                    Kwin.focusWindow(root.targetedWindowAddress);
                     root.lastHoverFocusedAddress = root.targetedWindowAddress;
                 }
             }
@@ -189,7 +175,7 @@ PanelWindow {
     }
 
     function setRegionToTargeted() {
-        const padding = 0; // Make borders not cut off n stuff
+        const padding = 0;
         root.regionX = root.targetedRegionX - padding;
         root.regionY = root.targetedRegionY - padding;
         root.regionWidth = root.targetedRegionWidth + padding * 2;
@@ -197,7 +183,6 @@ PanelWindow {
     }
 
     function updateTargetedRegion(x, y) {
-        // Window regions — pick the smallest (most specific) window containing the cursor
         let clickedWindow = null;
         let smallestArea = Infinity;
         for (const region of root.windowRegions) {
@@ -240,25 +225,24 @@ PanelWindow {
 
     property real regionY: Math.min(dragStartY, draggingY)
 
-    // Screenshot stuff
     TempScreenshotProcess {
-        id: screenshotProc
-
         running: true
         screen: root.screen
         screenshotDir: root.screenshotDir
         screenshotPath: root.screenshotPath
         onExited: (exitCode, exitStatus) => {
-            // Refresh the shared recorder probe so the stop-before-snip check
-            // below sees the freshest state.
             Recorder.probeRecording();
+            if (exitCode !== 0) {
+                console.warn("[RegionSelection] snapshot failed with exit code", exitCode, "- backing out");
+                root.dismiss();
+                return;
+            }
             root.preparationDone = true;
         }
     }
 
     property bool isRecording: root.action === ScreenshotAction.SnipAction.Record || root.action === ScreenshotAction.SnipAction.RecordWithSound
 
-    // A recording is already active: entering region-select toggles it off.
     property bool recordingShouldStop: root.isRecording && Recorder.running
 
     property bool preparationDone: false
@@ -270,19 +254,17 @@ PanelWindow {
     onPreparationDoneChanged: {
         if (!preparationDone) return;
         if (root.isRecording && root.recordingShouldStop) {
-            Launch.exec([Paths.absolutePath("~/.local/bin/caelestia-record")]);
+            Launch.exec([Paths.bin("caelestia-record")]);
             root.dismiss();
             return;
         }
         root.frozenImageSource = "file://" + root.screenshotPath;
-        // Freeze the workspace context so hover-focus never shifts the filter
-        if (typeof KWinWorkspaceState !== "undefined") {
-            const snapId = KWinWorkspaceState.activeId;
-            root.snapshotWorkspaceId = snapId;
-            const snapIdx = snapId > 0 ? snapId - 1 : 0;
-            root.snapshotWorkspaceUuid = KWinWorkspaceState.workspaces[snapIdx]
-                ? KWinWorkspaceState.workspaces[snapIdx].id : "";
-        }
+const snapId = Kwin.activeWsId;
+root.snapshotWorkspaceId = snapId;
+const snapIdx = snapId > 0 ? snapId - 1 : 0;
+root.snapshotWorkspaceUuid = Kwin.workspaces[snapIdx]
+    ? Kwin.workspaces[snapIdx].id : "";
+
         root.visible = true;
         mouseArea.forceActiveFocus();
     }
@@ -295,17 +277,14 @@ PanelWindow {
 
     property bool screenshotConsumed: false
 
-    // Execution after selection
     function snip() {
         root.screenshotConsumed = true;
 
-        // Clamp region to screen bounds
         root.regionX = Math.max(0, Math.min(root.regionX, root.screen.width - root.regionWidth));
         root.regionY = Math.max(0, Math.min(root.regionY, root.screen.height - root.regionHeight));
         root.regionWidth = Math.max(0, Math.min(root.regionWidth, root.screen.width - root.regionX));
         root.regionHeight = Math.max(0, Math.min(root.regionHeight, root.screen.height - root.regionY));
 
-        // Adjust action
         if (root.action === ScreenshotAction.SnipAction.Copy || root.action === ScreenshotAction.SnipAction.Edit) {
             root.action = root.mouseButton === Qt.RightButton ? ScreenshotAction.SnipAction.Edit : ScreenshotAction.SnipAction.Copy;
         }
@@ -327,17 +306,15 @@ PanelWindow {
         }
     }
 
-    // Window screenshot via spectacle — focuses the target window then calls spectacle -b -a
     function snipWindow(windowAddress) {
         root.screenshotConsumed = true;
 
-        const saveDir = `${Paths.absolutePath("~/Pictures/Screenshots")}`;
+        const saveDir = GlobalConfig.paths.screenshotsDir;
         const saveFile = `${saveDir}/screenshot-$(date +%Y-%m-%d_%H.%M.%S).png`;
 
-        // Determine spectacle flags based on action
         let spectacleFlags = "-b -a -n";
         if (root.mouseButton === Qt.RightButton || root.action === ScreenshotAction.SnipAction.Edit) {
-            spectacleFlags = "-b -a -n -e"; // exclude decorations on right-click (edit)
+            spectacleFlags = "-b -a -n -e";
         }
 
         const tmpFile = Paths.runtimeTemp(`snip-window-${Date.now()}.png`);
@@ -351,16 +328,13 @@ PanelWindow {
             `spectacle ${spectacleFlags} -o '${tmpFile}' && ${actionScript}`
         ];
 
-        // Focus the window, dismiss overlay, then shoot after a short delay
         if (windowAddress) {
-            KWinActiveWindowBridge.focusWindow(windowAddress);
+            Kwin.focusWindow(windowAddress);
         }
         root.dismiss();
-        // Small delay so the window has time to come to front before spectacle fires
         Qt.callLater(() => { Quickshell.execDetached(command); });
     }
 
-    // Only clickable in Selection phase
     mask: Region {
         item: switch(root.phase) {
             case RegionSelection.Phase.Select: return mouseArea;
@@ -368,13 +342,12 @@ PanelWindow {
         }
     }
 
-    Image { // For freezing
+    Image {
         id: frozenImage
 
         anchors.fill: parent
         source: root.frozenImageSource
         cache: false
-        // In window-outline mode hide the frozen frame so the live desktop shows through
         visible: root.phase === RegionSelection.Phase.Select && !root.showWindowOutlines
     }
 
@@ -395,7 +368,6 @@ PanelWindow {
         acceptedButtons: Qt.LeftButton | Qt.RightButton
         hoverEnabled: true
 
-        // Controls
         onPressed: (mouse) => {
             mouse.accepted = true;
             root.mouseButton = mouse.button;
@@ -418,13 +390,11 @@ PanelWindow {
             }
 
             root.dragging = false;
-            // Detect if it was a click -> Try to select targeted region
             if (root.draggingX === root.dragStartX && root.draggingY === root.dragStartY) {
                 if (root.targetedRegionValid()) {
                     root.setRegionToTargeted();
                 }
             }
-            // Circle dragging?
             else if (root.selectionMode === RegionSelection.SelectionMode.Circle) {
                 const padding = 0 + 2 / 2;
                 const dragPoints = (root.points.length > 0) ? root.points : [{ x: mouseArea.mouseX, y: mouseArea.mouseY }];
@@ -478,7 +448,6 @@ PanelWindow {
             }
         }
 
-        // The thing to the bottom-right with an icon
         CursorGuide {
             z: 9999
             active: !root.showWindowOutlines && root.phase === RegionSelection.Phase.Select && root.visible
@@ -488,7 +457,6 @@ PanelWindow {
             selectionMode: root.selectionMode
         }
 
-        // Window regions
         Repeater {
             model: ScriptModel {
                 values: {
@@ -514,15 +482,11 @@ PanelWindow {
                     && root.targetedRegionHeight === modelData.size[1])
                 opacity: root.draggedAway ? 0 : (root.targetedRegionValid() && !targeted ? 0 : root.targetRegionOpacity)
                 borderColor: root.windowBorderColor
-                // Fade alpha to 0 instead of the literal "transparent" string,
-                // which would animate RGB through black via TargetRegion's
-                // Behavior on color.
                 fillColor: targeted ? root.windowFillColor : Qt.alpha(root.windowFillColor, 0)
-                radius: 12
+                radius: Tokens.rounding.medium
             }
         }
 
-        // Controls
         Row {
             id: regionSelectionControls
 
@@ -545,10 +509,10 @@ PanelWindow {
                 }
             }
             Behavior on opacity {
-                animation: NumberAnimation { duration: 200; easing.type: Easing.OutQuad }
+                animation: Anim { type: Anim.DefaultEffects }
             }
             Behavior on anchors.bottomMargin {
-                animation: NumberAnimation { duration: 300; easing.type: Easing.OutQuad }
+                animation: Anim { type: Anim.FastSpatial }
             }
 
             spacing: 6
@@ -567,6 +531,8 @@ PanelWindow {
                 onDismiss: root.dismiss();
             }
             IconButton {
+                id: fullscreenBtn
+
                 anchors.verticalCenter: parent.verticalCenter
                 icon: "fullscreen"
                 onClicked: {
@@ -578,28 +544,32 @@ PanelWindow {
                 }
 
                 Tooltip {
-                    target: parent
+                    parent: fullscreenBtn.Window.contentItem
+                    target: fullscreenBtn
                     text: qsTr("Full Screen Screenshot")
                 }
             }
-            // Confirm snip button — appears after a region is drawn
             IconButton {
+                id: confirmBtn
+
                 anchors.verticalCenter: parent.verticalCenter
                 visible: root.regionConfirmPending
                 icon: "check"
                 onClicked: root.snip();
 
                 Tooltip {
-                    target: parent
+                    parent: confirmBtn.Window.contentItem
+                    target: confirmBtn
                     text: qsTr("Snip selected region (Enter)")
                 }
             }
             IconButton {
+                id: closeBtn
+
                 anchors.verticalCenter: parent.verticalCenter
                 icon: "close"
                 onClicked: {
                     if (root.regionConfirmPending) {
-                        // Reset selection — let user redraw
                         root.regionConfirmPending = false;
                         root.regionWidth = 0;
                         root.regionHeight = 0;
@@ -609,7 +579,8 @@ PanelWindow {
                 }
 
                 Tooltip {
-                    target: parent
+                    parent: closeBtn.Window.contentItem
+                    target: closeBtn
                     text: root.regionConfirmPending ? qsTr("Clear selection") : qsTr("Close")
                 }
             }

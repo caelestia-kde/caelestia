@@ -1,0 +1,188 @@
+pragma ComponentBehavior: Bound
+
+import QtQuick
+import Quickshell
+import Quickshell.Io
+import Caelestia.Config
+import qs.components
+import qs.services
+import qs.utils
+
+// One file in ~/Desktop: its metadata, what to show for it and how to open it.
+Scope {
+    id: root
+
+    required property string fileName
+    required property string filePath
+    required property bool fileIsDir
+    required property string fileSuffix
+    required property var fileModified
+    required property var fileSize
+
+    readonly property string key: DesktopLayout.fileKey(fileName)
+    readonly property string path: filePath.replace("file://", "")
+    readonly property string url: "file://" + path.split("/").map(encodeURIComponent).join("/")
+    readonly property bool isDesktopFile: fileName.toLowerCase().endsWith(".desktop")
+    readonly property string kind: fileIsDir ? "dir" : "file"
+    // Rough type for "Sort by type": launchers together, then by extension.
+    readonly property string typeName: isDesktopFile ? " application" : fileIsDir ? "" : fileSuffix.toLowerCase()
+
+    property string desktopName: ""
+    // The Name key the label was read from, e.g. "Name[zh_CN]".
+    property string desktopNameKey: "Name"
+    property bool desktopNameFound: false
+    property string desktopIcon: ""
+    property var desktopCategories: []
+
+    readonly property string displayName: {
+        if (!isDesktopFile)
+            return fileName;
+        if (desktopNameFound)
+            return desktopName;
+        return desktopEntry?.name || fileName.slice(0, -8);
+    }
+
+    readonly property DesktopEntry desktopEntry: {
+        if (!isDesktopFile)
+            return null;
+        const cleanId = fileName.slice(0, -8);
+        return DesktopEntries.applications.values.find(e => e.id === fileName || e.id === cleanId || e.id + ".desktop" === fileName)
+            ?? DesktopEntries.heuristicLookup(cleanId)
+            ?? null;
+    }
+
+    readonly property var categories: desktopCategories.length > 0 ? desktopCategories : (desktopEntry?.categories ?? [])
+
+    readonly property string iconName: {
+        if (fileIsDir)
+            return "folder";
+        if (isDesktopFile)
+            return desktopIcon || desktopEntry?.icon || "application-x-executable";
+        const ext = fileSuffix.toLowerCase();
+        if (ext === "pdf")
+            return "application-pdf";
+        if (["png", "jpg", "jpeg", "gif", "svg", "webp", "bmp"].includes(ext))
+            return "image-x-generic";
+        if (["mp4", "mkv", "webm", "avi", "mov"].includes(ext))
+            return "video-x-generic";
+        if (["zip", "tar", "gz", "rar", "7z"].includes(ext))
+            return "package-x-generic";
+        if (["mp3", "wav", "flac", "ogg"].includes(ext))
+            return "audio-x-generic";
+        if (["qml", "js", "html", "css", "py", "sh", "cpp", "c", "h", "json"].includes(ext))
+            return "text-x-script";
+        return "text-x-generic";
+    }
+
+    // Launcher icon name or absolute path, empty for plain files.
+    readonly property string appIcon: isDesktopFile ? (desktopEntry?.icon || desktopIcon) : ""
+
+    // Extra paths to hand to gio launch alongside the launcher, kept between the
+    // trust check and the launch that follows it.
+    property var pendingLaunchPaths: []
+
+    function iconSource(materialYou: bool): string {
+        const setBase = Qt.resolvedUrl(Quickshell.shellDir + "/assets/icons/yet-another-monochrome-icon-set");
+        if (appIcon !== "") {
+            if (appIcon.startsWith("/"))
+                return "file://" + appIcon;
+            if (materialYou)
+                return setBase + "/apps/scalable/" + appIcon + ".svg";
+            return Quickshell.iconPath(appIcon, "application-x-executable");
+        }
+        if (materialYou) {
+            if (fileIsDir)
+                return setBase + "/places/scalable/folder.svg";
+            return setBase + "/mimetypes/scalable/" + iconName + ".svg";
+        }
+        return "image://icon/" + iconName;
+    }
+
+    function fallbackIconSource(): string {
+        if (appIcon !== "") {
+            if (appIcon.startsWith("/"))
+                return "file://" + appIcon;
+            return Quickshell.iconPath(appIcon, "application-x-executable");
+        }
+        return "image://icon/" + iconName;
+    }
+
+    function launch(): void {
+        if (!isDesktopFile) {
+            Launch.exec(["xdg-open", path]);
+            return;
+        }
+        root.pendingLaunchPaths = [];
+        trustCheck.running = true;
+    }
+
+    // Opens files with this launcher, as when they are dropped onto it.
+    function launchWith(paths: var): void {
+        if (!isDesktopFile)
+            return;
+        root.pendingLaunchPaths = paths;
+        trustCheck.running = true;
+    }
+
+    function reloadDesktopFile(): void {
+        desktopFile.reload();
+    }
+
+    // KDE treats a launcher as trusted when it is owned by root or carries the
+    // executable bit, and asks the user to trust a download first. `gio launch`
+    // would run Exec on a double-click without that prompt, so the same check is
+    // made here. The file is run itself: its name need not match an installed app
+    // id, and xdg-open would open it in an editor instead.
+    Process {
+        id: trustCheck
+
+        running: false
+        command: ["sh", "-c", 'f=$(readlink -f -- "$1" 2>/dev/null) || exit 1; [ -f "$f" ] || exit 1; if [ -x "$f" ] || [ "$(stat -c %u -- "$f" 2>/dev/null)" = 0 ]; then exit 0; fi; exit 1', "trust-check", root.path]
+        onExited: code => {
+            if (code === 0) {
+                Launch.exec(["gio", "launch", root.path, ...root.pendingLaunchPaths]);
+            } else {
+                Logger.log("[Desktop] Refusing to run untrusted launcher: " + root.path);
+                Toaster.toast(qsTr("This launcher is not trusted"), qsTr("Mark %1 as executable before running it.").arg(root.fileName), "warning");
+            }
+            root.pendingLaunchPaths = [];
+        }
+    }
+
+    FileView {
+        id: desktopFile
+
+        path: root.isDesktopFile ? root.path : ""
+        watchChanges: true
+        printErrors: false
+        onFileChanged: reload()
+        onLoaded: {
+            // Prefer Name[lang_COUNTRY], then Name[lang], then Name, as the spec says.
+            const locale = Qt.locale().name;
+            const nameKeys = [`Name[${locale}]`, `Name[${locale.split("_")[0]}]`, "Name"];
+            const values = {};
+            let inDesktopEntry = false;
+            for (const raw of text().split("\n")) {
+                const line = raw.trim();
+                if (line.startsWith("[")) {
+                    inDesktopEntry = line === "[Desktop Entry]";
+                    continue;
+                }
+                const eq = line.indexOf("=");
+                if (!inDesktopEntry || eq < 0)
+                    continue;
+                const key = line.substring(0, eq).trim();
+                if (!(key in values))
+                    values[key] = line.substring(eq + 1).trim();
+            }
+            const nameKey = nameKeys.find(k => values[k]);
+            root.desktopNameFound = !!nameKey;
+            if (nameKey) {
+                root.desktopName = values[nameKey];
+                root.desktopNameKey = nameKey;
+            }
+            root.desktopIcon = values["Icon"] ?? "";
+            root.desktopCategories = (values["Categories"] ?? "").split(";").filter(c => c.length > 0);
+        }
+    }
+}

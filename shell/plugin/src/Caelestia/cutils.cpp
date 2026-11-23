@@ -1,9 +1,9 @@
 #include "cutils.hpp"
 
 #include <QtConcurrent/qtconcurrentrun.h>
-#include <qcryptographichash.h>
 #include <QtQuick/qquickitemgrabresult.h>
 #include <QtQuick/qquickwindow.h>
+#include <qcryptographichash.h>
 #include <qdir.h>
 #include <qfile.h>
 #include <qfileinfo.h>
@@ -11,10 +11,15 @@
 #include <qloggingcategory.h>
 #include <qqmlengine.h>
 #include <qregularexpression.h>
-#include <QStandardPaths>
-#include <KWindowEffects>
+#include <qsavefile.h>
+#include <qtextstream.h>
+
 #include <KModifierKeyInfo>
+#include <KWindowEffects>
 #include <QCursor>
+#include <QStandardPaths>
+
+#include "util/metaenum.hpp"
 
 Q_LOGGING_CATEGORY(lcCUtils, "caelestia.cutils", QtInfoMsg)
 
@@ -97,6 +102,12 @@ void CUtils::saveItem(QQuickItem* target, const QUrl& path, const QRect& rect, Q
     }
 
     const QSharedPointer<const QQuickItemGrabResult> grabResult = target->grabToImage();
+    if (!grabResult) {
+        // grabToImage() returns null when the item's window is hidden or otherwise
+        // not renderable; connecting to a null result would warn and never fire.
+        qCWarning(lcCUtils) << "saveItem: failed to grab" << target;
+        return;
+    }
 
     QObject::connect(grabResult.data(), &QQuickItemGrabResult::ready, this,
         [grabResult, scaledRect, path, onSaved, onFailed, this]() {
@@ -189,7 +200,64 @@ QString CUtils::sha256(const QString& path) {
     hash.addData(&file);
     file.close();
 
-    return hash.result().toHex();
+    return QString::fromLatin1(hash.result().toHex());
+}
+
+bool CUtils::setDesktopEntryKey(const QString& path, const QString& key, const QString& value) {
+    if (path.isEmpty() || key.isEmpty()) {
+        return false;
+    }
+
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        return false;
+    }
+
+    QTextStream in(&file);
+    QStringList lines;
+    int headerIndex = -1;
+    QString currentGroup;
+    bool found = false;
+
+    while (!in.atEnd()) {
+        QString line = in.readLine();
+        const QString trimmed = line.trimmed();
+        if (trimmed.startsWith(QLatin1Char('['))) {
+            currentGroup = trimmed;
+            if (currentGroup == QLatin1String("[Desktop Entry]") && headerIndex == -1) {
+                headerIndex = lines.size();
+            }
+        } else if (currentGroup == QLatin1String("[Desktop Entry]")) {
+            const int eq = trimmed.indexOf(QLatin1Char('='));
+            if (eq > 0 && trimmed.left(eq).trimmed() == key) {
+                line = key + QLatin1Char('=') + value;
+                found = true;
+            }
+        }
+        lines.append(line);
+    }
+    file.close();
+
+    if (!found) {
+        if (headerIndex == -1) {
+            lines.append(QStringLiteral("[Desktop Entry]"));
+            lines.append(key + QLatin1Char('=') + value);
+        } else {
+            lines.insert(headerIndex + 1, key + QLatin1Char('=') + value);
+        }
+    }
+
+    QSaveFile outFile(path);
+    if (!outFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        return false;
+    }
+
+    QTextStream out(&outFile);
+    for (int i = 0; i < lines.size(); ++i) {
+        out << lines.at(i) << "\n";
+    }
+
+    return outFile.commit();
 }
 
 void CUtils::enableBlurBehind(QQuickWindow* window, bool enable) {
@@ -204,6 +272,22 @@ qreal CUtils::clamp(qreal value, qreal min, qreal max) {
 
 void CUtils::setCursorPos(int x, int y) {
     QCursor::setPos(x, y);
+}
+
+QString CUtils::enumToString(const QVariant& value) {
+    const auto type = value.metaType();
+    if (!util::isSupportedEnum(type)) {
+        qCWarning(lcCUtils, "enumToString: %s is not a supported enum", type.isValid() ? type.name() : "the value");
+        return {};
+    }
+
+    const auto* key = util::enumKeyFor(util::metaEnumFor(type), value);
+    if (!key) {
+        qCWarning(lcCUtils, "enumToString: no enumerator of %s has the value %lld", type.name(), value.toLongLong());
+        return {};
+    }
+
+    return QString::fromUtf8(key);
 }
 
 #ifndef CAELESTIA_VERSION
@@ -235,7 +319,8 @@ bool CUtils::isAltPressed() const {
 }
 
 bool CUtils::isMetaPressed() const {
-    return d->keyInfo.isKeyPressed(Qt::Key_Meta) || d->keyInfo.isKeyPressed(Qt::Key_Super_L) || d->keyInfo.isKeyPressed(Qt::Key_Super_R);
+    return d->keyInfo.isKeyPressed(Qt::Key_Meta) || d->keyInfo.isKeyPressed(Qt::Key_Super_L) ||
+           d->keyInfo.isKeyPressed(Qt::Key_Super_R);
 }
 
 bool CUtils::isCtrlPressed() const {
@@ -252,15 +337,17 @@ bool CUtils::isShortcutModifierPressed(const QString& shortcutKey) const {
     }
     const QString upper = shortcutKey.toUpper();
     const bool hasAlt = upper.contains(QLatin1String("ALT"));
-    const bool hasMeta = upper.contains(QLatin1String("META")) || upper.contains(QLatin1String("SUPER")) || upper.contains(QLatin1String("WIN"));
+    const bool hasMeta = upper.contains(QLatin1String("META")) || upper.contains(QLatin1String("SUPER")) ||
+                         upper.contains(QLatin1String("WIN"));
     const bool hasCtrl = upper.contains(QLatin1String("CTRL")) || upper.contains(QLatin1String("CONTROL"));
 
-    // Check primary holding modifiers
-    if (hasAlt && isAltPressed()) return true;
-    if (hasMeta && isMetaPressed()) return true;
-    if (hasCtrl && isCtrlPressed()) return true;
+    if (hasAlt && isAltPressed())
+        return true;
+    if (hasMeta && isMetaPressed())
+        return true;
+    if (hasCtrl && isCtrlPressed())
+        return true;
 
-    // If none of the standard primary holding modifiers are in the shortcut, check shift if specified
     if (!hasAlt && !hasMeta && !hasCtrl) {
         if (upper.contains(QLatin1String("SHIFT"))) {
             return isShiftPressed();
@@ -268,14 +355,11 @@ bool CUtils::isShortcutModifierPressed(const QString& shortcutKey) const {
         return isAltPressed();
     }
 
-    // A primary modifier is defined in the shortcut, but is not currently pressed
     return false;
 }
 
 namespace {
 
-// Unlike QObject::findChild, this walks parentItem/childItems relationships so
-// it traverses the QML visual hierarchy.
 template <typename Predicate> QQuickItem* findChildDfs(QQuickItem* root, Predicate&& match) {
     const auto children = root->childItems();
     for (QQuickItem* const child : children) {
@@ -289,8 +373,6 @@ template <typename Predicate> QQuickItem* findChildDfs(QQuickItem* root, Predica
     return nullptr;
 }
 
-// DFS over the visual item tree, appending every descendant matching the
-// predicate to out.
 template <typename Predicate> void findChildrenDfs(QQuickItem* root, Predicate&& match, QList<QQuickItem*>& out) {
     const auto children = root->childItems();
     for (QQuickItem* const child : children) {
@@ -316,9 +398,12 @@ QQuickItem* CUtils::findChild(QQuickItem* root, const QString& name) {
 QList<QQuickItem*> CUtils::findChildren(QQuickItem* root, const QString& name) {
     QList<QQuickItem*> children;
     if (root) {
-        findChildrenDfs(root, [&name](const QQuickItem* item) {
-            return item->objectName() == name;
-        }, children);
+        findChildrenDfs(
+            root,
+            [&name](const QQuickItem* item) {
+                return item->objectName() == name;
+            },
+            children);
     }
     return children;
 }
@@ -327,9 +412,12 @@ QList<QQuickItem*> CUtils::findChildrenMatching(QQuickItem* root, const QString&
     QList<QQuickItem*> children;
     if (root) {
         const QRegularExpression re(pattern);
-        findChildrenDfs(root, [&re](const QQuickItem* item) {
-            return re.match(item->objectName()).hasMatch();
-        }, children);
+        findChildrenDfs(
+            root,
+            [&re](const QQuickItem* item) {
+                return re.match(item->objectName()).hasMatch();
+            },
+            children);
     }
     return children;
 }

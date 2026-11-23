@@ -56,7 +56,7 @@ StyledRect {
 
             StyledText {
                 Layout.fillWidth: true
-                text: IdleInhibitor.enabled ? qsTr("Preventing sleep mode") : qsTr("Normal power management")
+                text: IdleInhibitor.summaryText
                 color: Colours.palette.m3onSurfaceVariant
                 font: Tokens.font.body.small
                 elide: Text.ElideRight
@@ -65,7 +65,7 @@ StyledRect {
 
         StyledSwitch {
             checked: IdleInhibitor.enabled
-            onToggled: IdleInhibitor.enabled = checked
+            onToggled: IdleInhibitor.setEnabled(checked)
         }
     }
 
@@ -95,7 +95,7 @@ StyledRect {
                 id: activeText
 
                 anchors.centerIn: parent
-                text: qsTr("Active since %1").arg(Qt.formatTime(IdleInhibitor.enabledSince, GlobalConfig.services.useTwelveHourClock ? "hh:mm a" : "hh:mm"))
+                text: IdleInhibitor.periodText
                 color: Colours.palette.m3onPrimary
                 font: Tokens.font.body.builders.small.size(Math.round(Tokens.font.body.small.pointSize * 0.9)).build()
             }

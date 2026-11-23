@@ -7,14 +7,14 @@ import Caelestia.Config
 import qs.components
 import qs.components.controls
 import qs.services
+import qs.utils
 
 Item {
     id: root
 
     property bool isFetching: false
     property string errorMessage: ""
-    
-    // Bind colors at the root to avoid delegate scope resolution issues
+
     readonly property color cBgHigh: Colours.tPalette.m3surfaceContainerHigh
     readonly property color cBgHighest: Colours.tPalette.m3surfaceContainerHighest
     readonly property color cOnSurface: Colours.palette.m3onSurface
@@ -45,10 +45,7 @@ Item {
         if (isFetching) return;
         isFetching = true;
         errorMessage = "";
-        
-        // Default to Arch; re-read /etc/os-release to decide at fetch time
-        // so the feed is correct even if the shell was started before the OS
-        // release file was updated.
+
         var feedUrl = "https://archlinux.org/feeds/news/";
         if (_distroId === "") {
             var proc = newsFeedUrl();
@@ -100,30 +97,28 @@ Item {
 
     function parseNews(xmlString) {
         newsModel.clear();
-        
+
         var itemRegex = /<item>([\s\S]*?)<\/item>/g;
         var titleRegex = /<title>(.*?)<\/title>/;
         var linkRegex = /<link>(.*?)<\/link>/;
         var dateRegex = /<pubDate>(.*?)<\/pubDate>/;
-        
+
         var match;
         while ((match = itemRegex.exec(xmlString)) !== null) {
             var itemContent = match[1];
-            
+
             var titleMatch = titleRegex.exec(itemContent);
             var linkMatch = linkRegex.exec(itemContent);
             var dateMatch = dateRegex.exec(itemContent);
-            
+
             if (titleMatch && linkMatch && dateMatch) {
-                // Remove CDATA if present or unescape basic HTML entities
                 var title = titleMatch[1].replace(/<!\[CDATA\[(.*?)\]\]>/g, "$1").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, "\"").replace(/&#039;/g, "'");
                 var dateStr = dateMatch[1];
-                
-                // Format date nicely
+
                 var dateObj = new Date(dateStr);
                 var formattedDate = dateObj.toLocaleDateString();
                 if (formattedDate === "Invalid Date") formattedDate = dateStr;
-                
+
                 newsModel.append({
                     "title": title,
                     "link": linkMatch[1],
@@ -131,7 +126,7 @@ Item {
                 });
             }
         }
-        
+
         if (newsModel.count === 0) {
             errorMessage = qsTr("No news articles found.");
         }
@@ -146,7 +141,6 @@ Item {
         anchors.margins: Tokens.padding.medium
         spacing: Tokens.spacing.medium
 
-        // Header
         RowLayout {
             Layout.fillWidth: true
             spacing: Tokens.spacing.small
@@ -157,14 +151,13 @@ Item {
                 font: Tokens.font.title.medium
                 color: root.cOnSurface
             }
-            
+
             IconButton {
                 icon: "refresh"
                 onClicked: fetchNews()
             }
         }
 
-        // Error message
         StyledText {
             Layout.fillWidth: true
             visible: root.errorMessage !== ""
@@ -173,7 +166,6 @@ Item {
             wrapMode: Text.WordWrap
         }
 
-        // Loading Indicator
         Item {
             Layout.fillWidth: true
             Layout.fillHeight: true
@@ -186,7 +178,6 @@ Item {
             }
         }
 
-        // List
         ListView {
             id: newsListView
 
@@ -196,7 +187,7 @@ Item {
             spacing: Tokens.spacing.small
             clip: true
             visible: !root.isFetching || newsModel.count > 0
-            
+
             ScrollBar.vertical: StyledScrollBar { flickable: newsListView }
 
             delegate: StyledRect {
@@ -209,16 +200,15 @@ Item {
                 width: ListView.view.width
                 implicitHeight: col.implicitHeight + Tokens.padding.medium * 2
                 radius: Tokens.rounding.medium
-                
-                color: ma.containsMouse ? root.cBgHighest : root.cBgHigh
 
-                MouseArea {
-                    id: ma
+                color: root.cBgHigh
 
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: Qt.openUrlExternally(delegateItem.link)
+                StateLayer {
+                    radius: parent.radius
+                    // The link comes from a feed, not from the shell: another scheme
+                    // (`file://`, `smb://`, an application's own handler) would turn one
+                    // click into whatever the feed named.
+                    onClicked: Launch.openUrl(delegateItem.link)
                 }
 
                 ColumnLayout {

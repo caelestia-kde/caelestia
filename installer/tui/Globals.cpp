@@ -1,6 +1,7 @@
 #include "Globals.hpp"
 #include <iostream>
 #include <fstream>
+#include <cstdlib>
 
 std::atomic<bool> g_resized{false};
 std::atomic<bool> g_quit{false};
@@ -17,9 +18,20 @@ json g_theme;
 json g_menu;
 std::unordered_map<std::string, std::string> g_theme_colors;
 
-// Resolves a theme color value to an ANSI foreground sequence. Hex values
-// (#rrggbb) become 24-bit truecolor; anything else is treated as a legacy
-// ANSI suffix (e.g. "36m").
+std::string xdg_cache_dir() {
+    if (const char* cache = std::getenv("XDG_CACHE_HOME"))
+        return cache;
+    if (const char* home = std::getenv("HOME"))
+        return std::string(home) + "/.cache";
+    // The same last resort UI.cpp uses for its state directory: somewhere writable
+    // when the environment names no home at all.
+    return "/tmp";
+}
+
+int run_shell(const std::string& command) {
+    return std::system(command.c_str());
+}
+
 std::string color_sequence(const std::string& value) {
     if (value.size() == 7 && value[0] == '#') {
         int r = std::stoi(value.substr(1, 2), nullptr, 16);
@@ -45,7 +57,6 @@ void load_theme() {
                     }
                 }
             } else if (g_theme.contains("colors") && g_theme["colors"].is_object()) {
-                // Legacy theme files store raw ANSI suffixes under "colors".
                 for (auto& [name, value] : g_theme["colors"].items()) {
                     if (value.is_string()) {
                         g_theme_colors[name] = color_sequence(value.get<std::string>());
@@ -75,4 +86,3 @@ void load_theme() {
         g_startup_problems.push_back("menu.json not found - using the built-in menu (re-run setup.sh)");
     }
 }
-

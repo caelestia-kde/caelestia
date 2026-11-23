@@ -11,6 +11,7 @@
 #include <thread>
 #include <vector>
 
+#include "../Config/enums.hpp"
 #include "service.hpp"
 
 namespace caelestia::services {
@@ -26,7 +27,8 @@ class AudioCollector;
 
 class PipeWireWorker {
 public:
-    explicit PipeWireWorker(std::stop_token token, AudioCollector* collector);
+    explicit PipeWireWorker(
+        std::stop_token token, AudioCollector* collector, caelestia::config::VisualiserInput::Enum captureMode);
 
     void run();
 
@@ -34,12 +36,14 @@ private:
     pw_main_loop* m_loop;
     pw_stream* m_stream;
     spa_source* m_timer;
+    spa_source* m_stopEvent;
     bool m_idle;
 
     std::stop_token m_token;
     AudioCollector* m_collector;
 
     static void handleTimeout(void* data, uint64_t expirations);
+    static void handleStop(void* data, uint64_t count);
     void streamStateChanged(pw_stream_state state);
     void processStream();
 
@@ -69,9 +73,7 @@ private:
     std::vector<float> m_buffer2;
     std::atomic<std::vector<float>*> m_readBuffer;
     std::atomic<std::vector<float>*> m_writeBuffer;
-    quint32 m_sampleCount;
 
-    void reload();
     void start() override;
     void stop() override;
 };

@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
+import Quickshell
 import Quickshell.Io
 import Caelestia
 import Caelestia.Config
@@ -12,11 +13,11 @@ import qs.modules.nexus.common
 PageBase {
     id: root
 
-
     property string pluginCount
 
     property string quickshellVersion
     property string cliVersion
+    property string exportStatus: qsTr("Save shell.json as YAML")
 
     title: qsTr("About")
 
@@ -26,7 +27,6 @@ PageBase {
         width: root.cappedWidth
         spacing: Tokens.spacing.extraSmall / 2
 
-        // e.g. "Quickshell 0.3.0 (revision ...)"
         Process {
             running: true
             command: ["quickshell", "--version"]
@@ -35,14 +35,21 @@ PageBase {
             }
         }
 
-        // Parsed from the caelestia CLI's package listing; the sh wrapper avoids a
-        // warning when the (optional) CLI isn't installed
+        Process {
+            id: exportProc
+
+            command: ["python3", Quickshell.shellPath("scripts/export_config.py"), Paths.config, Paths.state]
+            onExited: code => {
+                root.exportStatus = code === 0 ? qsTr("Saved to shell.yaml") : qsTr("Export failed");
+            }
+        }
+
         Process {
             running: true
             command: ["sh", "-c", "caelestia --version 2>/dev/null"]
             stdout: StdioCollector {
                 onStreamFinished: {
-                    const m = text.match(/caelestia-cli\S*\s+(\d+(?:\.\d+)*)/);
+                    const m = text.match(/^caelestia\s+(\S+)/);
                     root.cliVersion = m ? m[1] : "";
                 }
             }
@@ -55,7 +62,6 @@ PageBase {
             }
         }
 
-        // Hero
         ConnectedRect {
             Layout.fillWidth: true
             first: true
@@ -78,7 +84,7 @@ PageBase {
                 StyledText {
                     Layout.alignment: Qt.AlignHCenter
                     Layout.topMargin: Tokens.spacing.small
-                    text: "Caelestia"
+                    text: "Caelestia KDE"
                     font: Tokens.font.headline.builders.large.width(110).build()
                 }
 
@@ -91,7 +97,6 @@ PageBase {
             }
         }
 
-        // System
         SectionHeader {
             text: qsTr("System")
         }
@@ -123,7 +128,6 @@ PageBase {
             value: SysInfo.firmware
         }
 
-        // Software
         SectionHeader {
             text: qsTr("Software")
         }
@@ -150,14 +154,10 @@ PageBase {
             value: CUtils.qtVersion || "…"
         }
 
-        // Plugins
         SectionHeader {
             text: qsTr("Plugins")
         }
 
-        // Reports the count and links through to the plugin manager. A bare
-        // number with nothing behind it is a dead end: the page that lists the
-        // plugins is where anyone reading this number wants to go (#578).
         NavRow {
             first: true
             last: true
@@ -165,26 +165,60 @@ PageBase {
             label: qsTr("Enabled plugins")
             status: root.pluginCount || "…"
             onClicked: {
-                // Resolve by key rather than a literal index: PageDictionary is
-                // positional and entries must not be reordered independently.
-                const index = PageRegistry.indexForKey("plugins");
-                if (index >= 0)
-                    root.nState.currentPageIdx = index;
+                root.nState.selectSubCategory(9);
             }
         }
 
-        // Advanced
         SectionHeader {
             text: qsTr("Advanced")
         }
 
         ToggleRow {
             first: true
-            last: true
             text: qsTr("Debug Mode")
             subtext: qsTr("Enable verbose debug logging for troubleshooting. Run 'caelestia shell -l' to view.")
             checked: GlobalConfig.general.debugLogs
             onClicked: GlobalConfig.general.debugLogs = !GlobalConfig.general.debugLogs
+        }
+
+        NavRow {
+            last: true
+            icon: "file_download"
+            label: qsTr("Export configuration")
+            status: root.exportStatus
+            onClicked: {
+                root.exportStatus = qsTr("Exporting...");
+                exportProc.running = true;
+            }
+        }
+
+        SectionHeader {
+            text: qsTr("Uninstall")
+        }
+
+        NavRow {
+            first: true
+            last: true
+            icon: "delete_forever"
+            label: qsTr("Uninstall Caelestia")
+            status: {
+                if (Uninstaller.state === "probing")
+                    return qsTr("Checking for the uninstaller…");
+                if (Uninstaller.state === "script")
+                    return qsTr("Remove the shell, its configs and its services");
+                if (Uninstaller.state === "package")
+                    return qsTr("This install belongs to a package. Remove it with: %1").arg(Uninstaller.manualCommand);
+                return qsTr("No uninstaller was found. Remove the install with your package manager.");
+            }
+            onClicked: uninstallDialog.open()
+        }
+
+        UninstallDialog {
+            id: uninstallDialog
+
+            state: Uninstaller.state
+            manualCommand: Uninstaller.manualCommand
+            onConfirmed: Uninstaller.launch()
         }
     }
 }

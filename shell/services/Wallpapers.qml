@@ -14,17 +14,18 @@ Searcher {
     id: root
 
     readonly property string currentNamePath: `${Paths.state}/wallpaper/path.txt`
-    readonly property list<string> smartArg: GlobalConfig.services.smartScheme ? [] : ["--no-smart"]
-    readonly property string fallback: Quickshell.shellPath("assets/wallpapers/Minimal-Paper.png")
+    readonly property string fallback: Quickshell.shellPath("assets/wallpaper.webp")
 
-    property bool showPreview: false
-    readonly property string current: showPreview ? previewPath : actualCurrent
+    property bool hasSkwd: false
+    property bool previousWallpaperEnabledState: false
+    readonly property bool previewing: previewPath !== ""
+    readonly property string current: previewing ? previewPath : actualCurrent
     property string previewPath
     property string actualCurrent
-    property bool previewColourLock
-    property bool pendingPreviewClear
     property var videoThumbs: ({})
     property var videoThumbsPending: ({})
+    property var videoThumbsHifi: ({})
+    property var videoThumbsHifiPending: ({})
 
     property string currentMediaFilter: "All"
 
@@ -82,9 +83,6 @@ Searcher {
     }
 
     function setRandom(): void {
-        // caelestia-cli's wallpaper command has no random ("-r") support for
-        // live/video wallpapers, so pick randomly ourselves and set it via the
-        // same path (setWallpaper) used for a specific wallpaper, which does.
         if (!root.list || root.list.length === 0) return;
         let idx = Math.floor(Math.random() * root.list.length);
         if (root.list.length > 1 && root.list[idx].path === actualCurrent)
@@ -114,60 +112,64 @@ Searcher {
     }
 
     function setWallpaper(path: string): void {
+        if (previewing && path !== actualCurrent)
+            previewColoursState.hold();
         actualCurrent = path;
         if (Images.isVideo(path)) {
             const thumb = thumbFor(path);
-            if (thumb !== "") {
-                const script = 'caelestia wallpaper -f "$1" ' + root.smartArg.join(" ") + '; printf "%s" "$2" > "$3"';
-                Quickshell.execDetached(["sh", "-c", script, "--", thumb, path, root.currentNamePath]);
-                syncPlasmaWallpaper(thumb);
+            const hifi = thumbHifi(path);
+            const target = hifi !== "" ? hifi : thumb;
+            if (target !== "") {
+                const script = 'caelestia wallpaper -f "$1" --apply-path "$2" ' + Colours.smartArg.join(" ") + '; printf "%s" "$2" > "$3"';
+                Quickshell.execDetached(["sh", "-c", script, "--", thumb !== "" ? thumb : target, path, root.currentNamePath]);
+                syncPlasmaWallpaper(target);
             } else {
                 Quickshell.execDetached(["sh", "-c", 'printf "%s" "$1" > "$2"', "--", path, root.currentNamePath]);
-                // Still frame not ready yet — onVideoThumb() syncs Plasma once it is.
             }
         } else {
-            Quickshell.execDetached(["caelestia", "wallpaper", "-f", path, ...smartArg]);
+            Quickshell.execDetached(["caelestia", "wallpaper", "-f", path, ...Colours.smartArg]);
             syncPlasmaWallpaper(path);
         }
     }
 
-    // Mirrors the wallpaper onto Plasma's own desktop background so it doesn't
-    // stay stale (e.g. showing the deploy-time default) whenever the shell
-    // isn't running to keep it in sync itself, such as after a crash/exit.
     function syncPlasmaWallpaper(imagePath: string): void {
         if (!imagePath)
             return;
         const script = 'var allDesktops = desktops();' +
             'for (var i = 0; i < allDesktops.length; i++) {' +
             '    var d = allDesktops[i];' +
-            '    d.wallpaperPlugin = "org.kde.image";' +
             '    d.currentConfigGroup = ["Wallpaper", "org.kde.image", "General"];' +
             '    d.writeConfig("Image", "file://" + ' + JSON.stringify(imagePath) + ');' +
             '}';
         Quickshell.execDetached(["qdbus6", "org.kde.plasmashell", "/PlasmaShell", "org.kde.PlasmaShell.evaluateScript", script]);
 
-        // Keep KDE's own lock screen wallpaper on the same image unless the user
-        // opted out of syncing the two. Read the global singleton directly: the
-        // attached `Config` is per-screen aware and is not meant to be used from
-        // a singleton service like this one.
         if (GlobalConfig.lock.syncWallpaper)
             Quickshell.execDetached(["kwriteconfig6", "--file", "kscreenlockerrc", "--group", "Greeter", "--group", "Wallpaper", "--group", "org.kde.image", "--group", "General", "--key", "Image", "file://" + imagePath]);
     }
 
     function preview(path: string): void {
-        previewPath = path;
-        showPreview = true;
+        if (!previewing) {
+            previousWallpaperEnabledState = GlobalConfig.background.wallpaperEnabled;
+            GlobalConfig.background.wallpaperEnabled = true;
+        }
 
-        if (Colours.scheme === "dynamic")
-            getPreviewColoursProc.running = true;
+        previewPath = path;
+        previewColourOf(path);
+    }
+
+    function previewColourOf(path: string): void {
+        if (Colours.scheme !== "dynamic")
+            return;
+        previewColoursState.show(thumbFor(path));
     }
 
     function stopPreview(): void {
-        showPreview = false;
-        if (previewColourLock)
-            pendingPreviewClear = true;
-        else
-            Colours.showPreview = false;
+        if (previewing) {
+            GlobalConfig.background.wallpaperEnabled = previousWallpaperEnabledState;
+        }
+
+        previewPath = "";
+        previewColoursState.stop();
     }
 
     function getThumbnailPath(path: string): string {
@@ -175,6 +177,21 @@ Searcher {
             return `${Paths.cache}/wallpapers/${CUtils.sha256(path)}/first_frame.png`;
         }
         return path;
+    }
+
+    function getThumbnailHifiPath(path: string): string {
+        if (Images.isVideo(path)) {
+            return `${Paths.cache}/wallpapers/${CUtils.sha256(path)}/first_frame_hifi.png`;
+        }
+        return path;
+    }
+
+    function thumb(path: string): string {
+        return thumbFor(path);
+    }
+
+    function thumbHifi(path: string): string {
+        return thumbForHifi(path);
     }
 
     function thumbFor(path: string): string {
@@ -187,6 +204,16 @@ Searcher {
         return "";
     }
 
+    function thumbForHifi(path: string): string {
+        const p = String(path || "").replace(/^file:\/\//, "");
+        if (p === "" || !Images.isVideo(p))
+            return p;
+        if (root.videoThumbsHifi[p])
+            return root.videoThumbsHifi[p];
+        requestVideoThumbHifi(p);
+        return "";
+    }
+
     function requestVideoThumb(path: string): void {
         if (root.videoThumbsPending[path] || root.videoThumbs[path])
             return;
@@ -196,7 +223,11 @@ Searcher {
 
         const out = getThumbnailPath(path);
         const script = 'out="$1"; src="$2"; [ -s "$out" ] || { mkdir -p "$(dirname "$out")"; ' +
-                       'ffmpeg -y -loglevel error -i "$src" -vf "thumbnail,scale=640:-1" -frames:v 1 "$out" >/dev/null 2>&1; }; ' +
+                       'stem="$(basename "${src%.*}")"; ' +
+                       'skwd="${XDG_CACHE_HOME:-$HOME/.cache}/skwd-wall-v2/video-thumbs/${stem}.webp"; ' +
+                       'if [ -s "$skwd" ]; then cp "$skwd" "$out"; else ' +
+                       'ffmpeg -y -loglevel error -i "$src" -vf "thumbnail,scale=640:-1" -frames:v 1 "$out" >/dev/null 2>&1; fi; }; ' +
+                       'printf "%s" "$src" > "$(dirname "$out")/source_path"; ' +
                        '[ -s "$out" ] && printf %s "$out"';
         const qml = 'import QtQuick\nimport Quickshell.Io\n' +
             'Process {\n' +
@@ -213,16 +244,46 @@ Searcher {
         }
     }
 
+    function requestVideoThumbHifi(path: string): void {
+        if (root.videoThumbsHifiPending[path] || root.videoThumbsHifi[path])
+            return;
+        const pending = root.videoThumbsHifiPending;
+        pending[path] = true;
+        root.videoThumbsHifiPending = pending;
+
+        const out = getThumbnailHifiPath(path);
+        const script = 'out="$1"; src="$2"; [ -s "$out" ] || { mkdir -p "$(dirname "$out")"; ' +
+                       'ffmpeg -y -loglevel error -i "$src" -vf "thumbnail" -frames:v 1 "$out" >/dev/null 2>&1; }; ' +
+                       'printf "%s" "$src" > "$(dirname "$out")/source_path"; ' +
+                       '[ -s "$out" ] && printf %s "$out"';
+        const qml = 'import QtQuick\nimport Quickshell.Io\n' +
+            'Process {\n' +
+            '    id: p\n' +
+            '    command: ' + JSON.stringify(["sh", "-c", script, "--", out, path]) + '\n' +
+            '    stdout: StdioCollector { onStreamFinished: root.onVideoThumbHifi(' + JSON.stringify(path) + ', (text || "").trim(), p); }\n' +
+            '    onExited: code => { if (code !== 0) p.destroy(); }\n' +
+            '}';
+        try {
+            const o = Qt.createQmlObject(qml, root, "videoThumbHifiProc");
+            o.running = true;
+        } catch (e) {
+            Logger.log("[wallpapers] video hifi thumbnail error: " + e.message);
+        }
+    }
+
     function onVideoThumb(path: string, out: string, proc: var): void {
         if (out !== "") {
             const m = root.videoThumbs;
             m[path] = out;
-            root.videoThumbs = Object.assign({}, m);   // a copy, so bindings re-run
+            root.videoThumbs = Object.assign({}, m);
             if (path === root.actualCurrent) {
-                const script = 'caelestia wallpaper -f "$1" ' + root.smartArg.join(" ") + '; printf "%s" "$2" > "$3"';
+                const script = 'caelestia wallpaper -f "$1" --apply-path "$2" ' + Colours.smartArg.join(" ") + '; printf "%s" "$2" > "$3"';
                 Quickshell.execDetached(["sh", "-c", script, "--", out, path, root.currentNamePath]);
-                syncPlasmaWallpaper(out);
+                if (!root.videoThumbsHifi[path])
+                    syncPlasmaWallpaper(out);
             }
+            if (path === root.previewPath && root.previewing)
+                root.previewColourOf(path);
         }
         const pending = root.videoThumbsPending;
         delete pending[path];
@@ -231,9 +292,40 @@ Searcher {
             proc.destroy();
     }
 
-    onPreviewColourLockChanged: {
-        if (!previewColourLock && pendingPreviewClear)
-            Colours.showPreview = false;
+    function onVideoThumbHifi(path: string, out: string, proc: var): void {
+        if (out !== "") {
+            const m = root.videoThumbsHifi;
+            m[path] = out;
+            root.videoThumbsHifi = Object.assign({}, m);
+            if (path === root.actualCurrent) {
+                syncPlasmaWallpaper(out);
+            }
+        }
+        const pending = root.videoThumbsHifiPending;
+        delete pending[path];
+        root.videoThumbsHifiPending = pending;
+        if (proc)
+            proc.destroy();
+    }
+
+    function applyWallpaperEngine(): void {
+        if (GlobalConfig.background.disableQuickshellDesktop)
+            return;
+
+        const engine = Config.background.wallpaperEngine;
+        if (engine === "quickshell") {
+            GlobalConfig.background.wallpaperEnabled = true;
+        } else if (engine === "skwd/plasma" || engine === "plasma") {
+            GlobalConfig.background.wallpaperEnabled = false;
+        } else {
+            GlobalConfig.background.wallpaperEnabled = !root.hasSkwd;
+        }
+
+        for (let i = 0; i < Quickshell.screens.length; i++) {
+            const sConf = GlobalConfig.forScreen(Quickshell.screens[i].name);
+            if (sConf)
+                sConf.background.resetOption("wallpaperEnabled");
+        }
     }
 
     list: filteredList
@@ -268,24 +360,28 @@ Searcher {
             let wall = text().trim();
             if (!wall) {
                 wall = root.fallback;
-                Quickshell.execDetached(["caelestia", "wallpaper", "-f", root.fallback, ...root.smartArg]);
+                Quickshell.execDetached(["caelestia", "wallpaper", "-f", root.fallback, ...Colours.smartArg]);
             }
-            if (Images.isVideo(root.actualCurrent) && wall === root.getThumbnailPath(root.actualCurrent)) {
+            if (Images.isVideo(root.actualCurrent) && (wall === root.getThumbnailPath(root.actualCurrent) || wall === root.getThumbnailHifiPath(root.actualCurrent))) {
                 return;
             }
             root.actualCurrent = wall;
-            root.previewColourLock = false;
-            // Bring the KDE lock screen in line with the shell whenever the
-            // persisted wallpaper is (re)loaded, e.g. on startup. Videos are
-            // skipped: the lock screen falls back to an image, and the video
-            // path has no still to show until onVideoThumb() provides one.
-            if (!Images.isVideo(wall))
+            if (!Images.isVideo(wall)) {
                 syncPlasmaWallpaper(wall);
+            } else {
+                const hifi = thumbHifi(wall);
+                if (hifi)
+                    syncPlasmaWallpaper(hifi);
+                else {
+                    const thumb = thumbFor(wall);
+                    if (thumb)
+                        syncPlasmaWallpaper(thumb);
+                }
+            }
         }
         onLoadFailed: {
             root.actualCurrent = root.fallback;
-            root.previewColourLock = false;
-            Quickshell.execDetached(["caelestia", "wallpaper", "-f", root.fallback, ...root.smartArg]);
+            Quickshell.execDetached(["caelestia", "wallpaper", "-f", root.fallback, ...Colours.smartArg]);
             syncPlasmaWallpaper(root.fallback);
         }
     }
@@ -299,15 +395,34 @@ Searcher {
         nameFilters: Images.validImageExtensions.concat(Images.validVideoExtensions).map(e => `*.${e}`)
     }
 
-    Process {
-        id: getPreviewColoursProc
+    PreviewColours {
+        id: previewColoursState
+    }
 
-        command: ["caelestia", "wallpaper", "-p", root.previewPath, ...root.smartArg]
-        stdout: StdioCollector {
-            onStreamFinished: {
-                Colours.load(text, true);
-                Colours.showPreview = true;
-            }
+    Settings {
+        property alias mediaFilter: root.currentMediaFilter
+
+        category: "Wallpapers"
+    }
+
+    Connections {
+        function onWallpaperEngineChanged(): void {
+            root.applyWallpaperEngine();
+        }
+
+        target: Config.background
+    }
+
+    Process {
+        id: skwdWallCheckProcess
+
+        running: true
+        command: ["systemctl", "--user", "is-active", "--quiet", "skwd-walld.service"]
+
+        onExited: code => {
+            const hasSkwd = (code === 0);
+            root.hasSkwd = hasSkwd;
+            root.applyWallpaperEngine();
         }
     }
 }

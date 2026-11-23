@@ -14,13 +14,14 @@ Item {
     id: root
 
     required property DrawerVisibilities visibilities
-    required property DashboardState dashState
+    required property ScreenState screenState
     required property FileDialog facePicker
 
     readonly property var dashboardTabs: {
         const allTabs = [
             {
                 component: dashComponent,
+                keepAlive: true,
                 iconName: "dashboard",
                 text: qsTr("Dashboard"),
                 enabled: Config.dashboard.showDashboard
@@ -39,9 +40,16 @@ Item {
             },
             {
                 component: weatherComponent,
+                keepAlive: true,
                 iconName: "cloud",
                 text: qsTr("Weather"),
                 enabled: Config.dashboard.showWeather
+            },
+            {
+                component: notesComponent,
+                iconName: "sticky_note_2",
+                text: qsTr("Notes"),
+                enabled: Config.dashboard.showNotes
             },
             {
                 component: terminalComponent,
@@ -53,22 +61,36 @@ Item {
         return allTabs.filter(tab => tab.enabled);
     }
 
-    // Clamp currentTab to valid range only when the set of available tabs changes
-    // (e.g. disabling a tab in settings). NOT on every currentTab switch, to avoid
-    // creating a new array reference that resets the ScriptModel and destroys all
-    // tab delegates.
+    readonly property real nonAnimWidth: view.implicitWidth + viewWrapper.anchors.margins * 2
+    readonly property real nonAnimHeight: tabs.implicitHeight + tabs.anchors.topMargin + view.implicitHeight + viewWrapper.anchors.margins * 2
+
     onDashboardTabsChanged: {
-        if (dashboardTabs.length > 0 && dashState.currentTab >= dashboardTabs.length) {
-            dashState.currentTab = dashboardTabs.length - 1;
+        if (dashboardTabs.length > 0 && screenState.dashboardTab >= dashboardTabs.length) {
+            screenState.dashboardTab = dashboardTabs.length - 1;
         }
     }
 
-    readonly property real nonAnimWidth: view.implicitWidth + viewWrapper.anchors.margins * 2
-
-    readonly property real nonAnimHeight: tabs.implicitHeight + tabs.anchors.topMargin + view.implicitHeight + viewWrapper.anchors.margins * 2
-
     implicitWidth: nonAnimWidth
     implicitHeight: nonAnimHeight
+
+    // Builds the keepAlive tabs one at a time shortly after start, so the first open is as
+    // cheap as the next ones.
+    Timer {
+        interval: 1500
+        repeat: true
+        running: true
+
+        onTriggered: {
+            for (let i = 0; i < repeater.count; i++) {
+                const loader = repeater.itemAt(i);
+                if (loader && loader.modelData.keepAlive && !loader.keepLoaded) {
+                    loader.keepLoaded = true;
+                    return;
+                }
+            }
+            stop();
+        }
+    }
 
     Tabs {
         id: tabs
@@ -80,7 +102,7 @@ Item {
         anchors.margins: Tokens.padding.large
 
         nonAnimWidth: root.nonAnimWidth - anchors.margins * 2
-        dashState: root.dashState
+        screenState: root.screenState
         tabs: root.dashboardTabs
     }
 
@@ -99,9 +121,9 @@ Item {
         Flickable {
             id: view
 
-            readonly property int currentIndex: root.dashState.currentTab
+            readonly property int currentIndex: root.screenState.dashboardTab
             readonly property Item currentItem: {
-                repeater.count; // Trigger update on count change
+                repeater.count;
                 return repeater.itemAt(currentIndex);
             }
 
@@ -122,9 +144,9 @@ Item {
 
                 const x = contentX - currentItem.x;
                 if (x > currentItem.implicitWidth / 2)
-                    root.dashState.currentTab = Math.min(root.dashState.currentTab + 1, tabs.count - 1);
+                    root.screenState.dashboardTab = Math.min(root.screenState.dashboardTab + 1, tabs.count - 1);
                 else if (x < -currentItem.implicitWidth / 2)
-                    root.dashState.currentTab = Math.max(root.dashState.currentTab - 1, 0);
+                    root.screenState.dashboardTab = Math.max(root.screenState.dashboardTab - 1, 0);
             }
 
             onDragEnded: {
@@ -133,9 +155,9 @@ Item {
 
                 const x = contentX - currentItem.x;
                 if (x > currentItem.implicitWidth / 10)
-                    root.dashState.currentTab = Math.min(root.dashState.currentTab + 1, tabs.count - 1);
+                    root.screenState.dashboardTab = Math.min(root.screenState.dashboardTab + 1, tabs.count - 1);
                 else if (x < -currentItem.implicitWidth / 10)
-                    root.dashState.currentTab = Math.max(root.dashState.currentTab - 1, 0);
+                    root.screenState.dashboardTab = Math.max(root.screenState.dashboardTab - 1, 0);
                 else
                     contentX = Qt.binding(() => currentItem?.x ?? 0);
             }
@@ -160,14 +182,21 @@ Item {
 
                         sourceComponent: modelData.component
 
-                        Component.onCompleted: active = Qt.binding(() => {
-                            if (active) return true;
-                            if (index === view.currentIndex)
-                                return true;
-                            const vx = Math.floor(view.visibleArea.xPosition * view.contentWidth);
-                            const vex = Math.floor(vx + view.visibleArea.widthRatio * view.contentWidth);
-                            return (vx >= x && vx <= x + implicitWidth) || (vex >= x && vex <= x + implicitWidth);
-                        })
+                        // Stays loaded once shown, so switching tabs does not rebuild it.
+                        property bool keepLoaded: false
+
+                        // Neighbours are loaded while dragging. Index based on purpose: reading x or
+                        // implicitWidth here depends on this Loader's own content (binding loop).
+                        readonly property bool preloadNeighbour: view.moving && Math.abs(index - view.currentIndex) === 1
+
+                        // Light tabs (keepAlive) stay loaded while the dashboard is closed, so reopening it
+                        // does not rebuild them. The dashboard is hidden then, and their services follow `visible`.
+                        active: (modelData.keepAlive && keepLoaded) || (root.visibilities.dashboard && (keepLoaded || index === view.currentIndex || preloadNeighbour))
+
+                        onActiveChanged: {
+                            if (active)
+                                keepLoaded = true;
+                        }
                     }
                 }
             }
@@ -177,7 +206,7 @@ Item {
 
                 Dash {
                     visibilities: root.visibilities
-                    dashState: root.dashState
+                    screenState: root.screenState
                     facePicker: root.facePicker
                 }
             }
@@ -200,6 +229,14 @@ Item {
                 id: weatherComponent
 
                 WeatherTab {}
+            }
+
+            Component {
+                id: notesComponent
+
+                NotesTab {
+                    dashboardOpen: root.visibilities.dashboard
+                }
             }
 
             Component {

@@ -1,39 +1,22 @@
 #!/usr/bin/env bash
-# update-state.sh - Record which revision of the shell is actually installed.
+# Single contract for the shell update state files.
 #
-# Source from the build/update scripts:
+# ~/.config/quickshell/caelestia/.current_commit  the revision the running
+#                                                 shell was built from
+# ~/.config/quickshell/caelestia/.update_branch  the tracked update channel
+#                                                 (main or dev only)
+# ~/.config/quickshell/caelestia/.current_version  the version.env of that
+#                                                   revision
 #
-#     source "$(dirname "${BASH_SOURCE[0]}")/lib/update-state.sh"
-#
-#   record_installed_revision   Write .current_commit/.update_branch/.current_version
-#
-# These helpers never log; callers decide what to tell the user.
+# Writers: record_installed_revision() names what is actually installed and
+# is the only writer of the commit and version files. The branch file has
+# exactly two more writers, both user intent: an explicit branch pick in the
+# Nexus updates page, and the timer's self-heal when the tracked branch
+# disappears from the remote. Readers use the helpers below so the main/dev
+# validation and main default have one implementation.
 
-# record_installed_revision <bundle-dir> <config-dir>
-#
-# Record the revision the installed shell artifacts came from, so the Updates
-# page and caelestia-check-updates describe what the user is actually running:
-#
-#   .current_commit   commit the artifacts were built from
-#   .update_branch    branch that commit came from
-#   .current_version  VERSION from that commit's .github/version.env
-#
-# Returns 1 without touching anything when there is nothing truthful to record:
-#
-#   - CAELESTIA_SKIP_BUILD=1: the checkout moved (a revert, or a skip-build
-#     update) but the shell on screen did not, because this same flag stopped
-#     the build. Writing the new revision here would make every version readout
-#     claim a state the user cannot see (#651).
-#   - <bundle-dir> is not a git checkout: there is no revision to name.
-#
-# The version is read from the working tree first and from the commit second,
-# because the updater uses a sparse checkout that omits .github/version.env.
-#
-# It is recorded at all because the Updates page resolves unrecognized commits
-# through its bare cache repo, which only mirrors origin branches: a commit
-# that exists only in the local checkout would otherwise show as "unknown".
 record_installed_revision() {
-    local bundle="$1" config="$2"
+    local bundle="$1" config="$2" channel="${3:-}"
 
     if [[ "${CAELESTIA_SKIP_BUILD:-0}" == "1" ]]; then
         return 1
@@ -45,11 +28,29 @@ record_installed_revision() {
 
     mkdir -p -- "$config" || return 1
 
+    # A checkout parked on a feature branch must not silently re-point the
+    # update channel (issue #565): only a real channel is a fact worth
+    # recording, anything else leaves the previously tracked branch alone.
+    # The updater resets the checkout it created from `git init`, which can
+    # leave HEAD on a branch that is not the channel it just installed
+    # (#1327), so an explicit channel always wins over the git branch name.
+    local branch
+    branch="$(git -C "$bundle" rev-parse --abbrev-ref HEAD 2>/dev/null)" || branch=""
+    if [[ -n "$channel" ]]; then
+        branch="$channel"
+    fi
+    case "$branch" in
+        main | dev)
+            update_state_set_branch "$config" "$branch" || return 1
+            ;;
+    esac
+
     git -C "$bundle" rev-parse HEAD > "$config/.current_commit" 2>/dev/null || {
         rm -f -- "$config/.current_commit"
         return 1
     }
-    git -C "$bundle" rev-parse --abbrev-ref HEAD > "$config/.update_branch" 2>/dev/null || true
+
+    printf '%s\n' "$bundle" > "$config/.checkout" 2>/dev/null || true
 
     if [[ -f "$bundle/.github/version.env" ]]; then
         cp -- "$bundle/.github/version.env" "$config/.current_version" 2>/dev/null || true
@@ -58,4 +59,38 @@ record_installed_revision() {
     fi
 
     return 0
+}
+
+# Only main and dev are channels; the callers above and below depend on
+# that, so reject anything else rather than writing a branch no reader
+# will honor.
+update_state_set_branch() {
+    local config="$1" branch="$2"
+
+    case "$branch" in
+        main | dev) ;;
+        *) return 1 ;;
+    esac
+
+    mkdir -p -- "$config" || return 1
+    printf '%s\n' "$branch" > "$config/.update_branch" || return 1
+    return 0
+}
+
+update_state_read_branch() {
+    local config="$1" branch=""
+    branch="$(cat "$config/.update_branch" 2>/dev/null)" || branch=""
+    case "$branch" in
+        main | dev)
+            printf '%s\n' "$branch"
+            ;;
+        *)
+            printf 'main\n'
+            ;;
+    esac
+}
+
+update_state_read_commit() {
+    local config="$1"
+    cat "$config/.current_commit" 2>/dev/null || true
 }

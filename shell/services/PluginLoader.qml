@@ -9,7 +9,6 @@ import Quickshell.Io
 Item {
     id: pluginLoader
 
-    // Map of plugin id -> live QML object instance
     property var pluginInstances: ({})
     property int loadedCount: 0
     property int enabledCount: 0
@@ -31,6 +30,18 @@ Item {
         return meta.enabled && (meta.type === "quickshell" || meta.type === "kwineffect");
     }
 
+    // The plugins page reads the plugins out of a ListModel, which drops nested
+    // arrays, so the manifest's settings schema is kept in this list instead and
+    // looked up by id when the settings popup needs it.
+    function settingsSchemaFor(idOrName) {
+        for (let i = 0; i < discovered.length; i++) {
+            const meta = discovered[i];
+            if ((meta.id || meta.name) === idOrName)
+                return meta.settings || [];
+        }
+        return [];
+    }
+
     function updateEnabledCount() {
         let count = 0;
         for (let i = 0; i < discovered.length; i++) {
@@ -40,11 +51,84 @@ Item {
         enabledCount = count;
     }
 
+    // A plugin declares bar widgets in metadata.json under `barWidgets`:
+    // [{ id, name, icon, defaultZone, component, popout, available,
+    // unavailableText }]. `component` and `popout` are paths relative to the
+    // plugin folder.
+    function normalizeBarWidgets(meta): void {
+        const specs = meta.barWidgets;
+        const normalized = [];
+
+        for (const spec of (specs ?? [])) {
+            if (!spec || !spec.id || !spec.component)
+                continue;
+            // Refuse to load a component outside the plugin folder.
+            if (spec.component.startsWith("/") || spec.component.indexOf("..") !== -1)
+                continue;
+            // A popout is optional, and only the popout itself is dropped when
+            // it escapes the folder: the widget still renders.
+            const popout = spec.popout ?? "";
+            const hasPopout = popout.length > 0 && !popout.startsWith("/") && popout.indexOf("..") === -1;
+            normalized.push({
+                id: spec.id,
+                name: spec.name ?? spec.id,
+                icon: spec.icon ?? "widgets",
+                defaultZone: spec.defaultZone ?? "right",
+                available: spec.available ?? true,
+                unavailableText: spec.unavailableText ?? "",
+                componentUrl: "file://" + meta.path + "/" + spec.component,
+                popoutUrl: hasPopout ? "file://" + meta.path + "/" + popout : ""
+            });
+        }
+
+        meta.barWidgets = normalized;
+    }
+
+    function normalizeBackgroundWidgets(meta): void {
+        const specs = meta.backgroundWidgets;
+        const normalized = [];
+
+        for (const spec of (specs ?? [])) {
+            if (!spec || !spec.id || !spec.component)
+                continue;
+            if (spec.component.startsWith("/") || spec.component.indexOf("..") !== -1)
+                continue;
+            normalized.push({
+                id: spec.id,
+                name: spec.name ?? spec.id,
+                z: typeof spec.z === "number" ? spec.z : 4,
+                componentUrl: "file://" + meta.path + "/" + spec.component
+            });
+        }
+
+        meta.backgroundWidgets = normalized;
+    }
+
+    function syncBarWidgets(meta, enabled): void {
+        const key = meta.id || meta.name;
+        if (!key)
+            return;
+        if (enabled && meta.barWidgets && meta.barWidgets.length > 0)
+            BarWidgetRegistry.register(key, meta.barWidgets);
+        else
+            BarWidgetRegistry.unregister(key);
+    }
+
+    function syncBackgroundWidgets(meta, enabled): void {
+        const key = meta.id || meta.name;
+        if (!key)
+            return;
+        if (enabled && meta.backgroundWidgets && meta.backgroundWidgets.length > 0)
+            BackgroundWidgetRegistry.register(key, meta.backgroundWidgets);
+        else
+            BackgroundWidgetRegistry.unregister(key);
+    }
+
     function loadPlugin(meta) {
         let id = meta.id || meta.name;
-        if (pluginInstances[id]) return; // already loaded
-        // Quickshell plugins load main.qml; other types (a kwineffect that ships
-        // a settings front-end) opt in through the manifest's `ui` field.
+        if (pluginInstances[id]) return;
+        // Other types (a kwineffect that ships a settings front-end) opt in
+        // through the manifest's `ui` field.
         let ui = meta.ui || (meta.type === "quickshell" ? "main.qml" : "");
         if (!ui) return;
 
@@ -77,9 +161,26 @@ Item {
         if (pluginInstances[id]) {
             pluginInstances[id].destroy();
             delete pluginInstances[id];
-            pluginInstances = pluginInstances; // force notify
+            pluginInstances = pluginInstances;
             loadedCount = Object.keys(pluginInstances).length;
             console.log("Plugin unloaded: " + id);
+        }
+    }
+
+    // A plugin reads its settings when its objects are created, so writing them from the
+    // Nexus is not enough: rebuild the plugin and the widgets it contributes, which also
+    // re-registers them so their instances pick the new values up.
+    function applySettings(id): void {
+        for (let i = 0; i < discovered.length; i++) {
+            const meta = discovered[i];
+            if ((meta.id || meta.name) !== id)
+                continue;
+
+            unloadPlugin(id);
+            loadPlugin(meta);
+            syncBarWidgets(meta, meta.enabled);
+            syncBackgroundWidgets(meta, meta.enabled);
+            return;
         }
     }
 
@@ -117,6 +218,8 @@ Item {
                 } else {
                     unloadPlugin(itemId);
                 }
+                syncBarWidgets(item, enable);
+                syncBackgroundWidgets(item, enable);
                 updateEnabledCount();
             }
         }
@@ -129,12 +232,14 @@ Item {
         finalized = true;
         CaelestiaApi.plugins.available.clear();
 
-        // Destroy all currently running plugin instances
         for (let key in pluginInstances) {
             if (pluginInstances[key]) pluginInstances[key].destroy();
         }
         pluginInstances = {};
         loadedCount = 0;
+
+        BarWidgetRegistry.clear();
+        BackgroundWidgetRegistry.clear();
 
         for (let k = 0; k < discovered.length; k++) {
             let meta = discovered[k];
@@ -143,6 +248,8 @@ Item {
             if (meta.enabled) {
                 loadPlugin(meta);
             }
+            syncBarWidgets(meta, meta.enabled);
+            syncBackgroundWidgets(meta, meta.enabled);
         }
         updateEnabledCount();
         pluginsReloaded();
@@ -152,32 +259,33 @@ Item {
     function readMetadata(pluginInfo) {
         let metaPath = pluginInfo.path + "/metadata.json";
         pendingMeta++;
-        console.log("readMetadata called for", pluginInfo.id, "at", metaPath);
 
         let proc = Qt.createQmlObject(`
             import Quickshell.Io
             Process {
-                command: ["cat", "${metaPath}"]
+                command: ["cat", ${JSON.stringify(metaPath)}]
                 stdout: StdioCollector { id: out }
                 stderr: StdioCollector { id: err }
                 onExited: (code) => {
                     if (code === 0) {
                         try {
                             let meta = JSON.parse(out.text);
-                            meta.path = "${pluginInfo.path}";
-                            meta.source = "${pluginInfo.source}";
+                            meta.path = ${JSON.stringify(pluginInfo.path)};
+                            meta.source = ${JSON.stringify(pluginInfo.source)};
 
                             let disabled = pluginLoader.pluginSettings.disabledPlugins || [];
                             meta.enabled = (disabled.indexOf(meta.id) === -1 && disabled.indexOf(meta.name) === -1);
                             meta.settings = meta.settings || [];
+                            meta.settingsCount = meta.settings.length;
                             meta.mediaurl = meta.mediaurl || "";
                             meta.restart = (meta.restart === "true" || meta.restart === true);
 
-                            // Extract author information
                             meta.authorName = meta.author ? (meta.author.name || "") : "";
                             let aUrl = meta.author ? (meta.author.url || "") : "";
                             meta.icon = meta.icon || "extension";
 
+                            pluginLoader.normalizeBarWidgets(meta);
+                            pluginLoader.normalizeBackgroundWidgets(meta);
                             pluginLoader.discovered.push(meta);
                         } catch(e) {
                             console.log("Failed to parse metadata.json for", "${pluginInfo.id}", e);
@@ -198,21 +306,19 @@ Item {
         finalized = false;
         pendingMeta = 0;
 
-        let configHome = Quickshell.env("XDG_CONFIG_HOME") || (Quickshell.env("HOME") + "/.config");
-        let script = configHome + "/quickshell/caelestia/scripts/list-plugins.sh";
+        let script = Quickshell.shellPath("scripts/list-plugins.sh");
+        let bundledPlugins = Quickshell.shellPath("modules/plugins");
 
         let proc = Qt.createQmlObject(`
             import Quickshell.Io
             Process {
-                command: ["bash", "${script}"]
+                command: ["bash", ${JSON.stringify(script)}, ${JSON.stringify(bundledPlugins)}]
                 stdout: StdioCollector { id: out }
                 stderr: StdioCollector { id: err }
                 onExited: (code) => {
-                    console.log("listPluginsProc exited with code:", code, "stdout:", out.text, "stderr:", err.text);
                     if (code === 0) {
                         try {
                             let list = JSON.parse(out.text);
-                            console.log("Parsed plugin list, length:", list.length);
                             if (list.length === 0) {
                                 pluginLoader.checkAndFinalize();
                             }
@@ -224,6 +330,7 @@ Item {
                             pluginLoader.checkAndFinalize();
                         }
                     } else {
+                        console.log("listPluginsProc exited with code:", code, "stderr:", err.text);
                         pluginLoader.checkAndFinalize();
                     }
                     destroy();
@@ -235,6 +342,8 @@ Item {
 
     function removePluginFromAvailable(id) {
         unloadPlugin(id);
+        BarWidgetRegistry.unregister(id);
+        BackgroundWidgetRegistry.unregister(id);
         for (let j = 0; j < discovered.length; j++) {
             if ((discovered[j].id || discovered[j].name) === id) {
                 discovered.splice(j, 1);
@@ -255,16 +364,21 @@ Item {
         let disabled = pluginLoader.pluginSettings.disabledPlugins || [];
         meta.enabled = (disabled.indexOf(meta.id) === -1 && disabled.indexOf(meta.name) === -1);
         meta.settings = meta.settings || [];
+        meta.settingsCount = meta.settings.length;
         meta.mediaurl = meta.mediaurl || "";
         meta.restart = (meta.restart === "true" || meta.restart === true);
 
-        // Extract author information
         meta.authorName = meta.author ? (meta.author.name || "") : "";
         let aUrl = meta.author ? (meta.author.url || "") : "";
         meta.icon = meta.icon || "extension";
 
+        normalizeBarWidgets(meta);
+        normalizeBackgroundWidgets(meta);
+
         discovered.push(meta);
         CaelestiaApi.plugins.available.append(meta);
+        syncBarWidgets(meta, meta.enabled);
+        syncBackgroundWidgets(meta, meta.enabled);
         updateEnabledCount();
         pluginLoader.pluginsReloaded();
     }
@@ -299,11 +413,11 @@ Item {
                     let disabled = pluginLoader.pluginSettings.disabledPlugins || [];
                     meta.enabled = (disabled.indexOf(meta.id) === -1 && disabled.indexOf(meta.name) === -1);
                     meta.settings = meta.settings || [];
+                    meta.settingsCount = meta.settings.length;
                     meta.mediaurl = meta.mediaurl || "";
                     meta.icon = meta.icon || "extension";
                     meta.restart = (meta.restart === "true" || meta.restart === true);
 
-                    // Extract author information
                     meta.authorName = meta.author ? (meta.author.name || "") : "";
                     let aUrl = meta.author ? (meta.author.url || "") : "";
                     meta.authorAvatar = "";
@@ -312,9 +426,31 @@ Item {
                         meta.authorAvatar = cleanUrl + ".png";
                     }
 
+                    pluginLoader.normalizeBarWidgets(meta);
+                    pluginLoader.normalizeBackgroundWidgets(meta);
+
                     console.log("addPluginToAvailable: adding", meta.id, "to available list. mediaurl:", meta.mediaurl);
+
+                    // Updating an already listed plugin replaces the stale entry instead of
+                    // duplicating it, so the row reflects the fresh version right away.
+                    let replacedKey = meta.id || meta.name;
+                    for (let j = 0; j < pluginLoader.discovered.length; j++) {
+                        if ((pluginLoader.discovered[j].id || pluginLoader.discovered[j].name) === replacedKey) {
+                            pluginLoader.discovered.splice(j, 1);
+                            break;
+                        }
+                    }
+                    for (let i = 0; i < CaelestiaApi.plugins.available.count; i++) {
+                        let existing = CaelestiaApi.plugins.available.get(i);
+                        if ((existing.id || existing.name) === replacedKey) {
+                            CaelestiaApi.plugins.available.remove(i);
+                            break;
+                        }
+                    }
                     pluginLoader.discovered.push(meta);
                     CaelestiaApi.plugins.available.append(meta);
+                    pluginLoader.syncBarWidgets(meta, meta.enabled);
+                    pluginLoader.syncBackgroundWidgets(meta, meta.enabled);
                     pluginsReloaded();
                     if (meta.restart) {
                         PluginStore.restartRequired = true;

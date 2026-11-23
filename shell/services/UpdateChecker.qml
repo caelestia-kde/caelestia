@@ -8,10 +8,15 @@ import Quickshell.Io
 import Caelestia
 import Caelestia.Config
 import qs.services
-import qs.utils
 
 Singleton {
     id: root
+
+    enum Handoff {
+        None,
+        Pending,
+        Running
+    }
 
     property bool hasUpdate: false
     property string currentBranch: "main"
@@ -22,72 +27,172 @@ Singleton {
     property bool versionSummaryMode: false
     property string currentVersion: "unknown"
     property string previousVersion: "unknown"
-    property string targetVersion: ""
     property string installedCommitHash: ""
+
+    /// Whether this install came from a package. The updater hands that install to the
+    /// package manager, so its "update" is a system upgrade and does not restart the
+    /// shell - both facts the card has to state rather than assume the other way round.
+    property bool packagedUpdate: false
+
+    /// What the last finished update recorded, and what a staging run downloaded. The
+    /// updater runs in a terminal the shell cannot watch, so a file it writes is the only
+    /// account of the outcome that survives the restart the update causes.
+    property string lastResultStatus: ""
+    property string lastResultLabel: ""
+    property string lastResultCode: ""
+    property bool lastResultLogout: false
+    property string stagedLabel: ""
+
+    /// What the running updater is doing, from the record it writes as it goes. The
+    /// terminal that starts it may not be watched, and the shell that started it is
+    /// restarted by the end, so this file is what the pane can show.
+    property int progressIndex: 0
+    property int progressTotal: 0
+    property string progressText: ""
+    property double progressAtMs: 0
+
+    readonly property real progressFraction: root.progressTotal > 0 ? Math.min(1, root.progressIndex / root.progressTotal) : 0
+
+    readonly property string stateDir: `${Quickshell.env("XDG_STATE_HOME") || Quickshell.env("HOME") + "/.local/state"}/caelestia`
 
     property string _localCommit: ""
     property bool loaded: false
     property bool checkingUpdates: false
 
-    // Periodic auto-check heartbeat (drives the tray indicator popout's
-    // "last check X ago / next check in Y" readout, CachyOS-updater style).
-    // A single-shot timer is restarted every time a check completes so the
-    // next auto-check always lands one interval after the most recent one,
-    // manual or otherwise.
     property double lastCheckMs: 0
+    property double lastCheckSuccessMs: 0
+    property string checkError: ""
 
-    property int checkIntervalMs: 1800000 // 30 minutes
+    property int checkIntervalMs: 1800000
 
-    // Dev-branch commit pagination: the update checker only fetches the
-    // first page (devCommitLimit commits) and exposes a "load more" affordance
-    // for the rest, so we never pull the whole dev history up front.
     property int devCommitLimit: 10
     property int devCommitOffset: 0
     property bool hasMoreCommits: false
     property bool loadingMoreCommits: false
 
-    // ── Update process state ────────────────────────────────────────────
-    // Lives on the singleton (rather than UpdatesPage) so it survives the
-    // page being destroyed/recreated when the user navigates to a different
-    // top-level Nexus page and back (see Pages.qml `loadPage`).
-    property string updateLogs: ""
-    property bool updateRunning: false
-    property bool updateCancelled: false
-    property real updateProgress: 0.0
-    property string updateStatus: ""
-    property bool logsExpanded: false
-    property double lastUpdateOutputMs: 0
-    property bool stallNoticeShown: false
-    property string processLineBuffer: ""
+    property int handoff: UpdateChecker.Handoff.None
+    property string handoffVersion: ""
+    property double _handoffStartedMs: 0
+    property bool _reloadQueued: false
+
+    readonly property int handoffProbeIntervalMs: 2000
+    readonly property int handoffGraceMs: 10000
+    readonly property bool checkingEnabled: GlobalConfig.general.checkUpdates
+    readonly property bool checkFailed: root.checkError !== ""
+    readonly property bool everChecked: root.lastCheckSuccessMs > 0
 
     function clampBranch(branch: string): string {
         return (branch === "dev" || branch === "main") ? branch : "main";
     }
 
-    function checkUpdates(branch) {
-        if (branch === undefined) branch = "";
-        if (!GlobalConfig.general.checkUpdates) return;
-        if (branch !== "") currentBranch = clampBranch(branch);
-        else currentBranch = clampBranch(currentBranch);
+    function updaterArgs(version): list<string> {
+        const branch = root.clampBranch(root.currentBranch);
+        const ref = version === undefined ? root.handoffVersion : version;
+        return ref !== "" ? ["caelestia-update", branch, ref] : ["caelestia-update", branch];
+    }
+
+    /// The same run, stopped after the download. Applying it stays a separate decision.
+    function stageArgs(version): list<string> {
+        const args = root.updaterArgs(version);
+        return [args[0], "--stage", ...args.slice(1)];
+    }
+
+    function markStaged(version): void {
+        root.stagedLabel = version === undefined ? "" : version;
+    }
+
+    function clearResult(): void {
+        root.lastResultStatus = "";
+        root.lastResultLabel = "";
+        root.lastResultCode = "";
+        root.lastResultLogout = false;
+        Quickshell.execDetached(["rm", "-f", `${root.stateDir}/last-update`]);
+    }
+
+    /// A record is `status|label|code|logout`, written by caelestia-update when it finished.
+    function parseRecord(line): var {
+        const parts = line.trim().split("|");
+        if (parts.length < 2 || parts[0] === "")
+            return null;
+        return {
+            status: parts[0],
+            label: parts[1],
+            code: parts.length > 2 ? parts[2] : "",
+            logout: parts.length > 3 && parts[3] === "1"
+        };
+    }
+
+    // The updater runs in a terminal this shell only spawns, so the lock
+    // caelestia-update holds is the only honest answer to "is it running".
+    function markHandoff(version): void {
+        root.handoffVersion = version === undefined ? "" : version;
+        root.handoff = UpdateChecker.Handoff.Pending;
+        root._handoffStartedMs = Date.now();
+        root.probeHandoff();
+    }
+
+    function dismissHandoff(): void {
+        root.handoff = UpdateChecker.Handoff.None;
+        root.handoffVersion = "";
+    }
+
+    function probeHandoff(): void {
+        if (handoffProbe.running)
+            return;
+        handoffProbe.running = true;
+    }
+
+    function checkNow(branch): void {
+        root.startCheck(branch === undefined ? "" : branch, true);
+    }
+
+    function checkInBackground(): void {
+        root.startCheck("", false);
+    }
+
+    function startCheck(branch, manual) {
+        // Only an automatic check honours the periodic-check setting: a user who
+        // presses Check must get an answer even with checking switched off,
+        // otherwise the setting turns the whole page into a dead end.
+        if (!manual && !root.checkingEnabled)
+            return;
+        // Only an explicit branch pick re-points the tracked update channel;
+        // background checks must not fight the channel the updater recorded from
+        // the tree it actually installed (issue #565).
+        if (branch !== "")
+            root.currentBranch = root.clampBranch(branch);
+        else
+            root.currentBranch = root.clampBranch(root.currentBranch);
+        const persistBranch = branch !== "";
         checkingUpdates = true;
+        checkError = "";
         devCommitOffset = 0;
         hasMoreCommits = false;
         checkClaudeCodeUpdate();
-        
+
         let bashCmd = `
     CURRENT_BRANCH="$1"
     LOCAL_COMMIT="$(cat \"$HOME/.config/quickshell/caelestia/.current_commit\" 2>/dev/null || true)"
 
 ALLOWED_BRANCHES="main dev"
+# One lookup for every channel: asking per branch meant a single failed
+# request looked like the branch was gone, and the tracked channel was
+# silently re-pointed at main (#1327).
+REMOTE_HEADS="$(git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=20 ls-remote --heads https://github.com/caelestia-kde/caelestia.git $ALLOWED_BRANCHES 2>/dev/null)"
+if [ -z "$REMOTE_HEADS" ]; then
+    echo "FAIL|GitHub is unreachable"
+    exit 1
+fi
 LIVE_ALLOWED_BRANCHES=""
 for b in $ALLOWED_BRANCHES; do
-    if git ls-remote --exit-code --heads https://github.com/ladybug-me/caelestia-kde.git "$b" >/dev/null 2>&1; then
+    if printf '%s\n' "$REMOTE_HEADS" | grep -q "refs/heads/$b$"; then
         LIVE_ALLOWED_BRANCHES="$LIVE_ALLOWED_BRANCHES,$b"
     fi
 done
 LIVE_ALLOWED_BRANCHES="$(printf '%s' "$LIVE_ALLOWED_BRANCHES" | sed 's/^,//')"
 if [ -z "$LIVE_ALLOWED_BRANCHES" ]; then
-    LIVE_ALLOWED_BRANCHES="main"
+    echo "FAIL|None of the update channels exist upstream"
+    exit 1
 fi
 echo "BRANCHES|$LIVE_ALLOWED_BRANCHES"
 
@@ -99,13 +204,33 @@ if ! echo ",main,dev," | grep -q ",$CURRENT_BRANCH,"; then
     CURRENT_BRANCH="main"
 fi
 
-mkdir -p "$HOME/.config/quickshell/caelestia"
-echo "$CURRENT_BRANCH" > "$HOME/.config/quickshell/caelestia/.update_branch"
+STATE_HELPER=""
+for candidate in \
+    "\${CAELESTIA_LIB_DIR:-}/update-state.sh" \
+    "$HOME/.local/lib/caelestia/update-state.sh" \
+    "/usr/share/caelestia/scripts/lib/update-state.sh"; do
+    if [ -r "$candidate" ]; then
+        STATE_HELPER="$candidate"
+        break
+    fi
+done
+if [ -n "$STATE_HELPER" ]; then
+    . "$STATE_HELPER"
+fi
+if [ "$2" = "1" ] && command -v update_state_set_branch >/dev/null 2>&1; then
+    update_state_set_branch "$HOME/.config/quickshell/caelestia" "$CURRENT_BRANCH" || true
+fi
 REPO="$HOME/.cache/caelestia-update-repo"
 if [ ! -d "$REPO" ]; then
-    git clone --bare --filter=blob:none https://github.com/ladybug-me/caelestia-kde.git "$REPO" >/dev/null 2>&1
+    if ! git clone --bare --filter=blob:none https://github.com/caelestia-kde/caelestia.git "$REPO" >/dev/null 2>&1; then
+        echo "FAIL|Couldn't clone the update repository"
+        exit 1
+    fi
 else
-    git -C "$REPO" fetch --force origin "$CURRENT_BRANCH:$CURRENT_BRANCH" >/dev/null 2>&1
+    if ! git -C "$REPO" fetch --force origin "$CURRENT_BRANCH:$CURRENT_BRANCH" >/dev/null 2>&1; then
+        echo "FAIL|Couldn't fetch the latest commits"
+        exit 1
+    fi
 fi
 
 normalize_version() {
@@ -138,14 +263,18 @@ if [ "$CURRENT_BRANCH" = "main" ]; then
     if [ -f "$CURRENT_VERSION_FILE" ]; then
         FROM_VERSION="$(sed -nE 's/^VERSION[[:space:]]*=[[:space:]]*([A-Za-z0-9._-]+).*/\\1/p' "$CURRENT_VERSION_FILE" | head -n 1)"
     fi
-    # Fall through instead of elif-chaining: an existing but empty/unparseable
-    # .current_version file (e.g. truncated by a failed git show) must not
-    # block the commit- and version.env-based fallbacks below.
     if [ -z "$FROM_VERSION" ] && [ -n "$LOCAL_COMMIT" ]; then
         FROM_VERSION="$(resolve_version "$LOCAL_COMMIT")"
     fi
     if [ -z "$FROM_VERSION" ] && [ -f "$HOME/.config/quickshell/caelestia/.github/version.env" ]; then
         FROM_VERSION="$(sed -nE 's/^VERSION[[:space:]]*=[[:space:]]*([A-Za-z0-9._-]+).*/\\1/p' "$HOME/.config/quickshell/caelestia/.github/version.env" | head -n 1)"
+    fi
+    VER_HELPER_DIR="$CAELESTIA_LIB_DIR"
+    if [ -z "$VER_HELPER_DIR" ]; then
+        VER_HELPER_DIR=/usr/lib/caelestia
+    fi
+    if [ -z "$FROM_VERSION" ] && [ -x "$VER_HELPER_DIR/version" ]; then
+        FROM_VERSION="$("$VER_HELPER_DIR/version" -s 2>/dev/null | awk '{ sub(/,/, "", $2); print $2 }')"
     fi
     [ -n "$FROM_VERSION" ] || FROM_VERSION="unknown"
     FROM_VERSION="$(normalize_version "$FROM_VERSION")"
@@ -160,11 +289,6 @@ if [ "$CURRENT_BRANCH" = "main" ]; then
     echo "META|$FROM_VERSION|$LATEST_VERSION|$PREVIOUS_VERSION"
 
     if [ "$FROM_VERSION" != "$LATEST_VERSION" ] && [ "$FROM_VERSION" != "unknown" ] && [ -n "$LATEST_VERSION" ]; then
-        # Announce an update only when the installed version is a known
-        # release strictly behind the newest tag. Unresolvable local commits
-        # resolve to "unknown", and version.env can be bumped ahead of the
-        # newest tag — neither may count as "update available", otherwise a
-        # user already at (or ahead of) the latest main is offered a downgrade.
         DISTANCE="$(printf '%s\n' "$TAG_LINES" | cut -d'|' -f1 | nl -v0 | awk -v local="$FROM_VERSION" '
             $2 == local { print $1; found=1; exit }
             END { if (!found) print -1 }
@@ -196,7 +320,6 @@ import urllib.request
 def parse_whats_changed(text: str) -> str:
     txt = (text or "").replace("\\r", "")
 
-    # Keep only the "What's Changed" section when present.
     m = re.search(r"^#{2,3}\\s*What's Changed\\s*$", txt, flags=re.IGNORECASE | re.MULTILINE)
     if m:
         rest = txt[m.end():]
@@ -208,7 +331,6 @@ def parse_whats_changed(text: str) -> str:
     else:
         return ""
 
-    # Normalize spacing and keep it compact for list rows.
     txt = txt.strip()
     txt = re.sub(r"\\n{3,}", "\\n\\n", txt)
     txt = re.sub(r"[ \\t]+\\n", "\\n", txt)
@@ -220,7 +342,7 @@ def run_git(*args: str) -> str:
     return subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL)
 
 def fetch_releases() -> list:
-    url = "https://api.github.com/repos/ladybug-me/caelestia-kde/releases?per_page=100"
+    url = "https://api.github.com/repos/caelestia-kde/caelestia/releases?per_page=100"
     req = urllib.request.Request(url, headers={"User-Agent": "caelestia-update-checker"})
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -261,7 +383,6 @@ from_version = (os.getenv("FROM_VERSION") or "unknown").strip()
 latest = tags[0]["tag"]
 previous = tags[1]["tag"] if len(tags) > 1 else latest
 
-# Strip a leading "v" so "v2.3.1" and "2.3.1" compare equal.
 def norm(v):
     return (v or "").lstrip("vV")
 
@@ -271,9 +392,6 @@ previous = norm(previous)
 
 print(f"META|{from_version}|{latest}|{previous}")
 
-# Mirror the bash logic above: only a known release strictly behind the
-# newest tag is an available update. "unknown" or a version bumped ahead
-# of the newest tag must not trigger the shell's update offer.
 tag_names = [norm(t["tag"]) for t in tags]
 if from_version != latest and from_version != "unknown" and from_version in tag_names:
     distance = tag_names.index(from_version)
@@ -291,9 +409,6 @@ for t in tags:
     print("RELEASE_JSON|" + json.dumps(out, separators=(",", ":"), ensure_ascii=False))
 PY
 else
-    # Dev branch: paginated commit history — emit only the first page (10
-    # commits by default) plus a MORE flag so the UI can offer to load the
-    # next page instead of pulling the whole dev history up front.
     DEV_LOG_LIMIT=10
     DEV_SKIP=0
     git -C "$REPO" log --format="COMMIT%x1f%H%x1f%h%x1f%s%x1f%an%x1f%cI%x1f%P" --skip="$DEV_SKIP" -n "$((DEV_LOG_LIMIT + 1))" "$CURRENT_BRANCH" 2>/dev/null | awk -v lim="$DEV_LOG_LIMIT" '
@@ -301,9 +416,6 @@ else
         NR > lim { more = 1 }
         END { if (more) print "MORE|1"; else print "MORE|0" }
     '
-    # Count commits only when the installed commit is a true ancestor of the
-    # branch — a diverged or unknown commit must not make every branch commit
-    # look "new", otherwise a build from a local branch is told it is behind.
     if [ -n "$LOCAL_COMMIT" ] && git -C "$REPO" merge-base --is-ancestor "$LOCAL_COMMIT" "$CURRENT_BRANCH" 2>/dev/null; then
         AHEAD_COUNT="$(git -C "$REPO" rev-list --count "$LOCAL_COMMIT..$CURRENT_BRANCH" 2>/dev/null || echo 0)"
     else
@@ -311,15 +423,25 @@ else
     fi
     [ -n "$AHEAD_COUNT" ] || AHEAD_COUNT=0
     echo "AHEAD|$AHEAD_COUNT"
+    LOCAL_FULL="$(git -C "$REPO" rev-parse --verify --quiet "$LOCAL_COMMIT^{commit}" 2>/dev/null || true)"
+    if [ -n "$LOCAL_FULL" ] && git -C "$REPO" merge-base --is-ancestor "$LOCAL_FULL" "$CURRENT_BRANCH" 2>/dev/null; then
+        if ! git -C "$REPO" rev-list -n "$DEV_LOG_LIMIT" "$CURRENT_BRANCH" 2>/dev/null | grep -qx "$LOCAL_FULL"; then
+            git -C "$REPO" log -1 --format="LOCAL_COMMIT%x1f%H%x1f%h%x1f%s%x1f%an%x1f%cI%x1f%P" "$LOCAL_FULL" 2>/dev/null || true
+        fi
+    fi
     echo "LOCAL|$LOCAL_COMMIT"
 fi
 `
-    gitProcess.command = ["bash", "-c", bashCmd, "update-check", currentBranch];
+    gitProcess.command = ["bash", "-c", bashCmd, "update-check", currentBranch, persistBranch ? "1" : "0"];
         gitProcess.running = true;
     }
 
     function reload() {
         loaded = false;
+        if (localCommitProcess.running) {
+            root._reloadQueued = true;
+            return;
+        }
         localCommitProcess.running = true;
     }
 
@@ -343,91 +465,37 @@ git -C "$REPO" log --format="COMMIT%x1f%H%x1f%h%x1f%s%x1f%an%x1f%cI%x1f%P" --ski
         moreCommitsProcess.running = true;
     }
 
-    function handleProgressLine(rawLine: string): void {
-        const line = rawLine.trim();
-        if (line === "")
-            return;
-
-        const progressMatch = line.match(/PROGRESS:\s*(done.*|\d+\/\d+:\s*.+)$/);
-        if (progressMatch) {
-            const pText = progressMatch[1].trim();
-            if (pText.startsWith("done")) {
-                root.updateProgress = 1.0;
-                root.updateStatus = qsTr("Done!");
-                return;
-            }
-
-            const stageMatch = pText.match(/^(\d+)\/(\d+):\s*(.+)$/);
-            if (stageMatch) {
-                const current = parseInt(stageMatch[1]);
-                const total = parseInt(stageMatch[2]);
-                if (total > 0) {
-                    root.updateProgress = current / total;
-                    root.updateStatus = stageMatch[3];
-                }
-            }
-            return;
-        }
-
-        // Fallback: mark deploy stage as finished when deploy script confirms completion.
-        if (line.indexOf("Config deployment complete") !== -1 && root.updateProgress < 0.8) {
-            root.updateProgress = 0.7;
-            root.updateStatus = qsTr("Preparing shell build...");
-        }
+    Component.onCompleted: {
+        localCommitProcess.running = true;
+        // An update restarts this shell, so a fresh shell may already be sitting
+        // behind a running updater. Ask the lock rather than assume none.
+        root.probeHandoff();
     }
 
-    function ingestProcessText(rawText: string): void {
-        root.lastUpdateOutputMs = Date.now();
-        root.stallNoticeShown = false;
-
-        const cleaned = rawText
-            .replace(/\u001b\[[0-9;?]*[A-Za-z]/g, "")
-            .replace(/\r/g, "\n");
-
-        const chunk = cleaned.endsWith("\n") ? cleaned : (cleaned + "\n");
-        root.updateLogs += chunk;
-
-        const combined = root.processLineBuffer + chunk;
-        const lines = combined.split("\n");
-        root.processLineBuffer = lines.pop();
-
-        for (let i = 0; i < lines.length; i++) {
-            root.handleProgressLine(lines[i]);
-        }
-    }
-
-    function startUpdate(targetVersion: string): void {
-        if (root.updateRunning)
-            return;
-        root.targetVersion = targetVersion;
-        root.updateCancelled = false;
-        root.updateLogs = "";
-        root.updateProgress = 0.0;
-        root.updateStatus = qsTr("Starting…");
-        root.updateRunning = true;
-        root.lastUpdateOutputMs = Date.now();
-        root.stallNoticeShown = false;
-        root.processLineBuffer = "";
-        root.logsExpanded = true;
-        updateProcess.running = true;
-    }
-
-    function stopUpdate(): void {
-        if (!root.updateRunning)
-            return;
-        root.updateCancelled = true;
-        updateProcess.running = false;
-        root.updateRunning = false;
-        root.updateStatus = qsTr("Canceled");
-        root.updateLogs += "\n[Canceled by user]";
-    }
-
-    // Process to read local commit and saved branch
     Process {
         id: localCommitProcess
 
-        running: GlobalConfig.general.checkUpdates
-        command: ["bash", "-c", "echo \"$(cat ~/.config/quickshell/caelestia/.current_commit 2>/dev/null)|$(cat ~/.config/quickshell/caelestia/.update_branch 2>/dev/null)\""]
+        command: ["bash", "-c", `
+CONFIG="$HOME/.config/quickshell/caelestia"
+STATE_HELPER=""
+for candidate in \
+    "\${CAELESTIA_LIB_DIR:-}/update-state.sh" \
+    "$HOME/.local/lib/caelestia/update-state.sh" \
+    "/usr/share/caelestia/scripts/lib/update-state.sh"; do
+    if [ -r "$candidate" ]; then
+        STATE_HELPER="$candidate"
+        break
+    fi
+done
+if [ -n "$STATE_HELPER" ]; then
+    . "$STATE_HELPER"
+fi
+if command -v update_state_read_commit >/dev/null 2>&1; then
+    printf '%s|%s|%s\\n' "$(update_state_read_commit "$CONFIG")" "$(update_state_read_branch "$CONFIG")" "$([ -x /usr/bin/caelestia-update ] && echo 1 || echo 0)"
+else
+    printf '|main|%s\\n' "$([ -x /usr/bin/caelestia-update ] && echo 1 || echo 0)"
+fi
+`]
         stdout: StdioCollector {
             onStreamFinished: {
                 const parts = text.trim().split("|");
@@ -435,8 +503,16 @@ git -C "$REPO" log --format="COMMIT%x1f%H%x1f%h%x1f%s%x1f%an%x1f%cI%x1f%P" --ski
                 if (parts.length > 1 && parts[1] !== "") {
                     root.currentBranch = parts[1];
                 }
+                if (parts.length > 2)
+                    root.packagedUpdate = parts[2] === "1";
                 root.loaded = true;
-                root.checkUpdates();
+                root.checkInBackground();
+            }
+        }
+        onExited: {
+            if (root._reloadQueued) {
+                root._reloadQueued = false;
+                localCommitProcess.running = true;
             }
         }
     }
@@ -445,12 +521,15 @@ git -C "$REPO" log --format="COMMIT%x1f%H%x1f%h%x1f%s%x1f%an%x1f%cI%x1f%P" --ski
         id: gitProcess
 
         command: []
-        onExited: _code => { // qmllint disable signal-handler-parameters
+        onExited: code => {
             root.checkingUpdates = false;
             root.lastCheckMs = Date.now();
-            if (autoCheckTimer.running)
-                autoCheckTimer.restart();
+            if (root.checkError === "" && code !== 0)
+                root.checkError = qsTr("The update check failed");
+            if (root.checkError === "")
+                root.lastCheckSuccessMs = Date.now();
         }
+
         stdout: StdioCollector {
             onStreamFinished: {
                 try {
@@ -464,10 +543,14 @@ git -C "$REPO" log --format="COMMIT%x1f%H%x1f%h%x1f%s%x1f%an%x1f%cI%x1f%P" --ski
                     let parsedCommitCount = 0;
                     let parsedHasMore = false;
                     root.availableBranches = ["main", "dev"];
-                    
+
                     for (let i = 0; i < lines.length; i++) {
                         const line = lines[i].trim();
                         if (line === "") continue;
+                        if (line.startsWith("FAIL|")) {
+                            root.checkError = line.substring(5).trim() || qsTr("The update check failed");
+                            continue;
+                        }
                         if (line.startsWith("BRANCHES|")) {
                             root.availableBranches = line.substring(9).split(",").filter(b => b === "main" || b === "dev");
                             if (root.availableBranches.length === 0)
@@ -483,7 +566,6 @@ git -C "$REPO" log --format="COMMIT%x1f%H%x1f%h%x1f%s%x1f%an%x1f%cI%x1f%P" --ski
                             parsedVersionSummaryMode = true;
                             parsedPendingCount = isNaN(count) ? 1 : Math.max(1, count);
                             parsedHasUpdate = parsedPendingCount > 0;
-                            // Show only version entries in main mode; no commit-level rows.
                             continue;
                         }
                         if (line.startsWith("META|")) {
@@ -513,7 +595,6 @@ git -C "$REPO" log --format="COMMIT%x1f%H%x1f%h%x1f%s%x1f%an%x1f%cI%x1f%P" --ski
                                 });
                                 parsedVersions.push(tag);
                             } catch (_ignored) {
-                                // Ignore malformed release lines and keep parsing.
                             }
                             continue;
                         }
@@ -525,7 +606,6 @@ git -C "$REPO" log --format="COMMIT%x1f%H%x1f%h%x1f%s%x1f%an%x1f%cI%x1f%P" --ski
                             if (tag === "")
                                 continue;
 
-                            // Fallback path when release JSON parsing is unavailable.
                             parsedCommits.push({
                                 hash: qsTr("Release"),
                                 subject: tag,
@@ -536,8 +616,7 @@ git -C "$REPO" log --format="COMMIT%x1f%H%x1f%h%x1f%s%x1f%an%x1f%cI%x1f%P" --ski
                             parsedVersions.push(tag);
                             continue;
                         }
-                        if (line.startsWith("COMMIT\u001f")) {
-                            // COMMIT<US>fullHash<US>shortHash<US>subject<US>author<US>date<US>parents
+                        if (line.startsWith("COMMIT\u001f") || line.startsWith("LOCAL_COMMIT\u001f")) {
                             const parts = line.split("\u001f");
                             parsedVersionSummaryMode = false;
                             const parentsField = (parts[6] || "").trim();
@@ -550,7 +629,8 @@ git -C "$REPO" log --format="COMMIT%x1f%H%x1f%h%x1f%s%x1f%an%x1f%cI%x1f%P" --ski
                                 date: new Date(parts[5]).toLocaleString(Qt.locale(), Locale.ShortFormat),
                                 isMerge: parentCount > 1
                             });
-                            parsedCommitCount++;
+                            if (line.startsWith("COMMIT\u001f"))
+                                parsedCommitCount++;
                             continue;
                         }
                         if (line.startsWith("LOCAL|")) {
@@ -581,7 +661,6 @@ git -C "$REPO" log --format="COMMIT%x1f%H%x1f%h%x1f%s%x1f%an%x1f%cI%x1f%P" --ski
                     }
 
                     if (!parsedVersionSummaryMode && parsedLocalCommitFull === "") {
-                        // No installed commit on record yet: can't say what's pending.
                         parsedPendingCount = 0;
                         parsedHasUpdate = false;
                     }
@@ -616,13 +695,6 @@ git -C "$REPO" log --format="COMMIT%x1f%H%x1f%h%x1f%s%x1f%an%x1f%cI%x1f%P" --ski
                     }
                     root.availableVersions = parsedVersionSummaryMode ? uniqueVersions : [];
                     if (parsedVersionSummaryMode) {
-                        if (!root.availableVersions.includes(root.targetVersion)) {
-                            root.targetVersion = root.availableVersions.length > 0 ? root.availableVersions[0] : "";
-                        }
-                        // Leave currentVersion as "unknown" when the installed
-                        // version could not be resolved — pretending the newest
-                        // release is installed hides the real state and invites
-                        // wrong upgrade/downgrade offers.
                         if (root.previousVersion === "unknown" && root.availableVersions.length > 1) {
                             root.previousVersion = root.availableVersions[1];
                         }
@@ -637,9 +709,6 @@ git -C "$REPO" log --format="COMMIT%x1f%H%x1f%h%x1f%s%x1f%an%x1f%cI%x1f%P" --ski
         }
     }
 
-    // Fetch the next page of dev-branch commits. Unlike checkUpdates() this
-    // does not re-clone/re-fetch or re-resolve branches — the bare repo
-    // already exists, so it's just a git log with a --skip offset.
     Process {
         id: moreCommitsProcess
 
@@ -692,31 +761,14 @@ git -C "$REPO" log --format="COMMIT%x1f%H%x1f%h%x1f%s%x1f%an%x1f%cI%x1f%P" --ski
                 }
             }
         }
-        onExited: _code => { // qmllint disable signal-handler-parameters
+        onExited: _code => {
             root.loadingMoreCommits = false;
         }
     }
 
-    Settings {
-        id: updaterSettings
+    property string claudeCodeVersion: ""
 
-        category: "Updater"
-
-        property bool deployConfigs: true
-
-        property bool buildShell: true
-    }
-
-    property alias deployConfigs: updaterSettings.deployConfigs
-
-    property alias buildShell: updaterSettings.buildShell
-
-    // ---- Claude Code (the `claude` CLI backing the AI assistant) ----
-    // Checked alongside the shell's own updates so the AI settings page can offer
-    // "Update" or "Check for updates" without having to poll on its own.
-    property string claudeCodeVersion: ""       // installed, "" when not installed
-
-    property string claudeCodeLatestVersion: "" // newest published, "" when unknown
+    property string claudeCodeLatestVersion: ""
 
     property bool claudeCodeChecking: false
 
@@ -737,9 +789,6 @@ git -C "$REPO" log --format="COMMIT%x1f%H%x1f%h%x1f%s%x1f%an%x1f%cI%x1f%P" --ski
     Process {
         id: claudeCodeProcess
 
-        // Prints "<installed>|<latest>". The published version comes from the same
-        // endpoint claude.ai/install.sh reads, which is what the settings page's
-        // install/update button runs, so the two can't disagree about what "latest" is.
         command: ["sh", "-c", `
 BIN="$HOME/.local/bin/claude"
 INSTALLED=""
@@ -760,71 +809,114 @@ echo "$INSTALLED|$LATEST"
         onExited: root.claudeCodeChecking = false
     }
 
-    Timer {
-        interval: 30000
-        repeat: true
-        running: root.updateRunning
-        onTriggered: {
-            if (!root.updateRunning) return;
-            if (root.lastUpdateOutputMs <= 0) return;
-            const idleMs = Date.now() - root.lastUpdateOutputMs;
-            if (idleMs >= 120000 && !root.stallNoticeShown) {
-                root.stallNoticeShown = true;
-                root.updateLogs += "[WARN] No updater output for 120s. If this persists, stop and retry.\n";
+    Process {
+        id: handoffProbe
+
+        command: ["bash", "-c", `
+LOCK="\${XDG_RUNTIME_DIR:-\${TMPDIR:-/tmp}}/caelestia-$UID/update.lock"
+[ -e "$LOCK" ] || exit 0
+command -v flock >/dev/null 2>&1 || exit 0
+flock -n "$LOCK" true 2>/dev/null && exit 0
+exit 1
+`]
+        onExited: code => {
+            if (code === 1) {
+                root.handoff = UpdateChecker.Handoff.Running;
+                return;
             }
+            if (root.handoff === UpdateChecker.Handoff.None)
+                return;
+            // The terminal needs a moment to start the updater, so a lock that is
+            // not held yet only means "finished" once that grace has passed.
+            if (root.handoff === UpdateChecker.Handoff.Pending && Date.now() - root._handoffStartedMs <= root.handoffGraceMs)
+                return;
+            root.dismissHandoff();
+            root.checkInBackground();
         }
+    }
+
+    Timer {
+        interval: root.handoffProbeIntervalMs
+        repeat: true
+        running: root.handoff !== UpdateChecker.Handoff.None
+        onTriggered: root.probeHandoff()
+    }
+
+    FileView {
+        path: `${Quickshell.env("HOME")}/.config/quickshell/caelestia/.current_commit`
+        watchChanges: true
+        printErrors: false
+        onFileChanged: root.reload()
+    }
+
+    // The account of the last run, written by caelestia-update as its final act. Read on
+    // start because the update restarts the shell, which is the only moment it is news.
+    FileView {
+        id: resultFile
+
+        path: `${root.stateDir}/last-update`
+        printErrors: false
+        // The updater writes this and then restarts the shell, so the record can land either
+        // side of that restart. Watching it means the order does not matter.
+        watchChanges: true
+        onFileChanged: reload()
+        onLoaded: {
+            const record = root.parseRecord(text());
+            root.lastResultStatus = record === null ? "" : record.status;
+            root.lastResultLabel = record === null ? "" : record.label;
+            root.lastResultCode = record === null ? "" : record.code;
+            root.lastResultLogout = record !== null && record.logout;
+        }
+        onLoadFailed: {
+            root.lastResultStatus = "";
+            root.lastResultLabel = "";
+            root.lastResultCode = "";
+            root.lastResultLogout = false;
+        }
+    }
+
+    FileView {
+        id: stagedFile
+
+        path: `${root.stateDir}/staged-update`
+        printErrors: false
+        onLoaded: {
+            const record = root.parseRecord(text());
+            root.stagedLabel = record === null ? "" : record.label;
+        }
+        onLoadFailed: root.stagedLabel = ""
+    }
+
+    FileView {
+        id: progressFile
+
+        path: `${root.stateDir}/progress`
+        printErrors: false
+        watchChanges: true
+        onFileChanged: reload()
+        onLoaded: {
+            const parts = text().trim().split("|");
+            if (parts.length < 4) {
+                root.progressTotal = 0;
+                return;
+            }
+            root.progressIndex = parseInt(parts[0]) || 0;
+            root.progressTotal = parseInt(parts[1]) || 0;
+            root.progressText = parts[2] || "";
+            root.progressAtMs = (parseFloat(parts[3]) || 0) * 1000;
+        }
+        onLoadFailed: root.progressTotal = 0
     }
 
     Timer {
         id: autoCheckTimer
 
         interval: root.checkIntervalMs
-        repeat: false
+        repeat: true
         running: GlobalConfig.general.checkUpdates && root.loaded
         onTriggered: {
-            if (!root.checkingUpdates && !root.updateRunning)
-                root.checkUpdates();
-        }
-    }
-
-    Process {
-        id: updateProcess
-
-        command: [Paths.absolutePath("~/.local/bin/caelestia-update"), root.currentBranch]
-            .concat(root.targetVersion !== "" ? [root.targetVersion] : [])
-        environment: ({
-            CAELESTIA_SKIP_DEPLOY: updaterSettings.deployConfigs ? "0" : "1",
-            CAELESTIA_SKIP_BUILD: updaterSettings.buildShell ? "0" : "1"
-        })
-        stdout: SplitParser {
-            onRead: function(text) {
-                root.ingestProcessText(text);
-            }
-        }
-        stderr: SplitParser {
-            onRead: function(text) {
-                root.ingestProcessText(text);
-            }
-        }
-        onExited: function(code) {
-            if (root.processLineBuffer !== "") {
-                root.handleProgressLine(root.processLineBuffer);
-                root.processLineBuffer = "";
-            }
-            root.updateRunning = false;
-            root.lastUpdateOutputMs = 0;
-            if (root.updateCancelled) {
-                root.updateCancelled = false;
-                root.updateStatus = qsTr("Canceled");
-                return;
-            }
-            if (code === 0) {
-                Toaster.toast(qsTr("Update Successful"), qsTr("The update is complete. Please log out to apply changes."), "done");
-                root.reload();
-            } else {
-                root.updateStatus = qsTr("Update failed (exit code %1)").arg(code);
-                Toaster.toast(qsTr("Update Failed"), qsTr("The update script returned error code %1").arg(code), "error");
-            }
+            if (!root.checkingUpdates)
+                root.checkInBackground();
         }
     }
 }

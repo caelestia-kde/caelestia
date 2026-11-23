@@ -1,12 +1,3 @@
-/*
-    SPDX-FileCopyrightText: 2024 ladybug-me
-    SPDX-License-Identifier: GPL-3.0-or-later
-
-    DinoGame.qml — lockscreen port of shell/modules/sidebar/DinoGame.qml
-    Uses DinoGameBackend singleton from Caelestia.Services (same as sidebar).
-    Assets are bundled under ../assets/ (relative to this file).
-    Quickshell/qs.* imports are replaced with plain QtQuick equivalents.
-*/
 
 import QtQuick
 import ".."
@@ -17,7 +8,6 @@ import Caelestia.Services
 Item {
     id: root
 
-    // Color theme — wired from NotifDock palette props
     property color activeColor: "#a2adac"
     property color bgColor:     "transparent"
     property bool isCaelestiaMode: false
@@ -25,8 +15,8 @@ Item {
 
     readonly property bool isPlaying:  DinoGameBackend.isPlaying
     readonly property bool isGameOver: DinoGameBackend.isGameOver
+    readonly property bool isRunning:  isPlaying && !DinoGameBackend.isPaused
 
-    // Asset root relative to this QML file
     readonly property string assets: Qt.resolvedUrl("../assets/").toString()
     function a(name) { return assets + name; }
 
@@ -36,7 +26,20 @@ Item {
     onWidthChanged: DinoGameBackend.width = width
     Component.onCompleted: DinoGameBackend.width = width
 
-    // Day/night background
+    onVisibleChanged: {
+        if (!visible)
+            DinoGameBackend.pause();
+    }
+
+    Component.onDestruction: {
+        DinoGameBackend.pause();
+    }
+
+    FrameAnimation {
+        running: root.isRunning && root.visible
+        onTriggered: DinoGameBackend.advance(frameTime * 1000)
+    }
+
     Rectangle {
         anchors.fill: parent
         color: root.bgColor
@@ -44,7 +47,6 @@ Item {
         Behavior on color { ColorAnimation { duration: 500 } }
     }
 
-    // ── Scrolling ground (shown while playing or game over) ──
     Item {
         visible: root.isPlaying || root.isGameOver
         width: parent.width
@@ -73,21 +75,17 @@ Item {
         }
     }
 
-    // ── Idle scene (not playing, not game-over) ──
     ColumnLayout {
         id: idleScene
         anchors.centerIn: parent
 
-        // Start hidden so the Behavior catches the change on startup
         property bool show: false
         opacity: show ? 1 : 0
         visible: opacity > 0
-        // Use a slight vertical shift for a slide-up effect
         transform: Translate { y: idleScene.show ? 0 : 20; Behavior on y { NumberAnimation { duration: 500; easing.type: Easing.OutCubic } } }
 
         Behavior on opacity { NumberAnimation { duration: 500; easing.type: Easing.OutCubic } }
 
-        // Trigger initial animation
         Component.onCompleted: {
             Qt.callLater(function() {
                 show = Qt.binding(function() { return !root.isPlaying && !root.isGameOver; });
@@ -176,7 +174,7 @@ Item {
 
         Text {
             Layout.alignment: Qt.AlignHCenter
-            text: "All up to date!"
+            text: qsTr("All up to date!")
             font { pixelSize: LockScreenConfig.sizeSmall; family: LockScreenConfig.fontBody; weight: Font.Medium }
             color: root.activeColor
             opacity: 0.8
@@ -184,19 +182,17 @@ Item {
 
         Text {
             Layout.alignment: Qt.AlignHCenter
-            text: "Click or press Space to play"
+            text: qsTr("Click to play")
             font { pixelSize: LockScreenConfig.sizeVerySmall; family: LockScreenConfig.fontBody }
             color: root.activeColor
             opacity: 0.5
         }
     }
 
-    // ── Active game scene ──
     Item {
         anchors.fill: parent
         visible: root.isPlaying || root.isGameOver
 
-        // Clouds
         Repeater {
             model: DinoGameBackend.clouds
             Image {
@@ -210,7 +206,6 @@ Item {
             }
         }
 
-        // Dino character
         Image {
             id: dino
             width:  DinoGameBackend.isDucking ? 59 : 44
@@ -234,7 +229,6 @@ Item {
         layer.effect: ColorOverlay { color: root.activeColor }
         }
 
-        // Score
         Text {
             text: "HI " + ("00000" + Math.floor(DinoGameBackend.highScore)).slice(-5)
                 + "  "  + ("00000" + Math.floor(DinoGameBackend.score)).slice(-5)
@@ -246,7 +240,6 @@ Item {
             opacity: 0.8
         }
 
-        // Obstacles
         Repeater {
             model: DinoGameBackend.obstacles
             Image {
@@ -267,7 +260,6 @@ Item {
             }
         }
 
-        // Game over overlay
         Column {
             visible: root.isGameOver && Math.floor(DinoGameBackend.score) < 99999
             anchors.centerIn: parent
@@ -276,20 +268,27 @@ Item {
 
             Text {
                 anchors.horizontalCenter: parent.horizontalCenter
-                text: "G A M E   O V E R"
+                text: qsTr("G A M E   O V E R")
                 font { pixelSize: LockScreenConfig.sizeSmall; family: LockScreenConfig.fontBody; weight: Font.Medium }
                 color: root.activeColor
             }
             Text {
                 anchors.horizontalCenter: parent.horizontalCenter
-                text: "Click to restart"
+                text: qsTr("Click to restart")
                 font { pixelSize: LockScreenConfig.sizeVerySmall; family: LockScreenConfig.fontBody }
                 color: root.activeColor
                 opacity: 0.6
             }
+            Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                visible: DinoGameBackend.isNewHighScore
+                text: qsTr("New high score: %1").arg(Math.floor(DinoGameBackend.highScore))
+                font { pixelSize: LockScreenConfig.sizeVerySmall; family: LockScreenConfig.fontBody }
+                color: root.activeColor
+                opacity: 0.8
+            }
         }
 
-        // Win overlay
         Column {
             visible: root.isGameOver && Math.floor(DinoGameBackend.score) >= 99999
             anchors.centerIn: parent
@@ -298,13 +297,34 @@ Item {
 
             Text {
                 anchors.horizontalCenter: parent.horizontalCenter
-                text: "Y O U   W I N !"
+                text: qsTr("Y O U   W I N !")
                 font { pixelSize: LockScreenConfig.sizeSmall; family: LockScreenConfig.fontBody; weight: Font.Medium }
                 color: root.activeColor
             }
             Text {
                 anchors.horizontalCenter: parent.horizontalCenter
-                text: "Now go touch grass"
+                text: qsTr("Now go touch grass")
+                font { pixelSize: LockScreenConfig.sizeVerySmall; family: LockScreenConfig.fontBody }
+                color: root.activeColor
+                opacity: 0.6
+            }
+        }
+
+        Column {
+            visible: root.isPlaying && DinoGameBackend.isPaused
+            anchors.centerIn: parent
+            anchors.verticalCenterOffset: -30
+            spacing: 6
+
+            Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: qsTr("P A U S E D")
+                font { pixelSize: LockScreenConfig.sizeSmall; family: LockScreenConfig.fontBody; weight: Font.Medium }
+                color: root.activeColor
+            }
+            Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: qsTr("Click to continue")
                 font { pixelSize: LockScreenConfig.sizeVerySmall; family: LockScreenConfig.fontBody }
                 color: root.activeColor
                 opacity: 0.6
@@ -312,9 +332,9 @@ Item {
         }
     }
 
-    // ── Input ──
     MouseArea {
         anchors.fill: parent
+        cursorShape: Qt.PointingHandCursor
         onClicked: {
             DinoGameBackend.jump();
         }

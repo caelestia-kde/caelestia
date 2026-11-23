@@ -6,26 +6,24 @@ import Caelestia.Config
 import qs.components
 import qs.components.controls
 import qs.services
+import qs.modules.nexus.common
 
 // Live preview pane: a scaled-down screen rectangle showing how windows will be
 // arranged under the current Krohnkite layout and gap settings.
 Item {
     id: root
 
-    // public API
-    property string layout: "BTree"      // active layout name
-    property int windowCount: 4         // number of mock windows (1-8)
+    property string layout: "BTree"
+    property int windowCount: 4
     property real gapBetween: 8
     property real gapTop: 8
     property real gapBottom: 8
     property real gapLeft: 8
     property real gapRight: 8
 
-    // size 
     Layout.fillWidth: true
     implicitHeight: Math.round(width * 9 / 16) + headerRow.implicitHeight + 8
 
-    // Layout engine – pure JS, returns [{x,y,w,h}, …] in normalised [0,1] space
     function computeRects(layoutName, n, gapB, gapT, gapBo, gapL, gapR) {
         const sx = screen.width;
         const sy = screen.height;
@@ -234,7 +232,6 @@ Item {
         return rects;
     }
 
-    //  Recompute rectangles whenever anything changes
     property var windowRects: []
 
     function refresh() {
@@ -253,12 +250,10 @@ Item {
     onGapLeftChanged: Qt.callLater(refresh)
     onGapRightChanged: Qt.callLater(refresh)
 
-    // UI
     ColumnLayout {
         anchors.fill: parent
         spacing: 8
 
-        // Header row: title + window count controls
         RowLayout {
             id: headerRow
             Layout.fillWidth: true
@@ -273,7 +268,7 @@ Item {
             StyledText {
                 text: qsTr("Windows:")
                 color: Colours.palette.m3onSurfaceVariant
-                font: Tokens.font.label.small
+                font: NexusStyle.secondaryFont
                 Layout.rightMargin: Tokens.spacing.small
             }
 
@@ -306,7 +301,6 @@ Item {
             }
         }
 
-        // Screen rectangle
         StyledClippingRect {
             id: screen
 
@@ -316,7 +310,6 @@ Item {
             color: Colours.tPalette.m3surfaceContainerHigh
             clip: true
 
-            // Border
             Rectangle {
                 anchors.fill: parent
                 radius: parent.radius
@@ -332,35 +325,33 @@ Item {
 
             Component.onCompleted: Qt.callLater(root.refresh)
 
-            // Gap visualizer tints
             Rectangle {
                 x: 0; y: 0; width: screen.width; height: root.gapTop
                 color: Qt.alpha(Colours.palette.m3primary, 0.10)
 
-                Behavior on height { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
+                Behavior on height { Anim { type: Anim.FastSpatial } }
             }
             Rectangle {
                 x: 0; y: screen.height - root.gapBottom; width: screen.width; height: root.gapBottom
                 color: Qt.alpha(Colours.palette.m3primary, 0.10)
 
-                Behavior on height { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
-                Behavior on y { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
+                Behavior on height { Anim { type: Anim.FastSpatial } }
+                Behavior on y { Anim { type: Anim.FastSpatial } }
             }
             Rectangle {
                 x: 0; y: 0; width: root.gapLeft; height: screen.height
                 color: Qt.alpha(Colours.palette.m3primary, 0.10)
 
-                Behavior on width { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
+                Behavior on width { Anim { type: Anim.FastSpatial } }
             }
             Rectangle {
                 x: screen.width - root.gapRight; y: 0; width: root.gapRight; height: screen.height
                 color: Qt.alpha(Colours.palette.m3primary, 0.10)
 
-                Behavior on width { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
-                Behavior on x { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
+                Behavior on width { Anim { type: Anim.FastSpatial } }
+                Behavior on x { Anim { type: Anim.FastSpatial } }
             }
 
-            // Mock windows
             Repeater {
                 id: windowRepeater
 
@@ -383,13 +374,12 @@ Item {
                         ? Qt.alpha(Colours.palette.m3primaryContainer, 0.85)
                         : Qt.alpha(Colours.palette.m3secondaryContainer, 0.80)
 
-                    Behavior on x      { NumberAnimation { duration: 280; easing.type: Easing.InOutCubic } }
-                    Behavior on y      { NumberAnimation { duration: 280; easing.type: Easing.InOutCubic } }
-                    Behavior on width  { NumberAnimation { duration: 280; easing.type: Easing.InOutCubic } }
-                    Behavior on height { NumberAnimation { duration: 280; easing.type: Easing.InOutCubic } }
+                    Behavior on x      { Anim { type: Anim.FastSpatial } }
+                    Behavior on y      { Anim { type: Anim.FastSpatial } }
+                    Behavior on width  { Anim { type: Anim.FastSpatial } }
+                    Behavior on height { Anim { type: Anim.FastSpatial } }
                     Behavior on color  { CAnim {} }
 
-                    // Window border
                     Rectangle {
                         anchors.fill: parent
                         radius: parent.radius
@@ -400,11 +390,10 @@ Item {
                         border.width: 1
                     }
 
-                    // Window index label
                     StyledText {
                         anchors.centerIn: parent
                         text: (winRect.index + 1).toString()
-                        font: Tokens.font.label.small
+                        font: NexusStyle.secondaryFont
                         color: winRect.index === 0
                             ? Colours.palette.m3onPrimaryContainer
                             : Colours.palette.m3onSecondaryContainer
@@ -413,16 +402,6 @@ Item {
                 }
             }
 
-            // Active layout badge
-            // StyledRect {
-            //     anchors.bottom: parent.bottom
-            //     anchors.horizontalCenter: parent.horizontalCenter
-            //     anchors.bottomMargin: Tokens.spacing.small
-            //     implicitWidth: badgeLabel.implicitWidth + Tokens.padding.medium * 2
-            //     implicitHeight: badgeLabel.implicitHeight + Tokens.padding.extraSmall
-            //     radius: implicitHeight / 2
-            //     color: Qt.alpha(Colours.palette.m3surfaceContainerHighest, 0.90)
-            //     z: 5
 
             //     StyledText {
             //         id: badgeLabel

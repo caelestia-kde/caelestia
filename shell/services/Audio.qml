@@ -22,12 +22,19 @@ Singleton {
     property list<PwNode> sources: []
     property list<PwNode> streams: []
 
-    // One representative stream per application, so no app ever appears twice
-    // in the "Now playing" lists even when it opens multiple PipeWire streams.
     property list<PwNode> appStreams: []
 
-    // The shell's own audio is already represented by the system volume, so it
-    // must never show up as a separate app in the "Now playing" lists.
+    /// The sounds the machine already ships, named relative to `systemSoundRoot`. The timer
+    /// alarm picks one, and the settings offer exactly these, so a sound that is not installed
+    /// cannot be chosen in the first place.
+    property var systemSounds: []
+    readonly property string systemSoundRoot: "/usr/share/sounds/"
+
+    // The capture half of `streams`: applications recording rather than playing. The
+    // nodes only exist while something is recording, which is what makes them readable
+    // as "who is listening".
+    readonly property var captureStreams: root.streams.filter(stream => stream.properties?.["media.class"] === "Stream/Input/Audio")
+
     readonly property string selfAppName: "caelestia-shell"
 
     readonly property PwNode sink: Pipewire.defaultAudioSink
@@ -39,9 +46,6 @@ Singleton {
     readonly property bool sourceMuted: !!source?.audio?.muted
     readonly property real sourceVolume: source?.audio?.volume ?? 0
 
-    // CavaProvider is only registered when the plugin was built with libcava
-    // available (see shell/plugin/CMakeLists.txt). Create it dynamically so a
-    // build without Cava doesn't fail this whole singleton's component load.
     property var cava: null
     readonly property alias beatTracker: beatTracker
 
@@ -122,7 +126,6 @@ Singleton {
     function getStreamName(stream: PwNode): string {
         if (!stream)
             return qsTr("Unknown");
-        // Try application name first, then description, then name
         return stream.properties["application.name"] || stream.description || stream.name || qsTr("Unknown Application");
     }
 
@@ -183,10 +186,10 @@ Singleton {
         SoundEffect {}
     }
 
-    function playSoundSource(sourcePath: string, enabled: bool, volume: real): void {
-        if (!GlobalConfig.audio.sounds.enabled || !enabled)
+    function _playAudioFile(sourcePath: string, volume: real): void {
+        if (volume <= 0)
             return;
-            
+
         let sfx = root._sfxCache[sourcePath];
         if (!sfx) {
             sfx = sfxComponent.createObject(root, { source: sourcePath, volume: volume });
@@ -197,8 +200,33 @@ Singleton {
         sfx.play();
     }
 
+    function playSoundSource(sourcePath: string, enabled: bool, volume: real): void {
+        if (!GlobalConfig.audio.sounds.enabled || !enabled)
+            return;
+
+        root._playAudioFile(sourcePath, volume);
+    }
+
     function playNotification(): void {
-        playSoundSource(Qt.resolvedUrl("../assets/sounds/notifications/" + GlobalConfig.audio.sounds.notificationSound), true, GlobalConfig.audio.sounds.notificationVolume);
+        // The name is a setting, so a path in it would play a file from outside the bundled
+        // sounds. Everything else about it is what a sound effect already does, which is
+        // where `sounds.enabled` is honoured.
+        const name = GlobalConfig.audio.sounds.notificationSound;
+        if (name.includes("/"))
+            return;
+
+        playSoundSource(Qt.resolvedUrl("../assets/sounds/notifications/" + name), true, GlobalConfig.audio.sounds.notificationVolume);
+    }
+
+    /// Plays one of the system's own sounds. The setting names a sound rather than a path, so
+    /// what it can reach is this list; returns false when it named something else, leaving the
+    /// caller to fall back to the shell's own chime.
+    function playSystemSound(name: string, volume: real): bool {
+        if (!GlobalConfig.audio.sounds.enabled || !name || root.systemSounds.indexOf(String(name)) < 0)
+            return false;
+
+        root._playAudioFile("file://" + root.systemSoundRoot + name, volume);
+        return true;
     }
 
     function playCameraClick(): void {
@@ -279,8 +307,6 @@ Singleton {
             }
         }
 
-        // Assign appStreams before streams so listeners of streamsChanged already
-        // observe the deduplicated app list.
         root.appStreams = newAppStreams;
         root.sinks = [...seenSinks.values()];
         root.sources = [...seenSources.values()];
@@ -316,17 +342,12 @@ Singleton {
         previousSourceName = newSourceName;
     }
 
-    // Populate immediately: Pipewire.nodes may already be filled by the time this
-    // lazily-loaded singleton is created, so onValuesChanged would never fire.
     Component.onCompleted: {
         AudioBackend.showInactiveDevices = root.showInactiveDevices;
         refreshNodes();
         previousSinkName = root.getNodeDisplayName(sink);
         previousSourceName = root.getNodeDisplayName(source);
 
-        // CavaProvider is only registered when the plugin was built with
-        // libcava available (see shell/plugin/CMakeLists.txt); create it
-        // dynamically so a build without Cava doesn't fail this singleton's load.
         try {
             root.cava = Qt.createQmlObject(
                 'import Caelestia.Config\nimport Caelestia.Services\nCavaProvider { bars: GlobalConfig.services.visualiserBars }',
@@ -352,16 +373,26 @@ Singleton {
         target: AudioBackend
     }
 
-    // Always track the current defaults so volume/mute bind even if the lists
-    // momentarily lag behind the default node.
     PwObjectTracker {
         objects: [root.sink, root.source, ...root.sinks, ...root.sources, ...root.streams].filter(n => n)
+    }
+
+    /// No shell in the command: `find` takes the patterns itself, so there is no quoting to
+    /// get wrong and nothing for a shell to parse.
+    Process {
+        id: systemSoundScan
+
+        running: true
+        command: ["find", "-L", root.systemSoundRoot, "-name", "*.ogg", "-o", "-name", "*.oga", "-o", "-name", "*.wav"]
+
+        stdout: StdioCollector {
+            onStreamFinished: root.systemSounds = String(text ?? "").trim().split("\n").filter(path => path.length > 0).map(path => path.replace(root.systemSoundRoot, "")).sort()
+        }
     }
 
     BeatTracker {
         id: beatTracker
     }
-
 
     IpcHandler {
         function cycleOutput(): void {
@@ -370,5 +401,4 @@ Singleton {
 
         target: "audio"
     }
-
 }

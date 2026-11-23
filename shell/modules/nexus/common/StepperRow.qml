@@ -13,12 +13,31 @@ ConnectedRect {
 
     property alias label: label.text
     property string subtext
+    property var reset
     property real value
     property real from: 0
     property real to: 99
     property real stepSize: 1
 
     signal moved(value: real)
+
+    function stepLeft(): void {
+        const step = root.stepSize;
+        const decimals = step < 1 ? Math.max(1, Math.ceil(-Math.log10(step))) : 0;
+        let v = Math.max(root.from, root.value - step);
+        v = Math.round(v * Math.pow(10, decimals)) / Math.pow(10, decimals);
+        if (v !== root.value)
+            root.moved(v);
+    }
+
+    function stepRight(): void {
+        const step = root.stepSize;
+        const decimals = step < 1 ? Math.max(1, Math.ceil(-Math.log10(step))) : 0;
+        let v = Math.min(root.to, root.value + step);
+        v = Math.round(v * Math.pow(10, decimals)) / Math.pow(10, decimals);
+        if (v !== root.value)
+            root.moved(v);
+    }
 
     Layout.fillWidth: true
     implicitHeight: rowLayout.implicitHeight + rowLayout.anchors.margins * 2
@@ -29,7 +48,8 @@ ConnectedRect {
         anchors.fill: parent
         anchors.margins: Tokens.padding.medium
         anchors.leftMargin: Tokens.padding.largeIncreased
-        anchors.rightMargin: Tokens.padding.largeIncreased
+        // Match SliderRow/ToggleRow so reset icons line up in one column.
+        anchors.rightMargin: Tokens.padding.medium
         spacing: Tokens.spacing.medium
 
         ColumnLayout {
@@ -49,8 +69,8 @@ ConnectedRect {
                 visible: root.subtext
                 text: root.subtext
                 color: Colours.palette.m3onSurfaceVariant
-                font: Tokens.font.label.small
-                elide: Text.ElideRight
+                font: NexusStyle.secondaryFont
+                wrapMode: Text.Wrap
             }
         }
 
@@ -86,6 +106,11 @@ ConnectedRect {
                 value: root.value
                 onValueModified: v => root.moved(v)
             }
+        }
+
+        SettingResetButton {
+            Layout.alignment: Qt.AlignVCenter
+            options: root.reset
         }
     }
 }

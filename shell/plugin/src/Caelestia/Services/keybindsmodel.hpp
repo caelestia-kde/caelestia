@@ -2,12 +2,14 @@
 #pragma once
 
 #include <QAbstractListModel>
+#include <QHash>
+#include <QJsonObject>
+#include <QList>
 #include <QObject>
 #include <QQmlEngine>
-#include <QVariant>
-#include <QHash>
-#include <QList>
 #include <QTimer>
+#include <QVariant>
+
 #include "globalshortcut.hpp"
 
 namespace caelestia::services {
@@ -42,7 +44,7 @@ public:
     Q_INVOKABLE void setKey(const QString& name, const QString& newKey);
     Q_INVOKABLE void resetKey(const QString& name);
     Q_INVOKABLE QString getKey(const QString& name) const;
-    Q_INVOKABLE QVariantList query(const QString& searchText) const;
+    Q_INVOKABLE QVariantList query(const QString& searchText, bool boundOnly = false) const;
     Q_INVOKABLE QString getKeyCollision(const QString& actionName) const;
     Q_INVOKABLE QString getKeyCollisionForPart(const QString& actionName, const QString& keyPart) const;
 
@@ -61,9 +63,12 @@ private:
     QHash<QString, QString> m_keybinds;
     QTimer* m_saveTimer = nullptr;
     QTimer* m_loadTimer = nullptr;
+    QJsonObject m_defaults;
+    QHash<QString, QString> m_lowerCache;
 
     QString keybindsPath() const;
     void saveKeybinds();
+    void updateLowerCache(GlobalShortcut* sc);
 };
 
 } // namespace caelestia::services

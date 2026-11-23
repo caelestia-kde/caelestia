@@ -19,12 +19,6 @@ namespace caelestia::services {
 
 namespace {
 
-struct Accum {
-    quint64 usedBytes = 0;
-    quint64 totalBytes = 0;
-    bool hasRoot = false;
-};
-
 [[nodiscard]] QString sysfsRealPath(uint major, uint minor) {
     const QString link = QStringLiteral("/sys/dev/block/%1:%2").arg(major).arg(minor);
     const QString resolved = QFileInfo(link).canonicalFilePath();
@@ -206,20 +200,16 @@ QStringList Storage::resolveToPhysicalDisks(const QString& devicePath) {
 }
 
 void Storage::tick() {
-    const qreal prevPercentage = percentage();
-    QHash<QString, Accum> byDisk;
+    const AccumHash disks = foldToDisks(collectDevices());
+    QMetaObject::invokeMethod(
+        this,
+        [this, disks] {
+            applyDisks(disks);
+        },
+        Qt::QueuedConnection);
+}
 
-    // Multiple mounts can share a single backing filesystem (btrfs subvolumes,
-    // bind mounts, etc.) and each one reports identical bytesTotal/bytesAvailable.
-    // Dedupe by source device so the filesystem only contributes once per disk.
-    struct DeviceEntry {
-        quint64 totalBytes = 0;
-        quint64 usedBytes = 0;
-        bool hasRoot = false;
-        QByteArray device;
-        QByteArray fsType;
-    };
-
+QHash<QByteArray, Storage::DeviceEntry> Storage::collectDevices() {
     QHash<QByteArray, DeviceEntry> byDevice;
 
     const auto mountedVols = QStorageInfo::mountedVolumes();
@@ -245,16 +235,16 @@ void Storage::tick() {
         e.hasRoot = e.hasRoot || isRoot;
     }
 
+    return byDevice;
+}
+
+Storage::AccumHash Storage::foldToDisks(const QHash<QByteArray, DeviceEntry>& byDevice) {
+    QHash<QString, Accum> byDisk;
+
     for (auto it = byDevice.constBegin(); it != byDevice.constEnd(); ++it) {
         const DeviceEntry& e = it.value();
         const QStringList disks = resolveToPhysicalDisks(QString::fromLocal8Bit(e.device));
         if (disks.isEmpty()) {
-            // ZFS has no /dev block device to resolve — its "device" is a
-            // "pool/dataset" name (e.g. rpool/root), so resolveToPhysicalDisks
-            // returns nothing and the whole pool would be dropped. Fall back to
-            // keying by the pool name. Datasets in a pool share the pool's free
-            // space, so keep a single representative entry per pool (preferring
-            // the root dataset, else the largest) rather than summing them.
             if (e.fsType == "zfs") {
                 const qsizetype slash = e.device.indexOf('/');
                 const QString pool = QString::fromLocal8Bit(slash > 0 ? e.device.left(slash) : e.device);
@@ -277,6 +267,12 @@ void Storage::tick() {
             a.hasRoot = a.hasRoot || e.hasRoot;
         }
     }
+
+    return byDisk;
+}
+
+void Storage::applyDisks(const AccumHash& byDisk) {
+    const qreal prevPercentage = percentage();
 
     QHash<QString, DiskInfo*> existing;
     existing.reserve(m_disks.size());

@@ -11,9 +11,9 @@ import qs.modules.nexus.common
 PageBase {
     id: root
 
-    title: qsTr("All networks")
+    title: qsTr("All Networks")
     isSubPage: true
-    flickable.bottomMargin: Tokens.padding.extraExtraLarge * 2 // Extra scrolling space at the bottom
+    flickable.bottomMargin: Tokens.padding.extraExtraLarge * 2
 
     ColumnLayout {
         anchors.horizontalCenter: parent.horizontalCenter

@@ -1,3 +1,5 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Layouts
 import Caelestia.Config
@@ -15,15 +17,15 @@ Item {
     implicitWidth: layout.implicitWidth + layout.anchors.margins * 2
 
     ServiceRef {
-        service: Cpu
+        service: root.visible ? Cpu : null
     }
 
     ServiceRef {
-        service: Memory
+        service: root.visible ? Memory : null
     }
 
     ServiceRef {
-        service: Storage
+        service: root.visible ? Storage : null
     }
 
     ColumnLayout {
@@ -52,6 +54,7 @@ Item {
             fgColour: Colours.palette.m3secondary
         }
     }
+
     component Resource: CircularProgress {
         id: res
 

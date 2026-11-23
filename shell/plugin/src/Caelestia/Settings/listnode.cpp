@@ -53,7 +53,6 @@ void syncNodeRecursive(Node* node, const QVariantMap& props) {
             continue;
         }
 
-        // `setValue` warns on type mismatches itself
         if (!desc->isNode) {
             node->setValue(key, val);
             continue;
@@ -61,7 +60,6 @@ void syncNodeRecursive(Node* node, const QVariantMap& props) {
 
         auto* const child = node->value(key).value<Node*>();
 
-        // Nested lists take their elements straight from props
         if (auto* const list = qobject_cast<ListNode*>(child)) {
             if (!isVariantListType(val)) {
                 qCCritical(lcSettings, "Expected a list for node key %s on %s, got %s.", qUtf8Printable(key),
@@ -90,7 +88,10 @@ ListNode::ListNode(ListNode* fallback, QObject* parent, bool globalOnly)
     if (fallback) {
         // Disconnect generic fallback notify, lists use a custom one
         QObject::disconnect(fallback, &ListNode::optionChanged, this, nullptr);
-        QObject::connect(fallback, &ListNode::elementsChanged, this, &ListNode::onFallbackListNotify);
+
+        // Global lists must not follow the overlay they were read through
+        if (!m_globalOnly)
+            QObject::connect(fallback, &ListNode::elementsChanged, this, &ListNode::onFallbackListNotify);
     }
 }
 
@@ -107,10 +108,8 @@ QVariantList ListNode::values() const {
 }
 
 void ListNode::remove(qsizetype index) {
-    if (auto* const global = forwardGlobalMutation()) {
-        global->remove(index);
+    if (rejectGlobalMutation())
         return;
-    }
 
     const WriteScope scope(this, WriteOrigin::Qml);
 
@@ -130,10 +129,8 @@ void ListNode::remove(qsizetype index) {
 }
 
 void ListNode::move(qsizetype from, qsizetype to) {
-    if (auto* const global = forwardGlobalMutation()) {
-        global->move(from, to);
+    if (rejectGlobalMutation())
         return;
-    }
 
     const WriteScope scope(this, WriteOrigin::Qml);
 
@@ -157,10 +154,8 @@ void ListNode::move(qsizetype from, qsizetype to) {
 }
 
 void ListNode::clear() {
-    if (auto* const global = forwardGlobalMutation()) {
-        global->clear();
+    if (rejectGlobalMutation())
         return;
-    }
 
     const WriteScope scope(this, WriteOrigin::Qml);
 
@@ -188,7 +183,6 @@ QString ListNode::pathFor(const QString& key) const {
 }
 
 const Schema& ListNode::schema() const {
-    // Offset +1 so count is not registered (allow read only cause values is read only)
     static const auto schema = Schema::build(&staticMetaObject, Node::staticMetaObject.propertyCount() + 1, true);
     return schema;
 }
@@ -223,17 +217,14 @@ bool ListNode::setValue(const QString& key, const QVariant& value, QList<Diagnos
     m_elements.clear();
 
     if (value.typeId() == qMetaTypeId<QList<Node*>>()) {
-        // On reset to fallback
         const auto nodes = value.value<QList<Node*>>();
         for (auto* const node : nodes)
             insertNode(m_elements.count(), node);
     } else if (isVariantListType(value)) {
-        // From defaults or QML
         const auto list = toMaps(value);
         for (qsizetype i = 0; i < list.count(); ++i)
             insertNode(i, list.at(i), fallbackFor(i));
     } else if (value.typeId() == QMetaType::QJsonArray) {
-        // From syncJson
         const auto array = value.toJsonArray();
         for (const auto& json : array)
             insertNode(m_elements.count(), json.toObject(), *diagnostics);
@@ -265,8 +256,7 @@ void ListNode::resetToDefaults() {
         return;
     }
 
-    // Don't reset global only list nodes on overlays
-    if (fallbackNode() && isGlobalOnly())
+    if (fallbackNode() && m_globalOnly)
         return;
 
     const WriteScope scope(this, WriteOrigin::FileReset);
@@ -274,7 +264,7 @@ void ListNode::resetToDefaults() {
 }
 
 QJsonValue ListNode::toJson(bool sparse) const {
-    Q_UNUSED(sparse) // Lists can't be sparse
+    Q_UNUSED(sparse)
 
     QJsonArray array;
     for (auto* const element : m_elements)
@@ -284,23 +274,14 @@ QJsonValue ListNode::toJson(bool sparse) const {
 
 bool ListNode::syncJson(const QJsonValue& json, QList<Diagnostic>& diagnostics) {
     if (!json.isArray()) {
-        const auto d = Diagnostic::mismatch("an array", json, path());
+        const auto d = Diagnostic::mismatch(ExpectedType::Array, json, path());
         qCWarning(lcSettings, "Error decoding option %s: %s", qUtf8Printable(d.option), qUtf8Printable(d.message));
         diagnostics << d;
         return false;
     }
 
-    // Refuse syncs to global only list nodes on overlays
-    if (fallbackNode() && isGlobalOnly()) {
-        const auto p = path();
-        qCWarning(lcSettings, "Global property definition %s found in overlay file, ignoring.", qUtf8Printable(p));
-        diagnostics << Diagnostic{
-            DiagnosticType::GlobalOption,
-            p,
-            QStringLiteral("Global properties should not be defined in overlay files"),
-        };
+    if (rejectGlobalSync(diagnostics))
         return false;
-    }
 
     const WriteScope scope(this, WriteOrigin::File);
     setValue(valuesKey(), json.toArray(), &diagnostics);
@@ -312,7 +293,6 @@ bool ListNode::recordWrite(const QString& key, bool changed) {
     const auto wasOverride = isOverride(key);
     const auto notify = Node::recordWrite(key, changed);
 
-    // Elements inside overridden lists have no fallbacks, so detach here
     if (!wasOverride && isOverride(key))
         for (auto* const element : std::as_const(m_elements))
             element->detachFallback();
@@ -331,12 +311,12 @@ Node* ListNode::elementAt(qsizetype index) const {
 }
 
 Node* ListNode::insertElement(const QVariantMap& props, qsizetype index) {
-    if (auto* const global = forwardGlobalMutation())
-        return global->insertElement(props, index);
+    if (rejectGlobalMutation())
+        return nullptr;
 
     const WriteScope scope(this, WriteOrigin::Qml);
 
-    if (!validIndex(index)) // Invalid index means append
+    if (!validIndex(index))
         index = m_elements.count();
 
     auto* const element = insertNode(index, props, nullptr);
@@ -352,23 +332,23 @@ QList<QVariantMap> ListNode::defaultValue() const {
     const auto* desc = getDescriptor();
     if (!desc)
         return {};
-    return desc->defaultValue(this).value<QList<QVariantMap>>();
+    return desc->defaultValue().value<QList<QVariantMap>>();
 }
 
 bool ListNode::isNested() const {
     return qobject_cast<ListNode*>(parentNode());
 }
 
-ListNode* ListNode::forwardGlobalMutation() const {
-    if (!isGlobalOnly() || !fallbackNode())
-        return nullptr;
+bool ListNode::rejectGlobalMutation() const {
+    if (!m_globalOnly || !fallbackNode())
+        return false;
 
     qCWarning(lcSettings,
-        "Forwarding mutation of global list %s to the global layer. "
+        "Attempted to mutate global list %s from an overlay layer, ignoring. "
         "This should not be used, mutate global lists from the global layer instead.",
         qUtf8Printable(path()));
 
-    return static_cast<ListNode*>(fallbackNode());
+    return true;
 }
 
 bool ListNode::validIndex(qsizetype index) const {
@@ -376,7 +356,7 @@ bool ListNode::validIndex(qsizetype index) const {
 }
 
 const Descriptor* ListNode::getDescriptor() const {
-    if (!parentNode()) { // List nodes should not be root nodes
+    if (!parentNode()) {
         qCCritical(lcSettings, "List node %s has no parent, something is wrong.", qUtf8Printable(path()));
         return nullptr;
     }
@@ -419,9 +399,7 @@ Node* ListNode::insertNode(qsizetype index, Node* node) {
 }
 
 Node* ListNode::insertNode(qsizetype index, const QJsonObject& json, QList<Diagnostic>& diagnostics) {
-    // Write origin will be file/file reset, which is correct.
-    // This function should only be called from the JSON path of setValue.
-    auto* const node = createElement(nullptr); // Nodes synced from JSON get no fallback as they are overrides
+    auto* const node = createElement(nullptr);
     m_elements.insert(index, node);
 
     node->syncJson(json, diagnostics);

@@ -18,7 +18,6 @@ Item {
     property bool hadPrevious
     property color fallbackColour: Colours.layer(Colours.palette.m3surfaceContainerHighest, 2)
 
-    // Slight glow to separate from bg
     layer.enabled: true
     layer.effect: MultiEffect {
         shadowEnabled: true
@@ -47,7 +46,8 @@ Item {
 
             Anim on rotation {
                 running: true
-                paused: !Players.active?.isPlaying
+                // Hidden covers (a closed dashboard) hold still instead of redrawing.
+                paused: !Players.active?.isPlaying || !root.visible || !Tokens.anim.enabled
                 from: 360
                 to: 0
                 duration: 23500

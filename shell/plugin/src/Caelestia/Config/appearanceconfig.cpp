@@ -1,12 +1,11 @@
 #include "appearanceconfig.hpp"
-#include "tokens.hpp"
 
 #include <qmetaobject.h>
 
+#include "tokens.hpp"
+
 namespace caelestia::config {
 
-// Helper: connect all changed signals from a token object to a single valuesChanged signal,
-// plus connect the local scaleChanged signal.
 template <typename Source, typename Target> static void connectTokenSignals(Source* source, Target* target) {
     const auto* meta = source->metaObject();
 
@@ -20,8 +19,6 @@ template <typename Source, typename Target> static void connectTokenSignals(Sour
 
     QObject::connect(target, &Target::scaleChanged, target, &Target::valuesChanged);
 }
-
-// AppearanceRounding
 
 void AppearanceRounding::bindTokens(RoundingTokens* tokens) {
     m_tokens = tokens;
@@ -64,8 +61,6 @@ int AppearanceRounding::full() const {
     return m_tokens ? static_cast<int>(m_tokens->full()) : 0;
 }
 
-// AppearanceSpacing
-
 void AppearanceSpacing::bindTokens(SpacingTokens* tokens) {
     m_tokens = tokens;
     connectTokenSignals(tokens, this);
@@ -102,8 +97,6 @@ int AppearanceSpacing::extraLargeIncreased() const {
 int AppearanceSpacing::extraExtraLarge() const {
     return m_tokens ? static_cast<int>(m_tokens->extraExtraLarge() * m_scale) : 0;
 }
-
-// AppearancePadding
 
 void AppearancePadding::bindTokens(PaddingTokens* tokens) {
     m_tokens = tokens;
@@ -142,105 +135,70 @@ int AppearancePadding::extraExtraLarge() const {
     return m_tokens ? static_cast<int>(m_tokens->extraExtraLarge() * m_scale) : 0;
 }
 
-// FontConfig
-
-void FontConfig::setDefaults(int size, int weight, const QVariantMap& vaxes) {
-    m_size = size;
-    m_weight = weight;
-    m_vaxes = vaxes;
-}
-
-// FontStyleConfig
-
-void FontStyleConfig::setDefaultFamily(const QString& family) {
-    m_family = family;
-}
-
-// AppearanceFont
-
-void AppearanceFont::bindFont() {
-    const auto sans = QStringLiteral("SF Pro");
-    const auto mono = QStringLiteral("SF Mono");
-    const auto icons = QStringLiteral("Material Symbols Rounded");
-    const QVariantMap vaxes = { { "ROND", 25 } };
-
-    m_headline->setDefaultFamily(sans);
-    m_headline->large()->setDefaults(32, QFont::Medium, vaxes);
-    m_headline->medium()->setDefaults(28, QFont::Medium, vaxes);
-    m_headline->small()->setDefaults(24, QFont::Medium, vaxes);
-
-    m_title->setDefaultFamily(sans);
-    m_title->large()->setDefaults(22, QFont::Medium, vaxes);
-    m_title->medium()->setDefaults(16, QFont::Medium, vaxes);
-    m_title->small()->setDefaults(14, QFont::Medium, vaxes);
-
-    m_body->setDefaultFamily(sans);
-    m_body->large()->setDefaults(16, QFont::Normal, vaxes);
-    m_body->medium()->setDefaults(14, QFont::Normal, vaxes);
-    m_body->small()->setDefaults(12, QFont::Normal, vaxes);
-
-    m_label->setDefaultFamily(sans);
-    m_label->large()->setDefaults(14, QFont::Medium, vaxes);
-    m_label->medium()->setDefaults(12, QFont::Medium, vaxes);
-    m_label->small()->setDefaults(11, QFont::Normal, vaxes);
-
-    m_mono->setDefaultFamily(mono);
-    m_mono->large()->setDefaults(16, QFont::Normal);
-    m_mono->medium()->setDefaults(14, QFont::Normal);
-    m_mono->small()->setDefaults(12, QFont::Normal);
-
-    m_icon->setDefaultFamily(icons);
-    m_icon->extraLarge()->setDefaults(static_cast<int>(48 / 1.33), QFont::Normal);
-    m_icon->large()->setDefaults(static_cast<int>(32 / 1.33), QFont::Normal);
-    m_icon->medium()->setDefaults(static_cast<int>(24 / 1.33), QFont::Normal);
-    m_icon->small()->setDefaults(static_cast<int>(20 / 1.33), QFont::Normal);
-}
-
-// AnimDurations
-
 void AnimDurations::bindTokens(AnimDurationTokens* tokens) {
     m_tokens = tokens;
     connectTokenSignals(tokens, this);
 }
 
+void AnimDurations::bindAnim(AppearanceAnim* anim) {
+    if (m_anim == anim)
+        return;
+
+    if (m_anim)
+        disconnect(m_anim, nullptr, this, nullptr);
+
+    m_anim = anim;
+
+    if (m_anim)
+        connect(m_anim, &AppearanceAnim::enabledChanged, this, &AnimDurations::valuesChanged);
+
+    Q_EMIT valuesChanged();
+}
+
 int AnimDurations::small() const {
-    return m_tokens ? static_cast<int>(m_tokens->small() * m_scale) : 0;
+    return duration(m_tokens ? m_tokens->small() : 0);
 }
 
 int AnimDurations::normal() const {
-    return m_tokens ? static_cast<int>(m_tokens->normal() * m_scale) : 0;
+    return duration(m_tokens ? m_tokens->normal() : 0);
 }
 
 int AnimDurations::large() const {
-    return m_tokens ? static_cast<int>(m_tokens->large() * m_scale) : 0;
+    return duration(m_tokens ? m_tokens->large() : 0);
 }
 
 int AnimDurations::extraLarge() const {
-    return m_tokens ? static_cast<int>(m_tokens->extraLarge() * m_scale) : 0;
+    return duration(m_tokens ? m_tokens->extraLarge() : 0);
 }
 
 int AnimDurations::expressiveFastSpatial() const {
-    return m_tokens ? static_cast<int>(m_tokens->expressiveFastSpatial() * m_scale) : 0;
+    return duration(m_tokens ? m_tokens->expressiveFastSpatial() : 0);
 }
 
 int AnimDurations::expressiveDefaultSpatial() const {
-    return m_tokens ? static_cast<int>(m_tokens->expressiveDefaultSpatial() * m_scale) : 0;
+    return duration(m_tokens ? m_tokens->expressiveDefaultSpatial() : 0);
 }
 
 int AnimDurations::expressiveSlowSpatial() const {
-    return m_tokens ? static_cast<int>(m_tokens->expressiveSlowSpatial() * m_scale) : 0;
+    return duration(m_tokens ? m_tokens->expressiveSlowSpatial() : 0);
 }
 
 int AnimDurations::expressiveFastEffects() const {
-    return m_tokens ? static_cast<int>(m_tokens->expressiveFastEffects() * m_scale) : 0;
+    return duration(m_tokens ? m_tokens->expressiveFastEffects() : 0);
 }
 
 int AnimDurations::expressiveDefaultEffects() const {
-    return m_tokens ? static_cast<int>(m_tokens->expressiveDefaultEffects() * m_scale) : 0;
+    return duration(m_tokens ? m_tokens->expressiveDefaultEffects() : 0);
 }
 
 int AnimDurations::expressiveSlowEffects() const {
-    return m_tokens ? static_cast<int>(m_tokens->expressiveSlowEffects() * m_scale) : 0;
+    return duration(m_tokens ? m_tokens->expressiveSlowEffects() : 0);
+}
+
+int AnimDurations::duration(int token) const {
+    if (m_anim && !m_anim->animationsEnabled())
+        return 0;
+    return static_cast<int>(token * m_scale);
 }
 
 } // namespace caelestia::config

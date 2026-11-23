@@ -2,25 +2,26 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import QtQuick.Effects
-import QtQuick.Layouts
 import Quickshell
 import Quickshell.Hyprland
 import Caelestia.Config
 import Caelestia.Services
 import qs.components
-import qs.components.controls
 import qs.components.effects
 import qs.services
 
 Item {
     id: root
 
-    required property ShellScreen screen
-    required property Item wallpaper
-    required property real absX
-    required property real absY
+    property var frame: null
+    property var controller: null
+    property ShellScreen screen: controller?.screenData ?? null
+    property Item wallpaper: controller?.wallpaper ?? null
+    property real absX: (controller?.gridOrigin.x ?? 0) + (frame?.x ?? 0)
+    property real absY: (controller?.gridOrigin.y ?? 0) + (frame?.y ?? 0)
+    property real gridScale: frame ? Math.min(frame.width / 350, frame.height / 180) : 1
+    property real lyricsScale: Math.max(0.5, gridScale)
 
-    property real lyricsScale: Config.background.desktopLyrics.scale
     readonly property bool bgEnabled: Config.background.desktopLyrics.background.enabled
     readonly property bool blurEnabled: bgEnabled && Config.background.desktopLyrics.background.blur && !GameMode.enabled
     readonly property bool invertColors: Config.background.desktopLyrics.invertColors
@@ -28,20 +29,15 @@ Item {
     readonly property color safePrimary: useLightSet ? Colours.palette.m3primaryContainer : Colours.palette.m3primary
     readonly property color safeSecondary: useLightSet ? Colours.palette.m3secondaryContainer : Colours.palette.m3secondary
     readonly property color safeTertiary: useLightSet ? Colours.palette.m3tertiaryContainer : Colours.palette.m3tertiary
-    readonly property string sansFont: GlobalConfig.appearance.font.body.family || "Sans Serif"
+    readonly property string sansFont: GlobalConfig.appearance.font.body.family || Tokens.font.body.medium.family
     readonly property int alignment: Config.background.desktopLyrics.alignment
     readonly property bool autoHide: Config.background.desktopLyrics.autoHide
-    readonly property bool allWindowsFloating: {
-        if (typeof KWinActiveWindowBridge !== "undefined") {
-            const wins = KWinActiveWindowBridge.windowList || [];
-            return wins.every(w => !!w?.floating);
-        }
-        return Hypr.monitorFor(screen)?.activeWorkspace?.toplevels?.values.every(
-            t => t.lastIpcObject?.floating) ?? true;
-    }
-    readonly property bool shouldHide: autoHide && !allWindowsFloating
+    readonly property bool windowHidesLyrics: Kwin.windowHidesDesktopWidgets(root.screen ? root.screen.name : "", false)
+    readonly property bool allWindowsFloating: !windowHidesLyrics
+    readonly property bool shouldHide: autoHide && windowHidesLyrics
+    readonly property bool isPlaying: Players.active?.isPlaying ?? false
 
-    property bool hasLyrics: Lyrics.hasLyrics
+    readonly property bool hasLyrics: Lyrics.hasLyrics
     property int currentLyricIndex: -1
     readonly property bool isCurrentActive: currentLyricIndex >= 0
 
@@ -111,8 +107,10 @@ Item {
 
     implicitWidth: 350 * root.lyricsScale
     implicitHeight: 180 * root.lyricsScale
+    width: frame ? frame.width : implicitWidth
+    height: frame ? frame.height : implicitHeight
 
-    opacity: ((root.hasLyrics || Lyrics.loading) && !root.shouldHide) ? 1 : 0
+    opacity: (root.isPlaying && root.hasLyrics && !root.shouldHide) ? 1 : 0
     visible: opacity > 0
 
     Behavior on opacity {
@@ -200,6 +198,12 @@ Item {
             root.reloadTrack();
         }
 
+        // Browser track fields may arrive after the track-change notification.
+        function onTrackTitleChanged() { root.reloadTrack(); }
+        function onTrackArtistChanged() { root.reloadTrack(); }
+        function onTrackAlbumChanged() { root.reloadTrack(); }
+        function onLengthChanged() { root.reloadTrack(); }
+
         ignoreUnknownSignals: true
 
         target: Players.active
@@ -207,7 +211,14 @@ Item {
 
     Connections {
         function onHasLyricsChanged() {
-            root.hasLyrics = Lyrics.hasLyrics;
+            root.forceUpdate();
+        }
+
+        // hasLyricsChanged only fires when the boolean flips, so a track with
+        // lyrics replacing another one never triggered a refresh and the widget
+        // kept showing the previous song until it was rebuilt. lyricsChanged
+        // fires on every load, which keeps the lines in sync.
+        function onLyricsChanged() {
             root.forceUpdate();
         }
 
@@ -218,7 +229,6 @@ Item {
         id: lyricsContainer
 
         anchors.fill: parent
-        // Removed clip: true from here so the shadow doesn't get cut off
 
         layer.enabled: Config.background.desktopLyrics.shadow.enabled
         layer.effect: MultiEffect {
@@ -237,7 +247,12 @@ Item {
 
             sourceComponent: MultiEffect {
                 source: ShaderEffectSource {
-                    sourceItem: root.wallpaper
+                    id: wallpaperSource
+
+                    // Set only while this source has a window: Qt takes an extra reference on the source
+                    // item's window if this is set before the effect places it in a window, and never
+                    // releases it, which crashes the shell when the screen goes away.
+                    sourceItem: wallpaperSource.Window.window ? root.wallpaper : null
                     sourceRect: Qt.rect(root.absX, root.absY, root.width, root.height)
                 }
                 maskSource: backgroundPlate
@@ -261,51 +276,6 @@ Item {
             layer.enabled: root.blurEnabled
         }
 
-        Loader {
-            id: loadingIndicator
-
-            anchors.centerIn: parent
-            asynchronous: true
-            active: opacity > 0
-            opacity: Lyrics.loading && !root.hasLyrics ? 1 : 0
-
-            sourceComponent: ColumnLayout {
-                spacing: Tokens.spacing.large * root.lyricsScale
-
-                StyledRect {
-                    Layout.alignment: Qt.AlignHCenter
-                    implicitWidth: shape.implicitSize + Tokens.padding.medium * 2 * root.lyricsScale
-                    implicitHeight: shape.implicitSize + Tokens.padding.medium * 2 * root.lyricsScale
-                    color: Colours.palette.m3primaryContainer
-                    radius: Tokens.rounding.full
-
-                    LoadingIndicator {
-                        id: shape
-
-                        anchors.centerIn: parent
-                        implicitSize: Math.round(Tokens.sizes.dashboard.mediaSectionWidth / 5 * root.lyricsScale)
-                        containsIcon: true
-                        color: Colours.palette.m3primary
-                    }
-                }
-
-                StyledText {
-                    text: qsTr("Loading lyrics...")
-                    color: root.safeSecondary
-                    font.pointSize: Tokens.font.title.medium.pointSize * root.lyricsScale
-                    font.family: Tokens.font.title.medium.family
-                    font.weight: Tokens.font.title.medium.weight
-                }
-            }
-
-            Behavior on opacity {
-                Anim {
-                    type: Anim.DefaultEffects
-                }
-            }
-        }
-
-        // --- NEW INNER CONTAINER FOR FADE MASK ---
         Item {
             id: fadeContainer
 
@@ -341,11 +311,11 @@ Item {
                     }
                     GradientStop {
                         color: Qt.alpha("black", 1)
-                        position: 0.25 // fadeMargin
+                        position: 0.25
                     }
                     GradientStop {
                         color: Qt.alpha("black", 1)
-                        position: 0.75 // 1 - fadeMargin
+                        position: 0.75
                     }
                     GradientStop {
                         color: Qt.alpha("black", 0)
@@ -354,7 +324,6 @@ Item {
                 }
             }
 
-            // --- Previous Lyric ---
             Item {
                 id: prevLyricItem
 
@@ -369,7 +338,7 @@ Item {
 
                     anchors.fill: parent
                     text: root.previousLyricText
-                    font.family: root.sansFont
+                    font.family: LyricFonts.familyForText(text, root.sansFont)
                     font.pointSize: Tokens.font.body.medium.pointSize * root.lyricsScale
                     color: root.safeSecondary
                     opacity: 0.6
@@ -387,7 +356,6 @@ Item {
                 }
             }
 
-            // --- Current Lyric ---
             Item {
                 id: lyricContainer
 
@@ -423,7 +391,7 @@ Item {
 
                     width: parent.width
                     text: root.displayedLyric
-                    font.family: root.sansFont
+                    font.family: LyricFonts.familyForText(text, root.sansFont)
                     font.pointSize: Tokens.font.title.medium.pointSize * 1.3 * root.lyricsScale
                     font.weight: Font.Bold
                     color: Colours.palette.m3primary
@@ -461,7 +429,7 @@ Item {
 
                     anchors.fill: parent
                     text: root.nextLyricText
-                    font.family: root.sansFont
+                    font.family: LyricFonts.familyForText(text, root.sansFont)
                     font.pointSize: Tokens.font.body.medium.pointSize * root.lyricsScale
                     color: root.safeSecondary
                     opacity: 0.6

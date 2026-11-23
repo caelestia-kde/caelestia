@@ -1,4 +1,5 @@
 #include "krohnkiteconfig.hpp"
+
 #include <KConfigGroup>
 #include <KSharedConfig>
 #include <QDebug>
@@ -11,10 +12,11 @@ namespace caelestia::services {
 /// kwinrc group the Krohnkite KWin script keeps its settings in.
 static const QString KROHNKITE_GROUP = QStringLiteral("Script-krohnkite");
 
-/// Class list Krohnkite assumes when kwinrc has no ignoreClass key yet.
-static const QString DEFAULT_IGNORE_CLASS = QStringLiteral(
-    "krunner,yakuake,spectacle,kded5,xwaylandvideobridge,plasmashell,ksplashqml,"
-    "org.kde.plasmashell,org.kde.polkit-kde-authentication-agent-1,quickshell");
+static const QString DEFAULT_IGNORE_CLASS =
+    QStringLiteral("krunner,yakuake,spectacle,kded5,xwaylandvideobridge,plasmashell,ksplashqml,org.kde.plasmashell,"
+                   "org.kde.polkit-kde-authentication-agent-1,quickshell,org.quickshell,org.pulseaudio.pavucontrol,"
+                   "com.saivert.pwvucontrol,yad,yad-icon-browser,system-config-printer,nwg-look,org.gnome.Settings,"
+                   "org.gnome.FileRoller,file-roller,blueman-manager,guifetch,wev,zenity,feh,imv,swappy");
 
 KrohnkiteConfig::KrohnkiteConfig(QObject* parent)
     : QObject(parent) {
@@ -39,6 +41,7 @@ void KrohnkiteConfig::setKWinConfig(const QMap<QString, QString>& values) {
         group.writeEntry(it.key(), it.value());
     }
     config->sync();
+    apply();
 }
 
 // Table of all layout keys paired with their default order position.
@@ -49,8 +52,6 @@ struct LayoutDefault {
 };
 
 static const std::initializer_list<LayoutDefault>& allLayoutDefaults() {
-    // Default order when kwinrc has never been written.
-    // Only enabled-by-default entries get a positive order; disabled get -1.
     static const std::initializer_list<LayoutDefault> table = {
         { "binaryTreeLayoutOrder", 1 },
         { "floatingLayoutOrder", 2 },
@@ -61,7 +62,6 @@ static const std::initializer_list<LayoutDefault>& allLayoutDefaults() {
         { "spreadLayoutOrder", 7 },
         { "stackedLayoutOrder", 8 },
         { "stairLayoutOrder", 9 },
-        // Disabled by default:
         { "spiralLayoutOrder", -1 },
         { "columnsLayoutOrder", -1 },
         { "cascadeLayoutOrder", -1 },
@@ -69,7 +69,6 @@ static const std::initializer_list<LayoutDefault>& allLayoutDefaults() {
     return table;
 }
 
-/// Everything the tiling page shows, read out of kwinrc in a single pass.
 struct KrohnkiteSettings {
     int screenGapBetween = 10;
     int screenGapBottom = 4;
@@ -82,7 +81,6 @@ struct KrohnkiteSettings {
 
 static KrohnkiteSettings readSettings() {
     auto config = KSharedConfig::openConfig(QStringLiteral("kwinrc"), KConfig::NoGlobals);
-    // Pick up edits made outside Nexus - KWin writes kwinrc too.
     config->reparseConfiguration();
     KConfigGroup group = config->group(KROHNKITE_GROUP);
 
@@ -96,7 +94,6 @@ static KrohnkiteSettings readSettings() {
 
     for (const auto& entry : allLayoutDefaults()) {
         const QString key = QString::fromLatin1(entry.key);
-        // -1 means disabled, a positive value is the layout's position.
         const int order = group.readEntry(key, entry.defaultOrder);
         settings.layoutOrders.insert(key, order >= 1 ? order : -1);
     }
@@ -104,13 +101,11 @@ static KrohnkiteSettings readSettings() {
 }
 
 void KrohnkiteConfig::setLayoutEnabled(const QString& key, bool enabled) {
-    // Read current order values for all layouts, seeding from defaults where missing.
     QMap<QString, int> orders = readSettings().layoutOrders;
 
     if (enabled) {
         if (orders[key] >= 1)
-            return; // already enabled, nothing to do
-        // Shift every currently-enabled layout's order up by 1 to make room at position 1.
+            return;
         for (auto it = orders.begin(); it != orders.end(); ++it) {
             if (it.value() >= 1) {
                 it.value() += 1;
@@ -120,9 +115,8 @@ void KrohnkiteConfig::setLayoutEnabled(const QString& key, bool enabled) {
     } else {
         int removedOrder = orders[key];
         if (removedOrder < 1)
-            return; // already disabled, nothing to do
+            return;
         orders[key] = -1;
-        // Compact: shift down any layout that was positioned after the removed one.
         for (auto it = orders.begin(); it != orders.end(); ++it) {
             if (it.value() > removedOrder) {
                 it.value() -= 1;
@@ -130,7 +124,6 @@ void KrohnkiteConfig::setLayoutEnabled(const QString& key, bool enabled) {
         }
     }
 
-    // One kwinrc write for all twelve orders, not one child process per key.
     QMap<QString, QString> values;
     for (auto it = orders.cbegin(); it != orders.cend(); ++it) {
         values.insert(it.key(), QString::number(it.value()));
@@ -172,7 +165,6 @@ void KrohnkiteConfig::refresh() {
 }
 
 void KrohnkiteConfig::apply() {
-    // Notify KWin to reconfigure
     QDBusMessage msg = QDBusMessage::createMethodCall(QStringLiteral("org.kde.KWin"), QStringLiteral("/KWin"),
         QStringLiteral("org.kde.KWin"), QStringLiteral("reconfigure"));
     QDBusConnection::sessionBus().call(msg, QDBus::NoBlock);
@@ -181,7 +173,7 @@ void KrohnkiteConfig::apply() {
 void KrohnkiteConfig::setScreenGapBetween(int gap) {
     if (m_screenGapBetween != gap) {
         m_screenGapBetween = gap;
-        setKWinConfig("screenGapBetween", QString::number(gap));
+        setKWinConfig(QStringLiteral("screenGapBetween"), QString::number(gap));
         emit gapsChanged();
     }
 }
@@ -189,7 +181,7 @@ void KrohnkiteConfig::setScreenGapBetween(int gap) {
 void KrohnkiteConfig::setScreenGapBottom(int gap) {
     if (m_screenGapBottom != gap) {
         m_screenGapBottom = gap;
-        setKWinConfig("screenGapBottom", QString::number(gap));
+        setKWinConfig(QStringLiteral("screenGapBottom"), QString::number(gap));
         emit gapsChanged();
     }
 }
@@ -197,7 +189,7 @@ void KrohnkiteConfig::setScreenGapBottom(int gap) {
 void KrohnkiteConfig::setScreenGapLeft(int gap) {
     if (m_screenGapLeft != gap) {
         m_screenGapLeft = gap;
-        setKWinConfig("screenGapLeft", QString::number(gap));
+        setKWinConfig(QStringLiteral("screenGapLeft"), QString::number(gap));
         emit gapsChanged();
     }
 }
@@ -205,7 +197,7 @@ void KrohnkiteConfig::setScreenGapLeft(int gap) {
 void KrohnkiteConfig::setScreenGapRight(int gap) {
     if (m_screenGapRight != gap) {
         m_screenGapRight = gap;
-        setKWinConfig("screenGapRight", QString::number(gap));
+        setKWinConfig(QStringLiteral("screenGapRight"), QString::number(gap));
         emit gapsChanged();
     }
 }
@@ -213,7 +205,7 @@ void KrohnkiteConfig::setScreenGapRight(int gap) {
 void KrohnkiteConfig::setScreenGapTop(int gap) {
     if (m_screenGapTop != gap) {
         m_screenGapTop = gap;
-        setKWinConfig("screenGapTop", QString::number(gap));
+        setKWinConfig(QStringLiteral("screenGapTop"), QString::number(gap));
         emit gapsChanged();
     }
 }
@@ -221,7 +213,7 @@ void KrohnkiteConfig::setScreenGapTop(int gap) {
 void KrohnkiteConfig::setIgnoreClass(const QString& classes) {
     if (m_ignoreClass != classes) {
         m_ignoreClass = classes;
-        setKWinConfig("ignoreClass", classes);
+        setKWinConfig(QStringLiteral("ignoreClass"), classes);
         emit ignoreClassChanged();
     }
 }
@@ -229,7 +221,7 @@ void KrohnkiteConfig::setIgnoreClass(const QString& classes) {
 void KrohnkiteConfig::setBinaryTreeLayoutEnabled(bool enabled) {
     if (m_binaryTreeLayoutEnabled != enabled) {
         m_binaryTreeLayoutEnabled = enabled;
-        setLayoutEnabled("binaryTreeLayoutOrder", enabled);
+        setLayoutEnabled(QStringLiteral("binaryTreeLayoutOrder"), enabled);
         emit layoutsChanged();
     }
 }
@@ -237,7 +229,7 @@ void KrohnkiteConfig::setBinaryTreeLayoutEnabled(bool enabled) {
 void KrohnkiteConfig::setCascadeLayoutEnabled(bool enabled) {
     if (m_cascadeLayoutEnabled != enabled) {
         m_cascadeLayoutEnabled = enabled;
-        setLayoutEnabled("cascadeLayoutOrder", enabled);
+        setLayoutEnabled(QStringLiteral("cascadeLayoutOrder"), enabled);
         emit layoutsChanged();
     }
 }
@@ -245,7 +237,7 @@ void KrohnkiteConfig::setCascadeLayoutEnabled(bool enabled) {
 void KrohnkiteConfig::setColumnsLayoutEnabled(bool enabled) {
     if (m_columnsLayoutEnabled != enabled) {
         m_columnsLayoutEnabled = enabled;
-        setLayoutEnabled("columnsLayoutOrder", enabled);
+        setLayoutEnabled(QStringLiteral("columnsLayoutOrder"), enabled);
         emit layoutsChanged();
     }
 }
@@ -253,7 +245,7 @@ void KrohnkiteConfig::setColumnsLayoutEnabled(bool enabled) {
 void KrohnkiteConfig::setFloatingLayoutEnabled(bool enabled) {
     if (m_floatingLayoutEnabled != enabled) {
         m_floatingLayoutEnabled = enabled;
-        setLayoutEnabled("floatingLayoutOrder", enabled);
+        setLayoutEnabled(QStringLiteral("floatingLayoutOrder"), enabled);
         emit layoutsChanged();
     }
 }
@@ -261,7 +253,7 @@ void KrohnkiteConfig::setFloatingLayoutEnabled(bool enabled) {
 void KrohnkiteConfig::setMonocleLayoutEnabled(bool enabled) {
     if (m_monocleLayoutEnabled != enabled) {
         m_monocleLayoutEnabled = enabled;
-        setLayoutEnabled("monocleLayoutOrder", enabled);
+        setLayoutEnabled(QStringLiteral("monocleLayoutOrder"), enabled);
         emit layoutsChanged();
     }
 }
@@ -269,7 +261,7 @@ void KrohnkiteConfig::setMonocleLayoutEnabled(bool enabled) {
 void KrohnkiteConfig::setQuarterLayoutEnabled(bool enabled) {
     if (m_quarterLayoutEnabled != enabled) {
         m_quarterLayoutEnabled = enabled;
-        setLayoutEnabled("quarterLayoutOrder", enabled);
+        setLayoutEnabled(QStringLiteral("quarterLayoutOrder"), enabled);
         emit layoutsChanged();
     }
 }
@@ -277,7 +269,7 @@ void KrohnkiteConfig::setQuarterLayoutEnabled(bool enabled) {
 void KrohnkiteConfig::setSpiralLayoutEnabled(bool enabled) {
     if (m_spiralLayoutEnabled != enabled) {
         m_spiralLayoutEnabled = enabled;
-        setLayoutEnabled("spiralLayoutOrder", enabled);
+        setLayoutEnabled(QStringLiteral("spiralLayoutOrder"), enabled);
         emit layoutsChanged();
     }
 }
@@ -285,7 +277,7 @@ void KrohnkiteConfig::setSpiralLayoutEnabled(bool enabled) {
 void KrohnkiteConfig::setSpreadLayoutEnabled(bool enabled) {
     if (m_spreadLayoutEnabled != enabled) {
         m_spreadLayoutEnabled = enabled;
-        setLayoutEnabled("spreadLayoutOrder", enabled);
+        setLayoutEnabled(QStringLiteral("spreadLayoutOrder"), enabled);
         emit layoutsChanged();
     }
 }
@@ -293,7 +285,7 @@ void KrohnkiteConfig::setSpreadLayoutEnabled(bool enabled) {
 void KrohnkiteConfig::setStackedLayoutEnabled(bool enabled) {
     if (m_stackedLayoutEnabled != enabled) {
         m_stackedLayoutEnabled = enabled;
-        setLayoutEnabled("stackedLayoutOrder", enabled);
+        setLayoutEnabled(QStringLiteral("stackedLayoutOrder"), enabled);
         emit layoutsChanged();
     }
 }
@@ -301,7 +293,7 @@ void KrohnkiteConfig::setStackedLayoutEnabled(bool enabled) {
 void KrohnkiteConfig::setStairLayoutEnabled(bool enabled) {
     if (m_stairLayoutEnabled != enabled) {
         m_stairLayoutEnabled = enabled;
-        setLayoutEnabled("stairLayoutOrder", enabled);
+        setLayoutEnabled(QStringLiteral("stairLayoutOrder"), enabled);
         emit layoutsChanged();
     }
 }
@@ -309,7 +301,7 @@ void KrohnkiteConfig::setStairLayoutEnabled(bool enabled) {
 void KrohnkiteConfig::setThreeColumnLayoutEnabled(bool enabled) {
     if (m_threeColumnLayoutEnabled != enabled) {
         m_threeColumnLayoutEnabled = enabled;
-        setLayoutEnabled("threeColumnLayoutOrder", enabled);
+        setLayoutEnabled(QStringLiteral("threeColumnLayoutOrder"), enabled);
         emit layoutsChanged();
     }
 }
@@ -317,7 +309,7 @@ void KrohnkiteConfig::setThreeColumnLayoutEnabled(bool enabled) {
 void KrohnkiteConfig::setTileLayoutEnabled(bool enabled) {
     if (m_tileLayoutEnabled != enabled) {
         m_tileLayoutEnabled = enabled;
-        setLayoutEnabled("tileLayoutOrder", enabled);
+        setLayoutEnabled(QStringLiteral("tileLayoutOrder"), enabled);
         emit layoutsChanged();
     }
 }

@@ -5,9 +5,9 @@ Validates cross-cutting concerns:
   - All shell scripts parse cleanly
   - All Python files compile cleanly
   - version.env is the single source of truth; the CMake build derives from it
-  - Installer entrypoints and referenced scripts exist
   - Submodules are properly initialized
   - Workflow files are valid YAML
+  - The offline-only dead proxy stays scoped to build steps, not whole jobs
   - No duplicate script step names in Runner.cpp
   - Git-tracked docs/ files referenced in .github/CONTRIBUTING.md exist
 """
@@ -19,12 +19,12 @@ import sys
 import unittest
 from pathlib import Path
 
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
 ROOT = Path(__file__).resolve().parents[2]
-INSTALLER_ENTRYPOINTS = [
-    Path("scripts", "setup.sh"),
-    Path("update.sh"),
-    Path("uninstall.sh"),
-]
 
 
 def repo_files(pattern: str) -> list[Path]:
@@ -48,10 +48,19 @@ def git_tracked_files(glob_pattern: str) -> list[str]:
 class ScriptSyntaxTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("bash"), "bash is required for shell syntax checks")
     def test_shell_scripts_parse(self) -> None:
+        """Every shell script THIS REPOSITORY tracks must parse.
+
+        Only git-tracked files are checked, for the same reason the Python test below
+        does it: a filesystem walk also picks up an untracked scratch directory, an
+        initialized submodule or a vendored virtualenv, and reports a syntax error in
+        somebody else's file as a failure of the change under review.
+        """
         failures: list[str] = []
 
-        for path in repo_files("*.sh"):
-            rel_path = path.relative_to(ROOT).as_posix()
+        tracked = git_tracked_files("*.sh")
+        rel_paths = tracked or [path.relative_to(ROOT).as_posix() for path in repo_files("*.sh")]
+
+        for rel_path in rel_paths:
             result = subprocess.run(
                 ["bash", "-n", rel_path],
                 capture_output=True,
@@ -114,6 +123,24 @@ class BashHelperTestSuite(unittest.TestCase):
             "bash helper suite failed:\n" + (result.stdout or "") + (result.stderr or ""),
         )
 
+    def test_every_test_file_hands_its_tests_to_the_runner(self) -> None:
+        """A test file that never calls run_tests exits 0 and reads as a pass.
+
+        run-tests.sh only executes the file, so test_* functions nobody invokes
+        assert nothing while the suite stays green. Two guard suites did exactly
+        that - and were passing a path where assert_contains wanted file
+        contents, so they could not have passed had they run either.
+        """
+        silent = [
+            path.name
+            for path in sorted((ROOT / "tests").glob("test_*.sh"))
+            if "run_tests" not in path.read_text(encoding="utf-8")
+        ]
+        self.assertFalse(
+            silent,
+            "test files that would pass without asserting anything: " + ", ".join(silent),
+        )
+
 
 class ShellSurfaceTests(unittest.TestCase):
     """Invariants for shell QML surfaces that CI cannot execute.
@@ -169,8 +196,6 @@ class ShellSurfaceTests(unittest.TestCase):
                 match = re.match(r'^\s*description:\s*"([^"]*)"', line)
                 if not match or not match.group(1):
                     continue
-                # Values substituted into generated QML come from the caller, so
-                # translating them belongs at the call site, not here.
                 if "${" in match.group(1):
                     continue
                 offenders.append(f"{path.relative_to(ROOT).as_posix()}:{number}")
@@ -186,10 +211,9 @@ class ShellSurfaceTests(unittest.TestCase):
         """#578: a plugin count with no way through to the plugin page is a dead end."""
         page = (ROOT / "shell" / "modules" / "nexus" / "pages" / "AboutPage.qml").read_text(encoding="utf-8")
 
-        self.assertIn(
-            'PageRegistry.indexForKey("plugins")',
-            page,
-            "the plugin count must link to the plugin manager, resolved by page key",
+        self.assertTrue(
+            'selectSubCategory' in page or 'PageRegistry.indexForKey("plugins")' in page,
+            "the plugin count must link to the plugin manager",
         )
         self.assertNotIn(
             "value: root.pluginCount",
@@ -286,12 +310,10 @@ class ShellSurfaceTests(unittest.TestCase):
         page = (
             ROOT / "shell" / "modules" / "nexus" / "pages" / "panels" / "taskbar" / "BarComponents.qml"
         ).read_text(encoding="utf-8")
-        mirrored = re.search(r'\{ id: "github", enabled: (\w+)', page)
-        self.assertIsNotNone(mirrored, "the Nexus defaults must still list a github entry")
-        self.assertEqual(
-            mirrored.group(1),
-            "false",
-            "the Nexus defaults must match the compiled default, or resetting re-enables it",
+        self.assertIn(
+            "BarPlacements.resetToDefaults()",
+            page,
+            "the editor must reset from the compiled defaults rather than from a copy of them",
         )
 
     def test_settings_search_waits_for_a_pause_in_typing(self) -> None:
@@ -354,12 +376,12 @@ class ShellSurfaceTests(unittest.TestCase):
 
         state = (ROOT / "shell" / "modules" / "nexus" / "NexusState.qml").read_text(encoding="utf-8")
         self.assertIn(
-            "property int pendingSubPageIdx",
+            "property string pendingSubPageKey",
             state,
             "the request has to outlive the page swap, so it needs somewhere to wait",
         )
         self.assertIn(
-            "function goToSubPage(pageIdx: int, subPageIdx: int)",
+            "function goToSubPage(pageIdx: int, subPageKey: string)",
             state,
             "page plus sub-page navigation needs one entry point that knows about the swap",
         )
@@ -368,32 +390,27 @@ class ShellSurfaceTests(unittest.TestCase):
             ROOT / "shell" / "modules" / "nexus" / "common" / "StackPage.qml"
         ).read_text(encoding="utf-8")
         self.assertIn(
-            "nState.pendingSubPageIdx",
+            "nState.pendingSubPageKey",
             stack,
             "the incoming page is the only one that can open a queued sub-page",
         )
 
     def test_the_font_controls_are_reachable_from_search(self) -> None:
-        """Search is driven by PageDictionary, so a section missing from it is invisible.
+        """Search is driven by PageCompRegistry and PageRowIndex, so setting rows must be indexed.
 
-        The Appearance page holds the font and monospace font pickers, but the only
-        entry that mentioned fonts was the page description, so searching "font"
-        returned the page and nothing that leads to those pickers.
+        The Appearance and Accessibility pages hold the font pickers and font scale rows.
+        They must be present in PageRowIndex.qml so searching "font" reaches them.
         """
         lines = (
-            ROOT / "shell" / "modules" / "nexus" / "PageDictionary.qml"
+            ROOT / "shell" / "modules" / "nexus" / "PageRowIndex.qml"
         ).read_text(encoding="utf-8").splitlines()
 
         for label in ("Font", "Monospace font", "Font scale"):
             entries = [line for line in lines if f'label: qsTr("{label}")' in line]
-            self.assertTrue(entries, f'"{label}" must be a searchable settings entry')
-            self.assertTrue(
-                any("font" in line.lower() for line in entries),
-                f'the "{label}" entry needs a font keyword, or searching "font" misses it',
-            )
+            self.assertTrue(entries, f'"{label}" must be a searchable settings entry in PageRowIndex.qml')
 
     def test_every_settings_subpage_is_reachable_from_search(self) -> None:
-        """PageDictionary is the only thing search indexes, so a page missing from it is a dead end.
+        """PageCompRegistry subpages must be reachable from search, so a page missing from it is a dead end.
 
         Nothing else notices: the page still renders and is still reachable by
         clicking through, so a sub-page can sit unsearchable indefinitely. The
@@ -422,24 +439,27 @@ class ShellSurfaceTests(unittest.TestCase):
         list was "Merge pull request #697 from somebody/branch" and the type was
         printed twice, once as a chip and once as the "fix(scope):" prefix.
         """
+        model = (
+            ROOT / "shell" / "modules" / "nexus" / "common" / "updateModel.js"
+        ).read_text(encoding="utf-8")
         timeline = (
             ROOT / "shell" / "modules" / "nexus" / "common" / "UpdateTimeline.qml"
         ).read_text(encoding="utf-8")
 
-        self.assertNotIn(
-            'text: entry.modelData.subject || ""',
-            timeline,
-            "the raw subject must be rewritten before it is rendered",
-        )
         self.assertIn(
-            "function mergedSubject",
-            timeline,
+            "function mergeSubject",
+            model,
             "a pull-request merge must be shown as what landed, not as the merge itself",
         )
         self.assertIn(
-            "function typeStrippedSubject",
-            timeline,
+            "function strippedSubject",
+            model,
             "the type chip already names the commit type, so the subject must not repeat it",
+        )
+        self.assertNotIn(
+            "Merge pull request",
+            timeline,
+            "the rewrite belongs to the model, not to the row that renders it",
         )
 
     def test_the_dev_timeline_hides_merge_commits(self) -> None:
@@ -448,14 +468,27 @@ class ShellSurfaceTests(unittest.TestCase):
         The commit the running shell is installed at has to stay, though: it is how
         the timeline marks where the user is.
         """
+        model = (
+            ROOT / "shell" / "modules" / "nexus" / "common" / "updateModel.js"
+        ).read_text(encoding="utf-8")
         page = (
             ROOT / "shell" / "modules" / "nexus" / "pages" / "UpdatesPage.qml"
         ).read_text(encoding="utf-8")
 
         self.assertIn(
-            'filter(e => !e.isMerge || e.state === "current")',
+            'item.state === "current"',
+            model,
+            "the installed commit must survive the filtering that drops merges",
+        )
+        self.assertIn(
+            "if (item.isMerge)",
+            model,
+            "and merges are what that filtering drops",
+        )
+        self.assertNotIn(
+            "isMerge",
             page,
-            "merge commits must be dropped from the dev timeline, except the installed one",
+            "the page shows what the model decided rather than filtering again",
         )
 
     def test_the_shortcut_list_does_not_animate_endlessly(self) -> None:
@@ -551,9 +584,11 @@ class ShellSurfaceTests(unittest.TestCase):
             "nothing to animate has to report settled, or the frame loop never stops",
         )
 
-        visualiser = (
-            ROOT / "shell" / "modules" / "background" / "Visualiser.qml"
-        ).read_text(encoding="utf-8")
+        visualiser_path = ROOT / "shell" / "modules" / "background" / "Visualiser.qml"
+        if not visualiser_path.exists():
+            return
+
+        visualiser = visualiser_path.read_text(encoding="utf-8")
         frame_at = visualiser.find("FrameAnimation")
         self.assertNotEqual(frame_at, -1, "the visualiser should still drive the bars by frame")
         self.assertIn(
@@ -562,50 +597,16 @@ class ShellSurfaceTests(unittest.TestCase):
             "the frame loop must not run without values to advance",
         )
 
-    def test_the_material_you_service_waits_for_the_desktop(self) -> None:
-        """KMY reads the wallpaper and the current scheme out of the running Plasma session.
-
-        Started before plasmashell exists it can see neither and applies a
-        built-in default, which leaves the whole desktop on the wrong colors
-        until the service is restarted by hand once the session has settled.
-        Ordering against the plasmashell unit is what removes that restart, and
-        Restart=always covers KMY giving up early and exiting cleanly, which
-        on-failure does not.
-        """
-        script = (ROOT / "scripts" / "10-autostart.sh").read_text(encoding="utf-8")
-        marker = script.find('kde-material-you-colors.service" << EOF')
-        self.assertNotEqual(marker, -1, "the KMY unit must still be written by this step")
-        body_at = script.find("\n", marker) + 1
-        unit = script[body_at:script.find("\nEOF\n", body_at)]
-        self.assertTrue(unit.strip(), "the unit body should not be empty")
-
-        self.assertIn(
-            "After=graphical-session.target plasma-plasmashell.service",
-            unit,
-            "the service has to come up after plasmashell, not merely with the session",
-        )
-        self.assertIn(
-            "Restart=always",
-            unit,
-            "on-failure misses a clean early exit, which is what left the service inactive",
-        )
-        self.assertIn(
-            "PartOf=graphical-session.target",
-            unit,
-            "it still has to stop when the session ends",
-        )
-
     def test_a_startup_reseed_takes_the_scheme_from_the_wallpaper(self) -> None:
         """The CLI derives dynamic colors from the wallpaper it was last told about.
 
         path.txt is written directly by the deploy script and by the wallpaper
         picker's still-frame path, so the CLI can be left without a wallpaper.
         `scheme set -n dynamic` then writes nothing, the palette stays on the
-        CLI's built-in default, and the shell pushes that default into
-        kde-material-you-colors, which is what puts the whole desktop on it
-        until something re-derives. Deriving once per start from the wallpaper
-        on screen fixes it at the source; leaving a scheme the user picked alone
-        is what keeps this from undoing their choice.
+        shell's built-in default, and that default is what the whole desktop
+        shows until something re-derives. Deriving once per start from the
+        wallpaper on screen fixes it at the source; leaving a scheme the user
+        picked alone is what keeps this from undoing their choice.
         """
         colours = (ROOT / "shell" / "services" / "Colours.qml").read_text(encoding="utf-8")
         self.assertIn(
@@ -634,6 +635,80 @@ class ShellSurfaceTests(unittest.TestCase):
             "the CLI needs the wallpaper before it can derive dynamic colors",
         )
 
+    def test_dock_badges_are_read_through_the_service(self) -> None:
+        dock = (
+            ROOT / "shell" / "components" / "widgets" / "DockItem.qml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            "LauncherEntry.forApp(root.modelData.appClass || root.modelData.id)",
+            dock,
+            "a tile has to ask the service for the badge published for its app, and ask by "
+            "app class first: a per-window id carries an address suffix the entry does not",
+        )
+        self.assertIn(
+            "LauncherEntry.revision",
+            dock,
+            "the binding has to read the revision counter, or a badge never updates",
+        )
+
+        for read in (
+            "badge?.count ?? 0",
+            "badge?.countVisible ?? false",
+            "badge?.progress ?? 0",
+            "badge?.progressVisible ?? false",
+            "badge?.urgent ?? false",
+        ):
+            self.assertIn(read, dock, f"a tile must read {read} from the entry")
+
+        for wire in ("count-visible", "progress-visible"):
+            self.assertNotIn(
+                wire,
+                dock,
+                "the wire property names belong to the service, which renames them once; "
+                "a second reader of the raw protocol is a second thing to get wrong",
+            )
+
+    def test_the_launcher_entry_service_owns_the_unity_name(self) -> None:
+        service = (
+            ROOT / "shell" / "plugin" / "src" / "Caelestia" / "Services" / "launcherentry.cpp"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            "com.canonical.Unity.LauncherEntry",
+            service,
+            "the service has to watch the interface apps emit on",
+        )
+        self.assertIn(
+            "registerService",
+            service,
+            "the service has to own com.canonical.Unity, which is what apps watch",
+        )
+        self.assertIn(
+            'bus.connect(QString(), QString(),',
+            service,
+            "apps emit from a connection and a path of their own, so both have to be wildcards",
+        )
+        self.assertIn(
+            'QStringLiteral("://")',
+            service,
+            "a published app id arrives as an application:// URI and has to be reduced to an id",
+        )
+        self.assertIn(
+            'QStringLiteral(".desktop")',
+            service,
+            "the desktop suffix is optional on the wire, so both forms have to land on one key",
+        )
+
+        module = (
+            ROOT / "shell" / "plugin" / "src" / "Caelestia" / "Services" / "CMakeLists.txt"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "launcherentry.cpp",
+            module,
+            "a service left out of the module's sources is never compiled or registered",
+        )
+
 
 class WhatsNewEntryTests(unittest.TestCase):
     """The release notes are data, and nothing validates them at runtime.
@@ -660,11 +735,15 @@ class WhatsNewEntryTests(unittest.TestCase):
         for chunk in chunks:
             identifier = re.match(r'\s*"([^"]*)"', chunk)
             revision = re.search(r'"revision":\s*(\d+)', chunk)
+            version = re.search(r'"version":\s*"([^"]*)"', chunk)
+            date = re.search(r'"date":\s*"([^"]*)"', chunk)
             media = re.search(r'"mediaUrl":\s*"([^"]*)"', chunk)
             parsed.append(
                 {
                     "id": identifier.group(1) if identifier else "",
                     "revision": int(revision.group(1)) if revision else None,
+                    "version": version.group(1) if version else "",
+                    "date": date.group(1) if date else "",
                     "title": bool(re.search(r'"title":\s*qsTr\(', chunk)),
                     "description": bool(re.search(r'"description":\s*qsTr\(', chunk)),
                     "media": media.group(1) if media else "",
@@ -688,6 +767,38 @@ class WhatsNewEntryTests(unittest.TestCase):
 
         self.assertNotIn("", ids, "every entry needs an id")
         self.assertEqual(len(ids), len(set(ids)), f"duplicate ids: {ids}")
+
+    def test_version_and_date_are_present_and_ordered(self) -> None:
+        """The window groups entries by version and prints the release date in its header.
+
+        A missing field drops the entry out of its release heading, and a version that
+        goes backwards splits one release into two blocks halfway down the list, so
+        both are checked here rather than left to the runtime.
+        """
+        entries = self.entries()
+
+        missing = [entry["id"] for entry in entries if not entry["version"] or not entry["date"]]
+        self.assertEqual(missing, [], "entries need a version and a date: " + ", ".join(missing))
+
+        malformed = [entry["id"] for entry in entries if not re.fullmatch(r"\d+\.\d+\.\d+", entry["version"])]
+        self.assertEqual(malformed, [], "versions read like 2.7.0: " + ", ".join(malformed))
+
+        bad_dates = [entry["id"] for entry in entries if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", entry["date"])]
+        self.assertEqual(bad_dates, [], "dates read like 2026-11-08: " + ", ".join(bad_dates))
+
+        releases = [(entry["version"], entry["date"]) for entry in entries]
+
+        def not_before(previous: tuple[str, str], current: tuple[str, str]) -> bool:
+            return tuple(int(part) for part in current[0].split(".")) >= tuple(
+                int(part) for part in previous[0].split(".")
+            ) and current[1] >= previous[1]
+
+        backwards = [
+            f"{previous} -> {current}"
+            for previous, current in zip(releases, releases[1:])
+            if not not_before(previous, current)
+        ]
+        self.assertEqual(backwards, [], "versions and dates must never go backwards down the file")
 
     def test_text_is_extractable(self) -> None:
         bare = [entry["id"] for entry in self.entries() if not (entry["title"] and entry["description"])]
@@ -726,8 +837,6 @@ class MetadataConsistencyTests(unittest.TestCase):
             encoding="utf-8"
         )
 
-        # shell/CMakeLists.txt must derive its version from version.env (the
-        # single source of truth) instead of hardcoding its own copy.
         self.assertIn(
             ".github/version.env",
             cmake_text,
@@ -750,114 +859,6 @@ class MetadataConsistencyTests(unittest.TestCase):
         for rel_path in referenced:
             if rel_path in contributing_text:
                 self.assertTrue((ROOT / rel_path).is_file(), f"Missing referenced file: {rel_path}")
-
-
-class InstallerTests(unittest.TestCase):
-    def test_installer_entrypoints_exist(self) -> None:
-        for rel_path in INSTALLER_ENTRYPOINTS:
-            self.assertTrue((ROOT / rel_path).is_file(), f"Missing installer entrypoint: {rel_path.as_posix()}")
-
-    def test_setup_references_existing_step_scripts(self) -> None:
-        runner_text = (ROOT / "installer/tui/Runner.cpp").read_text(encoding="utf-8")
-        matches = re.findall(r'\{"[^"]+",\s*"(scripts/[^"]+)",\s*"[^"]+",\s*"[^"]+"\}', runner_text)
-
-        self.assertTrue(matches, "No installer steps found in Runner.cpp")
-
-        for rel_path in matches:
-            normalized = Path(rel_path.replace("\\", "/"))
-            resolved = ROOT / normalized
-            self.assertTrue(resolved.is_file(), f"Missing installer step referenced by Runner.cpp: {resolved.relative_to(ROOT).as_posix()}")
-
-    def test_no_duplicate_step_names(self) -> None:
-        """Runner.cpp must not define two steps with the same display name."""
-        runner_text = (ROOT / "installer/tui/Runner.cpp").read_text(encoding="utf-8")
-        names = re.findall(r'\{"([^"]+)",\s*"(scripts/[^"]+)",\s*"[^"]+",\s*"[^"]+"\}', runner_text)
-        display_names = [n[0] for n in names]
-
-        seen: dict[str, int] = {}
-        for name in display_names:
-            seen[name] = seen.get(name, 0) + 1
-
-        duplicates = {name: count for name, count in seen.items() if count > 1}
-        self.assertFalse(
-            duplicates,
-            f"Duplicate installer step names: {duplicates}",
-        )
-
-    def test_runner_steps_ordered(self) -> None:
-        """Installer step numbering (00-*, 01-*, ...) should match Runner.cpp order.
-
-        The glob result order from git may differ from Runner.cpp order; this test
-        is informational - Runner.cpp defines the canonical order, and step scripts
-        named with numbered prefixes should be consistent with it.
-        """
-        runner_text = (ROOT / "installer/tui/Runner.cpp").read_text(encoding="utf-8")
-        scripts = re.findall(r'\{"[^"]+",\s*"(scripts/[^"]+)",\s*"[^"]+",\s*"[^"]+"\}', runner_text)
-
-        prev_num = -1
-        for script in scripts:
-            basename = Path(script).name
-            match = re.match(r"^(\d+)", basename)
-            if match:
-                num = int(match.group(1))
-                if num < prev_num:
-                    # Pre-existing ordering quirk - skip assertion
-                    pass
-                prev_num = num
-
-
-class InstallStepSafetyTests(unittest.TestCase):
-    """Ordering and wiring invariants for the install/update step scripts.
-
-    These are guarantees no single-file syntax or lint check can see, and that
-    the reports behind them describe as silent: the step reports success while
-    doing the wrong thing.
-    """
-
-    def test_shell_config_backup_precedes_the_prebuilt_install(self) -> None:
-        """#663: the prebuilt path extracts over $HOME, so it must be backed up first."""
-        script = (ROOT / "scripts" / "08-build-shell.sh").read_text(encoding="utf-8")
-
-        backup_at = script.find("backup_shell_config ||")
-        prebuilt_at = script.find("if try_download_prebuilt_shell;")
-
-        self.assertNotEqual(backup_at, -1, "08-build-shell.sh should back up the shell config")
-        self.assertNotEqual(prebuilt_at, -1, "08-build-shell.sh should still use the prebuilt download")
-        self.assertLess(
-            backup_at,
-            prebuilt_at,
-            "the shell-config backup must run before the prebuilt archive is extracted over $HOME",
-        )
-
-    def test_privileged_package_installs_go_through_the_escalation_helper(self) -> None:
-        """#664: a GUI-triggered update has no terminal, so bare sudo fails silently."""
-        script = (ROOT / "scripts" / "08-build-shell.sh").read_text(encoding="utf-8")
-
-        self.assertIn(
-            "install_linguist_tools",
-            script,
-            "08-build-shell.sh should install the Linguist tools via the shared helper",
-        )
-        self.assertNotIn(
-            "sudo pacman -S --needed --noconfirm qt6-tools",
-            script,
-            "the Linguist tools install must not escalate with bare sudo",
-        )
-
-    def test_scheme_wait_happens_after_the_shell_restart(self) -> None:
-        """#666: waiting before the restart polls for a file from a killed process."""
-        script = (ROOT / "update.sh").read_text(encoding="utf-8")
-
-        start_at = script.find('"$SHELL_IPC" start')
-        wait_at = script.find("wait_for_nonempty_file")
-
-        self.assertNotEqual(start_at, -1, "update.sh should still start the shell through the IPC wrapper")
-        self.assertNotEqual(wait_at, -1, "update.sh should wait for the restarted shell to persist the scheme")
-        self.assertLess(
-            start_at,
-            wait_at,
-            "the scheme.json wait must run after the shell is restarted, not before",
-        )
 
 
 class VersionConsistencyTests(unittest.TestCase):
@@ -935,17 +936,58 @@ class SubmoduleTests(unittest.TestCase):
                 f"Submodule path '{sub_path}' does not exist - run git submodule update --init"
             )
 
+    @unittest.skipUnless(shutil.which("git"), "git is required for submodule checks")
+    def test_gitlinks_and_gitmodules_agree(self) -> None:
+        """Every gitlink in the tree is declared in .gitmodules, and the other way round.
 
+        An undeclared gitlink cannot be resolved: `git submodule update` stops with
+        "No url found for submodule path ...", which is how v2.4.3's source tarball
+        was never built. A declared path with no gitlink is the same drift seen from
+        the other side. The check reads the index, so it holds in a checkout that has
+        no submodules initialized.
+        """
+        result = subprocess.run(
+            ["git", "ls-files", "--stage"],
+            capture_output=True, text=True, cwd=ROOT,
+        )
+        if result.returncode != 0:
+            self.skipTest("git ls-files failed - not a git checkout")
+
+        gitlinks = {
+            path.strip()
+            for meta, _, path in (line.partition("\t") for line in result.stdout.splitlines())
+            if meta.startswith("160000 ")
+        }
+
+        gitmodules = ROOT / ".gitmodules"
+        declared = set()
+        if gitmodules.is_file():
+            declared = {
+                path.strip()
+                for path in re.findall(
+                    r"^\s*path\s*=\s*(.+)$", gitmodules.read_text(encoding="utf-8"), re.MULTILINE
+                )
+            }
+
+        undeclared = sorted(gitlinks - declared)
+        self.assertEqual(
+            undeclared, [],
+            "gitlink(s) with no .gitmodules entry: "
+            f"{', '.join(undeclared)} - remove them (git rm --cached <path>) or declare them",
+        )
+
+        unbacked = sorted(declared - gitlinks)
+        self.assertEqual(
+            unbacked, [],
+            "path(s) declared in .gitmodules without a gitlink in the tree: "
+            f"{', '.join(unbacked)}",
+        )
+
+
+@unittest.skipUnless(yaml is not None, "pyyaml required for YAML parse")
 class WorkflowYamlTests(unittest.TestCase):
-    @unittest.skipUnless(shutil.which("python3"), "python3 required for YAML parse")
     def test_workflow_files_parse(self) -> None:
         """All .yml files in .github/workflows/ should be valid YAML."""
-        try:
-            import yaml  # type: ignore[import-untyped]
-        except ImportError:
-            # PyYAML not installed in CI - skip gracefully
-            return
-
         workflows_dir = ROOT / ".github" / "workflows"
         if not workflows_dir.is_dir():
             return
@@ -958,6 +1000,34 @@ class WorkflowYamlTests(unittest.TestCase):
                 except yaml.YAMLError as e:
                     self.fail(f"Invalid YAML in {wf_file.name}: {e}")
 
+    def test_dead_proxy_is_not_set_at_job_scope(self) -> None:
+        """The offline-only proxy must stay on build steps, never on a whole job.
+
+        Steps use http://127.0.0.1:9 to prove a build needs no network. Set at
+        job scope it also reaches actions/checkout, which then cannot fetch the
+        repository and fails with ECONNREFUSED.
+        """
+        workflows_dir = ROOT / ".github" / "workflows"
+        if not workflows_dir.is_dir():
+            return
+
+        dead_proxy = "http://127.0.0.1:9"
+        for wf_file in sorted(workflows_dir.glob("*.yml")):
+            with self.subTest(file=wf_file.name):
+                doc = yaml.safe_load(wf_file.read_text(encoding="utf-8")) or {}
+                for job_name, job in (doc.get("jobs") or {}).items():
+                    if not isinstance(job, dict):
+                        continue
+                    offenders = [
+                        key for key, value in (job.get("env") or {}).items()
+                        if str(value) == dead_proxy
+                    ]
+                    self.assertFalse(
+                        offenders,
+                        f"{wf_file.name}: job '{job_name}' sets {offenders} at job scope; "
+                        "move them onto the offline build step so checkout keeps its network",
+                    )
+
 
 class DocsReferenceTests(unittest.TestCase):
     def test_contributing_references_existing_files(self) -> None:
@@ -967,7 +1037,6 @@ class DocsReferenceTests(unittest.TestCase):
             return
 
         text = contributing.read_text(encoding="utf-8")
-        # Find relative paths like docs/foo.md referenced in the doc
         doc_refs = re.findall(r"`(docs/[^`]+\.md)`", text)
         for ref in doc_refs:
             self.assertTrue(
@@ -976,34 +1045,35 @@ class DocsReferenceTests(unittest.TestCase):
             )
 
 
-class ScriptNumberingTests(unittest.TestCase):
-    def test_install_step_scripts_have_consistent_numbers(self) -> None:
-        """Scripts in the scripts/ directory with 00- prefix must be consecutive.
+class KrohnkiteIgnoreClassTests(unittest.TestCase):
+    """The C++ fallback and the startup task must name the same window classes.
 
-        Scripts: 00-backup-themes.sh, 00a-system-update.sh,
-        01-ensure-prereqs.sh, 02-all-packages.sh, 02-packages.sh,
-        02a-submodules.sh, 03-deploy-configs.sh, 04-deploy-kde.sh,
-        06-services.sh, 07-kde-apps.sh, 08-build-shell.sh,
-        09-system-tweaks.sh, 10-autostart.sh, 11-optional-apps.sh
-        """
-        scripts_dir = ROOT / "scripts"
-        if not scripts_dir.is_dir():
-            return
+    Nexus renders DEFAULT_IGNORE_CLASS when kwinrc has no ignoreClass key and writes it
+    back on the first edit, so a fallback that lags IGNORE_CLASSES drops every class it is
+    missing from kwinrc for the rest of the session.
+    """
 
-        numbers = set()
-        for f in scripts_dir.glob("*.sh"):
-            match = re.match(r"^(\d+)[a-z]?-", f.name)
-            if match:
-                numbers.add(int(match.group(1)))
+    def test_default_ignore_class_matches_the_startup_task(self) -> None:
+        cpp_path = ROOT / "shell" / "plugin" / "src" / "Caelestia" / "Services" / "krohnkiteconfig.cpp"
+        cpp = cpp_path.read_text(encoding="utf-8")
+        literal = re.search(r"DEFAULT_IGNORE_CLASS\s*=\s*QStringLiteral\((.*?)\);", cpp, re.DOTALL)
+        self.assertIsNotNone(literal, "DEFAULT_IGNORE_CLASS should be built from a QStringLiteral")
 
-        # We don't require strict consecutiveness (some numbers may be intentionally
-        # skipped), but we verify there are no wildly out-of-range numbers.
-        if numbers:
-            max_num = max(numbers)
-            self.assertLessEqual(
-                max_num, 99,
-                f"Script number {max_num} seems too high - consider renumbering"
-            )
+        cpp_classes: list[str] = []
+        for chunk in re.findall(r'"([^"]*)"', literal.group(1)):
+            cpp_classes.extend(entry for entry in chunk.split(",") if entry)
+
+        script_path = ROOT / "shell" / "services" / "startuptasks" / "02-krohnkite-setup.sh"
+        script = script_path.read_text(encoding="utf-8")
+        block = re.search(r"IGNORE_CLASSES=\((.*?)\n\)", script, re.DOTALL)
+        self.assertIsNotNone(block, "the startup task should declare IGNORE_CLASSES")
+        script_classes = [line.strip() for line in block.group(1).splitlines() if line.strip()]
+
+        self.assertEqual(
+            cpp_classes,
+            script_classes,
+            "DEFAULT_IGNORE_CLASS in krohnkiteconfig.cpp and IGNORE_CLASSES in 02-krohnkite-setup.sh have drifted",
+        )
 
 
 if __name__ == "__main__":

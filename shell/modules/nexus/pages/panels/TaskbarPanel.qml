@@ -2,6 +2,7 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import QtQuick.Layouts
+import Quickshell
 import Caelestia.Config
 import qs.components.controls
 import qs.services
@@ -41,12 +42,23 @@ PageBase {
         }
     ]
 
+    readonly property list<ShellScreen> perMonitorRows: {
+        if (Screens.screens.length > 1)
+            return Screens.screens;
+        return Screens.screens.filter(s => GlobalConfig.forScreen(s.name).bar.overrides.includes("position"));
+    }
+
     function itemForPosition(pos: string): MenuItem {
         for (let i = 0; i < root.positionItems.length; i++) {
             if (root.positionItems[i].value === pos)
                 return root.positionItems[i];
         }
         return root.positionItems[0];
+    }
+
+    function resetScreenPositionOverrides(): void {
+        for (let i = 0; i < Quickshell.screens.length; i++)
+            GlobalConfig.forScreen(Quickshell.screens[i].name).bar.resetOption("position");
     }
 
     title: qsTr("Taskbar")
@@ -58,7 +70,6 @@ PageBase {
         width: root.cappedWidth
         spacing: Tokens.spacing.extraSmall / 2
 
-        // Behaviour
         SectionHeader {
             first: true
             text: qsTr("Behavior")
@@ -68,14 +79,24 @@ PageBase {
             first: true
             text: qsTr("Persistent")
             subtext: qsTr("Keep the bar visible at all times")
+            reset: ({ node: GlobalConfig.bar, setting: "persistent" })
             checked: GlobalConfig.bar.persistent
             onToggled: GlobalConfig.bar.persistent = checked
+        }
+
+        ToggleRow {
+            text: qsTr("Island mode")
+            subtext: qsTr("Detach the bar from screen edges into a floating island pill")
+            reset: ({ node: GlobalConfig.bar, setting: "islands" })
+            checked: GlobalConfig.bar.islands
+            onToggled: GlobalConfig.bar.islands = checked
         }
 
         ToggleRow {
             text: qsTr("Dodge windows")
             subtext: qsTr("Retract the bar while a window covers it, and let windows sit underneath")
             enabled: GlobalConfig.bar.persistent
+            reset: ({ node: GlobalConfig.bar, setting: "dodgeWindows" })
             checked: GlobalConfig.bar.dodgeWindows
             onToggled: GlobalConfig.bar.dodgeWindows = checked
         }
@@ -84,6 +105,7 @@ PageBase {
             text: qsTr("Dodge focused window only")
             subtext: qsTr("Ignore background windows over the bar, and dodge only what you are using")
             enabled: GlobalConfig.bar.persistent && GlobalConfig.bar.dodgeWindows
+            reset: ({ node: GlobalConfig.bar, setting: "dodgeFocusedOnly" })
             checked: GlobalConfig.bar.dodgeFocusedOnly
             onToggled: GlobalConfig.bar.dodgeFocusedOnly = checked
         }
@@ -94,12 +116,16 @@ PageBase {
             subtext: qsTr("Screen edge to place the bar on")
             active: root.itemForPosition(GlobalConfig.bar.position)
             menuItems: root.positionItems
-            onSelected: item => GlobalConfig.bar.position = item.value
+            onSelected: item => {
+                GlobalConfig.bar.position = item.value;
+                root.resetScreenPositionOverrides();
+            }
         }
 
         ToggleRow {
             text: qsTr("Show on hover")
             subtext: qsTr("Reveal the bar when the cursor reaches the screen edge")
+            reset: ({ node: GlobalConfig.bar, setting: "showOnHover" })
             checked: GlobalConfig.bar.showOnHover
             onToggled: GlobalConfig.bar.showOnHover = checked
         }
@@ -108,6 +134,7 @@ PageBase {
             last: true
             label: qsTr("Drag threshold")
             subtext: qsTr("Pixels dragged before the bar reveals")
+            reset: ({ node: GlobalConfig.bar, setting: "dragThreshold" })
             value: GlobalConfig.bar.dragThreshold
             from: 0
             to: 200
@@ -116,32 +143,30 @@ PageBase {
         }
 
         SectionHeader {
-            visible: Screens.screens.length > 1
+            visible: root.perMonitorRows.length > 0
             text: qsTr("Per-monitor position")
         }
 
         Repeater {
             id: perMonitorRepeater
 
-            model: Screens.screens.length > 1 ? Screens.screens : []
+            model: root.perMonitorRows
 
             SelectRow {
                 required property var modelData
                 required property int index
 
                 readonly property var screenConfig: GlobalConfig.forScreen(modelData.name)
-                readonly property bool hasOverride: screenConfig ? screenConfig.bar.isOverride("position") : false
+                readonly property bool hasOverride: screenConfig.bar.overrides.includes("position")
 
                 first: index === 0
                 last: index === perMonitorRepeater.count - 1
                 Layout.fillWidth: true
                 label: modelData.name
                 subtext: hasOverride ? qsTr("Overridden for this monitor") : qsTr("Using global position")
-                active: root.itemForPosition(screenConfig ? screenConfig.bar.position : GlobalConfig.bar.position)
+                active: root.itemForPosition(screenConfig.bar.position)
                 menuItems: hasOverride ? root.positionItems.concat(root.useGlobalItems) : root.positionItems
                 onSelected: item => {
-                    if (!screenConfig)
-                        return;
                     if (item === root.useGlobalItems[0])
                         screenConfig.bar.resetOption("position");
                     else
@@ -158,6 +183,7 @@ PageBase {
             first: true
             label: qsTr("Bar scale")
             subtext: qsTr("Scales taskbar thickness and component sizing")
+            reset: ({ node: GlobalConfig.bar, setting: "scale" })
             value: GlobalConfig.bar.scale
             from: 0.6
             to: 1.6
@@ -168,6 +194,7 @@ PageBase {
         StepperRow {
             label: qsTr("Preview scale")
             subtext: qsTr("Scales taskbar hover previews")
+            reset: ({ node: GlobalConfig.bar, setting: "previewScale" })
             value: GlobalConfig.bar.previewScale
             from: 0.5
             to: 1.6
@@ -178,6 +205,7 @@ PageBase {
         ToggleRow {
             text: qsTr("Live window previews")
             subtext: qsTr("Live thumbnails in hover/overview/alt-tab. Disable if screen sharing or camera in other apps (e.g. Vesktop) freezes")
+            reset: ({ node: GlobalConfig.bar, setting: "livePreviews" })
             checked: GlobalConfig.bar.livePreviews
             onToggled: GlobalConfig.bar.livePreviews = checked
         }
@@ -185,6 +213,7 @@ PageBase {
         ToggleRow {
             text: qsTr("Scale with bar size")
             subtext: qsTr("Multiply the preview scale with the bar scale")
+            reset: ({ node: GlobalConfig.bar, setting: "previewScaleWithBar" })
             checked: GlobalConfig.bar.previewScaleWithBar
             onToggled: GlobalConfig.bar.previewScaleWithBar = checked
         }
@@ -192,6 +221,7 @@ PageBase {
         StepperRow {
             label: qsTr("Font scaling offset")
             subtext: qsTr("Scales the text size across taskbar popouts")
+            reset: ({ node: GlobalConfig.bar, setting: "fontScaleOffset" })
             value: GlobalConfig.bar.fontScaleOffset
             from: -1.0; to: 1.0; stepSize: 0.05
             onMoved: v => GlobalConfig.bar.fontScaleOffset = v
@@ -202,10 +232,9 @@ PageBase {
             icon: "aspect_ratio"
             label: qsTr("Per-element scaling offsets")
             status: qsTr("Customize scale and font for each popout type")
-            onClicked: root.nState.openSubPage(14)
+            onClicked: root.nState.openSubPage("barPreviewScales")
         }
 
-        // Components
         SectionHeader {
             text: qsTr("Components")
         }
@@ -215,7 +244,7 @@ PageBase {
             icon: "view_agenda"
             label: qsTr("Toggle & Rearrange")
             status: qsTr("Add, remove or reorder components")
-            onClicked: root.nState.openSubPage(6)
+            onClicked: root.nState.openSubPage("barComponents")
         }
 
         NavRow {
@@ -223,10 +252,9 @@ PageBase {
             icon: "tune"
             label: qsTr("Elements & Modules")
             status: qsTr("Workspaces, tray, status icons, clock, dock and more")
-            onClicked: root.nState.openSubPage(15)
+            onClicked: root.nState.openSubPage("taskbarElements")
         }
 
-        // Scroll actions
         SectionHeader {
             text: qsTr("Scroll actions")
         }
@@ -235,13 +263,15 @@ PageBase {
             first: true
             text: qsTr("Workspaces")
             subtext: qsTr("Scroll over the workspace indicator to switch workspaces")
+            reset: ({ node: GlobalConfig.bar.scrollActions, setting: "workspaces" })
             checked: GlobalConfig.bar.scrollActions.workspaces
             onToggled: GlobalConfig.bar.scrollActions.workspaces = checked
         }
 
         ToggleRow {
             text: qsTr("Volume")
-            subtext: qsTr("Scroll on the top half of the bar to adjust volume")
+            subtext: qsTr("Scroll on the left half of a horizontal bar (top half if vertical) to adjust volume")
+            reset: ({ node: GlobalConfig.bar.scrollActions, setting: "volume" })
             checked: GlobalConfig.bar.scrollActions.volume
             onToggled: GlobalConfig.bar.scrollActions.volume = checked
         }
@@ -249,7 +279,8 @@ PageBase {
         ToggleRow {
             last: true
             text: qsTr("Brightness")
-            subtext: qsTr("Scroll on the bottom half of the bar to adjust brightness")
+            subtext: qsTr("Scroll on the right half of a horizontal bar (bottom half if vertical) to adjust brightness")
+            reset: ({ node: GlobalConfig.bar.scrollActions, setting: "brightness" })
             checked: GlobalConfig.bar.scrollActions.brightness
             onToggled: GlobalConfig.bar.scrollActions.brightness = checked
         }

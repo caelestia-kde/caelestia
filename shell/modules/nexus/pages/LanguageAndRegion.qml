@@ -39,17 +39,36 @@ PageBase {
 
     Component.onCompleted: Weather.reload()
 
-    // Temperature units (index 0 = Celsius, 1 = Fahrenheit — matches Weather.formatTemp)
     readonly property list<MenuItem> tempItems: [
         MenuItem {
-            text: "°C"
+            text: qsTr("Auto")
+            value: TemperatureUnit.Auto
         },
         MenuItem {
-            text: "°F"
+            text: qsTr("°C")
+            value: TemperatureUnit.Celsius
+        },
+        MenuItem {
+            text: qsTr("°F")
+            value: TemperatureUnit.Fahrenheit
+        },
+        MenuItem {
+            text: qsTr("K")
+            value: TemperatureUnit.Kelvin
         }
     ]
 
-    // "system" plus every language with an installed catalogue (see shell/translations)
+    readonly property list<MenuItem> dataItems: [
+        MenuItem {
+            text: qsTr("Binary (KiB, MiB)")
+            value: DataUnit.Binary
+        },
+        MenuItem {
+            text: qsTr("Decimal (KB, MB)")
+            value: DataUnit.Decimal
+        }
+    ]
+
     readonly property var languageOptions: [
         {
             code: "system",
@@ -61,17 +80,22 @@ PageBase {
                 }))
     ]
 
-    // Clock format (index 0 = 24-hour, 1 = 12-hour — matches Time.useTwelveHourClock)
     readonly property list<MenuItem> clockItems: [
         MenuItem {
-            text: qsTr("24-hour")
+            text: qsTr("Auto")
+            value: ClockFormat.Auto
         },
         MenuItem {
             text: qsTr("12-hour")
+            value: ClockFormat.TwelveHour
+        },
+        MenuItem {
+            text: qsTr("24-hour")
+            value: ClockFormat.TwentyFourHour
         }
     ]
 
-    title: qsTr("Language & region")
+    title: qsTr("Language & Region")
 
     ColumnLayout {
         anchors.horizontalCenter: parent.horizontalCenter
@@ -79,7 +103,6 @@ PageBase {
         width: root.cappedWidth
         spacing: Tokens.spacing.extraSmall / 2
 
-        // Language
         SectionHeader {
             first: true
             text: qsTr("Language")
@@ -113,7 +136,6 @@ PageBase {
             onSelected: item => GlobalConfig.general.language = item.code
         }
 
-        // Weather
         SectionHeader {
             text: qsTr("Weather")
         }
@@ -158,7 +180,7 @@ PageBase {
                                 ? qsTr("Saved weather coordinates: %1").arg(GlobalConfig.services.weatherLocation)
                                 : qsTr("No fixed location saved")
                             color: Colours.palette.m3onSurfaceVariant
-                            font: Tokens.font.label.small
+                            font: NexusStyle.secondaryFont
                             elide: Text.ElideRight
                         }
                     }
@@ -240,7 +262,7 @@ PageBase {
                             text: Weather.locationSearchError
                             wrapMode: Text.WordWrap
                             color: Colours.palette.m3error
-                            font: Tokens.font.label.small
+                            font: NexusStyle.secondaryFont
                         }
 
                         StyledText {
@@ -248,7 +270,7 @@ PageBase {
                             visible: !Weather.locationSearchError && locationField.text.length >= 2 && Weather.locationSearchResults.length === 0
                             text: qsTr("No matching locations")
                             color: Colours.palette.m3onSurfaceVariant
-                            font: Tokens.font.label.small
+                            font: NexusStyle.secondaryFont
                         }
 
                         Repeater {
@@ -292,7 +314,7 @@ PageBase {
                                     StyledText {
                                         text: resultRow.modelData.timezone || ""
                                         color: Colours.palette.m3onSurfaceVariant
-                                        font: Tokens.font.label.small
+                                        font: NexusStyle.secondaryFont
                                         visible: text.length > 0
                                         elide: Text.ElideRight
                                     }
@@ -337,7 +359,7 @@ PageBase {
                             width: root.compactWeatherPicker ? Math.max(120, actionFlow.width - Tokens.padding.extraLarge * 2) : 260
                             text: root.pendingLocation ? (root.pendingLocation.label || root.pendingLocation.name) : qsTr("No location selected")
                             color: Colours.palette.m3onSurfaceVariant
-                            font: Tokens.font.label.small
+                            font: NexusStyle.secondaryFont
                             elide: Text.ElideRight
                             verticalAlignment: Text.AlignVCenter
                         }
@@ -352,7 +374,6 @@ PageBase {
             visible: root.compactWeatherPicker
         }
 
-        // Units
         SectionHeader {
             text: qsTr("Units")
         }
@@ -362,20 +383,27 @@ PageBase {
             label: qsTr("Temperature")
             subtext: qsTr("Units for weather temperatures")
             menuItems: root.tempItems
-            active: root.tempItems[GlobalConfig.services.useFahrenheit ? 1 : 0]
-            onSelected: item => GlobalConfig.services.useFahrenheit = root.tempItems.indexOf(item) === 1
+            active: root.tempItems.find(i => i.value === GlobalConfig.services.weatherUnits)
+            onSelected: item => GlobalConfig.services.weatherUnits = item.value
+        }
+
+        SelectRow {
+            label: qsTr("System temperatures")
+            subtext: qsTr("Units for CPU and GPU temperatures")
+            menuItems: root.tempItems
+            active: root.tempItems.find(i => i.value === GlobalConfig.services.sensorUnits)
+            onSelected: item => GlobalConfig.services.sensorUnits = item.value
         }
 
         SelectRow {
             last: true
-            label: qsTr("System temperatures")
-            subtext: qsTr("Units for CPU and GPU temperatures")
-            menuItems: root.tempItems
-            active: root.tempItems[GlobalConfig.services.useFahrenheitPerformance ? 1 : 0]
-            onSelected: item => GlobalConfig.services.useFahrenheitPerformance = root.tempItems.indexOf(item) === 1
+            label: qsTr("Data sizes")
+            subtext: qsTr("Units for data sizes and network speeds")
+            menuItems: root.dataItems
+            active: root.dataItems.find(i => i.value === GlobalConfig.services.dataUnits)
+            onSelected: item => GlobalConfig.services.dataUnits = item.value
         }
 
-        // Time & date
         SectionHeader {
             text: qsTr("Time & date")
         }
@@ -385,9 +413,10 @@ PageBase {
             last: true
             label: qsTr("Clock format")
             subtext: qsTr("How times are shown across the shell")
+            menuOnTop: true
             menuItems: root.clockItems
-            active: root.clockItems[GlobalConfig.services.useTwelveHourClock ? 1 : 0]
-            onSelected: item => GlobalConfig.services.useTwelveHourClock = root.clockItems.indexOf(item) === 1
+            active: root.clockItems.find(i => i.value === GlobalConfig.services.clockFormat)
+            onSelected: item => GlobalConfig.services.clockFormat = item.value
         }
     }
 }

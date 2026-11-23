@@ -5,6 +5,7 @@ import Quickshell
 import Caelestia.Config
 import qs.components.controls
 import qs.services
+import qs.utils
 import "items"
 import "services"
 
@@ -31,7 +32,7 @@ ListView {
             outerMargins = panels.popouts.nonAnimWidth;
         if ((visibilities.utilities || visibilities.sidebar) && panels.utilities.implicitWidth > outerMargins)
             outerMargins = panels.utilities.implicitWidth;
-        const maxWidth = screen.width - Config.border.rounding * 4 - (barMargins + outerMargins) * 2;
+        const maxWidth = screen.width - Surface.panelRounding * 4 - (barMargins + outerMargins) * 2;
 
         if (maxWidth <= 0)
             return 0;
@@ -47,11 +48,21 @@ ListView {
     }
 
     function incrementCurrentIndex(): void {
-        Windows.triggerCycleNext();
+        if (scriptModel.search.trim() !== "") {
+            if (root.count > 0)
+                root.currentIndex = (root.currentIndex + 1) % root.count;
+        } else {
+            Windows.triggerCycleNext();
+        }
     }
 
     function decrementCurrentIndex(): void {
-        Windows.triggerCyclePrev();
+        if (scriptModel.search.trim() !== "") {
+            if (root.count > 0)
+                root.currentIndex = (root.currentIndex - 1 + root.count) % root.count;
+        } else {
+            Windows.triggerCyclePrev();
+        }
     }
 
     implicitWidth: Math.min(numItems, count) * itemWidth

@@ -21,6 +21,30 @@ Item {
     required property bool sourceMuted
     required property real brightness
 
+    function getVolumeIcon(value: real, muted: bool): string {
+        return OsdFunctions.getVolumeIcon(value, muted);
+    }
+
+    function getMicIcon(value: real, muted: bool): string {
+        return OsdFunctions.getMicIcon(value, muted);
+    }
+
+    function getBrightnessIcon(value: real): string {
+        return OsdFunctions.getBrightnessIcon(value);
+    }
+
+    function getIcon(type: string, value: real, muted: bool): string {
+        return OsdFunctions.getIcon(type, value, muted);
+    }
+
+    function getTitle(type: string): string {
+        return OsdFunctions.getTitle(type);
+    }
+
+    function isEnabled(type: string): bool {
+        return OsdFunctions.isEnabled(type);
+    }
+
     implicitWidth: layout.implicitWidth + Tokens.padding.large * 2
     implicitHeight: layout.implicitHeight + Tokens.padding.large * 2
 
@@ -30,7 +54,6 @@ Item {
         anchors.centerIn: parent
         spacing: Tokens.spacing.medium
 
-        // Speaker volume
         WrappedLoader {
             Layout.alignment: Qt.AlignHCenter
             shouldBeActive: Config.osd.enableVolume !== false
@@ -51,7 +74,7 @@ Item {
                 FilledSlider {
                     anchors.fill: parent
 
-                    icon: Icons.getVolumeIcon(value, root.muted)
+                    icon: root.getVolumeIcon(value, root.muted)
                     value: root.volume
                     to: GlobalConfig.services.maxVolume
                     onMoved: Audio.setVolume(value)
@@ -59,7 +82,6 @@ Item {
             }
         }
 
-        // Microphone volume
         WrappedLoader {
             Layout.alignment: Qt.AlignHCenter
             shouldBeActive: Config.osd.enableMicrophone && (!Config.osd.enableBrightness || !root.visibilities.session)
@@ -80,7 +102,7 @@ Item {
                 FilledSlider {
                     anchors.fill: parent
 
-                    icon: Icons.getMicVolumeIcon(value, root.sourceMuted)
+                    icon: root.getMicIcon(value, root.sourceMuted)
                     value: root.sourceVolume
                     to: GlobalConfig.services.maxVolume
                     onMoved: Audio.setSourceVolume(value)
@@ -88,7 +110,6 @@ Item {
             }
         }
 
-        // Brightness
         WrappedLoader {
             Layout.alignment: Qt.AlignHCenter
             shouldBeActive: Config.osd.enableBrightness
@@ -101,9 +122,9 @@ Item {
                     if (!monitor)
                         return;
                     if (event.angleDelta.y > 0)
-                        monitor.setBrightness(monitor.brightness + GlobalConfig.services.brightnessIncrement);
+                        monitor.stepBrightness(GlobalConfig.services.brightnessIncrement);
                     else if (event.angleDelta.y < 0)
-                        monitor.setBrightness(monitor.brightness - GlobalConfig.services.brightnessIncrement);
+                        monitor.stepBrightness(-GlobalConfig.services.brightnessIncrement);
                 }
 
                 implicitWidth: Tokens.sizes.osd.sliderWidth
@@ -112,11 +133,9 @@ Item {
                 FilledSlider {
                     anchors.fill: parent
 
-                    icon: HyprSunset.active ? "bedtime" : `brightness_${(Math.round(value * 6) + 1)}`
+                    icon: root.getBrightnessIcon(value)
                     value: root.brightness
                     onMoved: root.monitor?.setBrightness(value)
-                    enableIconTap: true
-                    onIconTapped: HyprSunset.toggle(5000)
                 }
             }
         }

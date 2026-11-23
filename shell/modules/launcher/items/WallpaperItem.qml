@@ -54,6 +54,10 @@ Item {
         y: Tokens.padding.large
         color: Colours.tPalette.m3surfaceContainer
         radius: Tokens.rounding.large
+        // A 1px edge so the photo does not dissolve into the tile behind it. Pure black
+        // or white: a tinted neutral would show as a coloured fringe on the image.
+        border.width: 1
+        border.color: Colours.light ? Qt.rgba(0, 0, 0, 0.1) : Qt.rgba(1, 1, 1, 0.1)
 
         implicitWidth: Tokens.sizes.launcher.wallpaperWidth
         implicitHeight: implicitWidth / 16 * 9
@@ -76,8 +80,6 @@ Item {
 
         CachingImage {
             anchors.fill: parent
-            // Videos get an extracted frame; until it exists this is empty and the
-            // videocam icon above shows through.
             path: Images.isVideo(root.modelData.name) ? Wallpapers.thumbFor(root.modelData.path) : root.modelData.path
             smooth: !root.PathView.view.moving
             visible: path !== ""
@@ -98,7 +100,6 @@ Item {
         width: image.width - Tokens.padding.medium * 2
         horizontalAlignment: Text.AlignHCenter
         elide: Text.ElideRight
-        renderType: Text.QtRendering
         text: root.modelData.name
         font: Tokens.font.label.medium
     }

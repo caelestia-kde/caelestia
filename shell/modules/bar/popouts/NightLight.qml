@@ -14,11 +14,10 @@ ColumnLayout {
 
     property bool _isSidebarOpen: false
 
-    // Injected by Content.qml's Popout.
     property real scaleOffset: 1.0
     property real fontScale: 1.0
 
-    implicitWidth: Math.max(300 * scaleOffset, _isSidebarOpen ? (Tokens.sizes.sidebar.width * scaleOffset) - Tokens.padding.extraLargeIncreased : 0)
+    implicitWidth: Math.max(300 * scaleOffset, _isSidebarOpen ? (Visibilities.sidebarWidthFor(Tokens.sizes.sidebar.width) * scaleOffset) - Tokens.padding.extraLargeIncreased : 0)
     spacing: Tokens.spacing.medium * scaleOffset
 
     StyledText {
@@ -37,13 +36,12 @@ ColumnLayout {
         verticalPadding: Tokens.padding.small * root.scaleOffset
         text: HyprSunset.autoMode ? qsTr("Auto") : qsTr("Manual")
         icon: "routine"
-        
+
         onClicked: {
             HyprSunset.toggleAutoMode();
         }
     }
 
-    // Daylight Temperature Slider (only visible in Auto mode)
     StyledText {
         visible: HyprSunset.autoMode
         Layout.topMargin: Tokens.spacing.medium * root.scaleOffset
@@ -82,7 +80,6 @@ ColumnLayout {
         }
     }
 
-    // Nightlight Temperature Slider
     StyledText {
         Layout.topMargin: Tokens.spacing.medium * root.scaleOffset
         Layout.leftMargin: Tokens.padding.small * root.scaleOffset

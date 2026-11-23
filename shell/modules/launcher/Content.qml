@@ -9,7 +9,10 @@ import Caelestia.Config
 import Caelestia.Services
 import qs.components
 import qs.components.controls
+import qs.components.effects
+import qs.components.images
 import qs.services
+import qs.utils
 import qs.modules.launcher.services
 
 Item {
@@ -25,8 +28,35 @@ Item {
     readonly property bool isClipboardMode: search.text.startsWith(`${GlobalConfig.launcher.actionPrefix}clipboard `)
     readonly property int footerSpacing: Tokens.spacing.small
 
+    // The modern header greets with the login name, capitalised so it reads
+    // like a name instead of a shell variable.
+    readonly property string userName: {
+        const user = Quickshell.env("USER") || qsTr("there");
+        return user.charAt(0).toUpperCase() + user.slice(1);
+    }
+    // The profile picture hangs off the top edge of the card, so only its lower
+    // half takes room inside the panel. The drawers window paints the circle
+    // above the launcher and joins it to the card through the blob group.
+    readonly property int avatarSize: Math.round(Tokens.sizes.launcher.browseTileHeight * 1.3)
+    readonly property int headerHeight: root.modernStyle && !root.windowSwitcherMode ? Math.round(root.avatarSize / 2 - 6) : 0
+    readonly property bool isBrowsing: list.showAppsBrowser
+    // The switcher is driven by the keyboard, so the launcher's search field and
+    // session buttons are hidden while it is open.
+    readonly property bool windowSwitcherMode: list.showWindowSwitcher
+    // Classic keeps the launcher as it shipped (session row under the search
+    // field); Modern is the profile picture header with the corner actions.
+    readonly property bool modernStyle: Style.launcherStyle === "modern"
+    // The drawers window reads this to draw the circle behind the avatar. The
+    // greeting and the profile picture are part of modern Launcher style, so they stay out of the
+    // window switcher.
+    readonly property bool showAvatar: root.modernStyle && !root.windowSwitcherMode
+
     function clearClipboardHistory(): void {
         Clipboard.clearHistory();
+    }
+
+    function searchTextForMode(mode: string): string {
+        return mode ? `${GlobalConfig.launcher.actionPrefix}${mode} ` : "";
     }
 
     function triggerSessionCommand(command: list<string>): void {
@@ -36,7 +66,7 @@ Item {
     }
 
     implicitWidth: listWrapper.width + padding * 2
-    implicitHeight: listWrapper.height + sessionFooter.height + searchWrapper.height + listWrapper.anchors.bottomMargin + sessionFooter.anchors.bottomMargin + searchWrapper.anchors.bottomMargin
+    implicitHeight: listWrapper.height + sessionFooter.height + searchWrapper.height + listWrapper.anchors.bottomMargin + sessionFooter.anchors.bottomMargin + searchWrapper.anchors.bottomMargin + root.headerHeight
 
     Connections {
         function onClearHistoryFinished(success: bool): void {
@@ -58,8 +88,8 @@ Item {
         implicitHeight: list.implicitHeight + root.padding
 
         anchors.horizontalCenter: parent.horizontalCenter
-        anchors.bottom: sessionFooter.top
-        anchors.bottomMargin: root.footerSpacing
+        anchors.bottom: root.modernStyle ? searchWrapper.top : sessionFooter.top
+        anchors.bottomMargin: root.windowSwitcherMode ? root.padding : root.footerSpacing
 
         ContentList {
             id: list
@@ -68,17 +98,93 @@ Item {
             visibilities: root.visibilities
             panels: root.panels
             maxWidth: root.maxWidth - root.padding * 2
-            maxHeight: root.maxHeight - searchWrapper.implicitHeight - sessionFooter.implicitHeight - root.padding * 2 - (sessionFooter.visible ? root.footerSpacing * 2 : root.footerSpacing)
+            maxHeight: root.maxHeight - searchWrapper.implicitHeight - root.padding * 2 - (root.modernStyle ? root.headerHeight + root.footerSpacing : sessionFooter.implicitHeight + (sessionFooter.visible ? root.footerSpacing * 2 : root.footerSpacing))
             search: search
             padding: root.padding
             rounding: root.rounding
         }
     }
 
+    // The profile picture sits on the top edge of the card: its centre is the
+    // panel's top edge, so half the circle floats above the launcher and the
+    // drawers window merges it with the card background.
+    Item {
+        id: avatar
+
+        // No card sits behind the avatar, so the picture fills the circle.
+        property int ring: 2
+
+        visible: root.modernStyle && !root.windowSwitcherMode
+        anchors.horizontalCenter: parent.horizontalCenter
+        y: 4 - (root.avatarSize / 2 + 4) * (panels.launcher?.avatarOpenScale ?? (root.modernStyle ? 1 : 0))
+        opacity: panels.launcher?.avatarOpenScale ?? (root.modernStyle ? 1 : 0)
+        implicitWidth: root.avatarSize
+        implicitHeight: root.avatarSize
+
+        Item {
+            id: avatarClip
+
+            anchors.fill: parent
+            layer.enabled: true
+            layer.smooth: true
+            layer.effect: Mask {
+                maskSource: avatarMask
+            }
+
+            Item {
+                anchors.fill: parent
+                anchors.margins: avatar.ring
+
+                Rectangle {
+                    anchors.fill: parent
+                    visible: face.status !== Image.Ready
+                    color: Colours.layer(Colours.palette.m3surfaceContainerHighest, 2)
+
+                    Behavior on color {
+                        CAnim {}
+                    }
+                }
+
+                CachingImage {
+                    id: face
+
+                    anchors.fill: parent
+                    path: Style.avatarPath !== "" ? Style.avatarPath : `${Paths.home}/.face`
+                }
+
+                Loader {
+                    anchors.centerIn: parent
+                    active: face.status !== Image.Ready
+
+                    sourceComponent: MaterialIcon {
+                        text: "person"
+                        color: Colours.palette.m3onSurfaceVariant
+                        fontStyle: Tokens.font.icon.extraLarge
+                    }
+                }
+            }
+        }
+
+        Item {
+            id: avatarMask
+
+            anchors.fill: parent
+            visible: false
+            layer.enabled: true
+
+            Rectangle {
+                anchors.fill: parent
+                anchors.margins: avatar.ring
+                radius: Tokens.rounding.full
+                color: "white"
+            }
+        }
+    }
+
     StyledRect {
         id: sessionFooter
 
-        visible: Config.launcher.showPowerMenu
+        visible: !root.modernStyle && Config.launcher.showPowerMenu && !list.showWindowSwitcher
 
         color: Colours.layer(Colours.palette.m3surfaceContainerLow, 2)
         radius: Tokens.rounding.extraLarge
@@ -98,13 +204,6 @@ Item {
             anchors.fill: parent
             anchors.margins: Tokens.padding.medium
             spacing: Tokens.spacing.small
-
-            // StyledText {
-            //     Layout.fillWidth: true
-            //     text: qsTr("Quick session controls")
-            //     color: Colours.palette.m3onSurfaceVariant
-            //     font: Tokens.font.label.large
-            // }
 
             RowLayout {
                 Layout.fillWidth: true
@@ -149,6 +248,136 @@ Item {
         }
     }
 
+    StyledText {
+        id: greeting
+
+        visible: root.modernStyle && !root.windowSwitcherMode
+        anchors.left: parent.left
+        // Line the greeting up with the category labels: the browser adds its
+        // own padding and each button insets its content by the medium padding.
+        anchors.leftMargin: root.padding * 2 + Tokens.padding.medium
+        anchors.verticalCenter: headerActions.verticalCenter
+        text: qsTr("Hello, %1").arg(root.userName)
+        font: Tokens.font.title.builders.medium.weight(Font.DemiBold).build()
+        color: Colours.palette.m3onSurfaceVariant
+    }
+
+    Row {
+        id: headerActions
+
+        anchors.top: parent.top
+        anchors.right: parent.right
+        anchors.topMargin: Tokens.padding.small
+        anchors.rightMargin: root.padding
+        spacing: Tokens.spacing.extraSmall
+
+        IconButton {
+            id: sortBtn
+
+            visible: root.modernStyle && root.isBrowsing && Boolean(list.currentList?.sortMode)
+            isRound: true
+            type: IconButton.Tonal
+            icon: list.currentList?.sortMode === "alpha" ? "sort_by_alpha" : "trending_up"
+
+            onClicked: sortMenu.expanded = !sortMenu.expanded
+        }
+
+        IconButton {
+            id: powerBtn
+
+            visible: root.modernStyle && Config.launcher.showPowerMenu && !list.showWindowSwitcher
+            isRound: true
+            type: IconButton.Tonal
+            icon: "power_settings_new"
+
+            onClicked: powerMenu.expanded = !powerMenu.expanded
+        }
+    }
+
+    Menu {
+        id: sortMenu
+
+        attachTo: sortBtn
+        attachSideX: Menu.Right
+        thisSideX: Menu.Right
+        attachSideY: Menu.Bottom
+        thisSideY: Menu.Top
+        marginY: Tokens.spacing.extraSmall
+
+        items: [
+            MenuItem {
+                text: qsTr("Most used")
+                icon: "trending_up"
+                trailingIcon: list.currentList?.sortMode === "alpha" ? "" : "check"
+
+                onClicked: {
+                    sortMenu.expanded = false;
+                    list.currentList?.setSortMode("most-used");
+                }
+            },
+            MenuItem {
+                text: qsTr("A-Z")
+                icon: "sort_by_alpha"
+                trailingIcon: list.currentList?.sortMode === "alpha" ? "check" : ""
+
+                onClicked: {
+                    sortMenu.expanded = false;
+                    list.currentList?.setSortMode("alpha");
+                }
+            }
+        ]
+    }
+
+    Menu {
+        id: powerMenu
+
+        attachTo: powerBtn
+        attachSideX: Menu.Right
+        thisSideX: Menu.Right
+        attachSideY: Menu.Bottom
+        thisSideY: Menu.Top
+        marginY: Tokens.spacing.extraSmall
+
+        items: [
+            MenuItem {
+                text: qsTr("Log Out")
+                icon: "logout"
+
+                onClicked: {
+                    powerMenu.expanded = false;
+                    root.triggerSessionCommand(["sh", "-c", "qdbus6 org.kde.Shutdown /Shutdown org.kde.Shutdown.logout 2>/dev/null"]);
+                }
+            },
+            MenuItem {
+                text: qsTr("Sleep")
+                icon: "bedtime"
+
+                onClicked: {
+                    powerMenu.expanded = false;
+                    root.triggerSessionCommand(["suspendThenHibernate"]);
+                }
+            },
+            MenuItem {
+                text: qsTr("Restart")
+                icon: "restart_alt"
+
+                onClicked: {
+                    powerMenu.expanded = false;
+                    root.triggerSessionCommand(Config.session.commands.reboot);
+                }
+            },
+            MenuItem {
+                text: qsTr("Shut Down")
+                icon: "power_settings_new"
+
+                onClicked: {
+                    powerMenu.expanded = false;
+                    root.triggerSessionCommand(Config.session.commands.shutdown);
+                }
+            }
+        ]
+    }
+
     StyledRect {
         id: searchWrapper
 
@@ -159,9 +388,12 @@ Item {
         anchors.right: parent.right
         anchors.bottom: parent.bottom
         anchors.margins: root.padding
-        anchors.bottomMargin: CUtils.clamp(root.padding - Config.border.thickness, 0, root.padding)
+        anchors.bottomMargin: root.windowSwitcherMode ? 0 : CUtils.clamp(root.padding - Config.border.thickness, 0, root.padding)
 
-        implicitHeight: Math.max(searchIcon.implicitHeight, search.implicitHeight, clearClipboardIcon.implicitHeight, clearIcon.implicitHeight)
+        // Keep the field instantiated and focused for the switcher's keys, but
+        // collapse the row so it takes no space and is not drawn.
+        opacity: root.windowSwitcherMode ? 0 : 1
+        implicitHeight: root.windowSwitcherMode ? 0 : Math.max(searchIcon.implicitHeight, search.implicitHeight, clearClipboardIcon.implicitHeight, clearIcon.implicitHeight, commandsBtn.implicitHeight)
 
         MaterialIcon {
             id: searchIcon
@@ -194,23 +426,17 @@ Item {
                 }
 
                 const currentItem = list.currentList?.currentItem;
-                if (currentItem) {
-                    if (list.showWallpapers) {
-                        if (Colours.scheme === "dynamic" && currentItem.modelData.path !== Wallpapers.actualCurrent)
-                            Wallpapers.previewColourLock = true;
-                        Wallpapers.setWallpaper(currentItem.modelData.path);
-                        root.visibilities.launcher = false;
-                    } else if (text.startsWith(GlobalConfig.launcher.actionPrefix)) {
-                        if (text.startsWith(`${GlobalConfig.launcher.actionPrefix}calc `))
-                            currentItem.onClicked();
-                        else if (text.startsWith(`${GlobalConfig.launcher.actionPrefix}emoji `) || text.startsWith(`${GlobalConfig.launcher.actionPrefix}clipboard `) || text.startsWith(`${GlobalConfig.launcher.actionPrefix}windows `) || text.startsWith(`${GlobalConfig.launcher.actionPrefix}keybinds `) || text.startsWith(`${GlobalConfig.launcher.actionPrefix}animations `))
-                            currentItem.clicked();
-                        else
-                            currentItem.modelData.onClicked(list.currentList);
-                    } else {
-                        Apps.launch(currentItem.modelData);
-                        root.visibilities.launcher = false;
-                    }
+                if (!currentItem)
+                    return;
+
+                // The wallpapers list is the one surface whose rows are not launcher
+                // delegates, so it activates by path here; everything else owns its
+                // activation and does not need to be re-derived from the text.
+                if (list.showWallpapers) {
+                    Wallpapers.setWallpaper(currentItem.modelData.path);
+                    root.visibilities.launcher = false;
+                } else {
+                    currentItem.activate();
                 }
             }
 
@@ -223,7 +449,7 @@ Item {
                     list.currentList?.incrementCurrentIndex();
             }
             Keys.onLeftPressed: event => {
-                if (list.showWallpapers) {
+                if (list.showWallpapers || list.showWindowSwitcher) {
                     list.currentList?.decrementCurrentIndex();
                     event.accepted = true;
                 } else if (list.showAppsBrowser) {
@@ -234,7 +460,7 @@ Item {
                 }
             }
             Keys.onRightPressed: event => {
-                if (list.showWallpapers) {
+                if (list.showWallpapers || list.showWindowSwitcher) {
                     list.currentList?.incrementCurrentIndex();
                     event.accepted = true;
                 } else if (list.showAppsBrowser) {
@@ -246,12 +472,13 @@ Item {
             }
 
             Keys.onEscapePressed: {
-                KWinActiveWindowBridge.clearHighlight();
+                Windows.isSwitching = false;
+                Kwin.clearHighlight();
                 root.visibilities.launcher = false;
             }
 
             Keys.onReleased: event => {
-                if (text.startsWith(`${GlobalConfig.launcher.actionPrefix}windows `)) {
+                if (Windows.isSwitching && text.startsWith(`${GlobalConfig.launcher.actionPrefix}windows `)) {
                     const switcherKey = (typeof KeybindsModel !== "undefined" && KeybindsModel.getKey("windowSwitcher")) || "Alt+Tab";
                     if (!CUtils.isShortcutModifierPressed(switcherKey)) {
                         Windows.focusSelectedWindow();
@@ -262,7 +489,7 @@ Item {
             }
 
             Keys.onPressed: event => {
-                if (text.startsWith(`${GlobalConfig.launcher.actionPrefix}windows `)) {
+                if (Windows.isSwitching && text.startsWith(`${GlobalConfig.launcher.actionPrefix}windows `)) {
                     if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
                         if (event.modifiers & Qt.ShiftModifier || event.key === Qt.Key_Backtab) {
                             Windows.triggerCyclePrev();
@@ -282,13 +509,15 @@ Item {
                         event.accepted = true;
                         return;
                     }
-                    if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter || event.key === Qt.Key_Space) {
+                    if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
                         Windows.focusSelectedWindow();
                         root.visibilities.launcher = false;
                         event.accepted = true;
                         return;
                     }
                     if (event.key === Qt.Key_Escape) {
+                        Windows.isSwitching = false;
+                        Kwin.clearHighlight();
                         root.visibilities.launcher = false;
                         event.accepted = true;
                         return;
@@ -321,29 +550,54 @@ Item {
                 }
             }
 
-            Component.onCompleted: {
-                if (Visibilities.launcherInitialSearch) {
-                    text = Visibilities.launcherInitialSearch;
-                    Visibilities.launcherInitialSearch = "";
+            onTextChanged: {
+                if (root.visibilities.launcher)
+                    Visibilities.launcherMode = Visibilities.modeForText(text);
+                if (!text.startsWith(`${GlobalConfig.launcher.actionPrefix}windows `)) {
+                    Windows.isSwitching = false;
+                    Kwin.clearHighlight();
                 }
+            }
+
+            Component.onCompleted: {
+                // The launcher may have opened before this content was created.
+                if (root.visibilities.launcher)
+                    text = root.searchTextForMode(Visibilities.launcherMode);
                 forceActiveFocus();
+            }
+
+            Timer {
+                id: keyboardRetry
+
+                interval: 60
+                onTriggered: {
+                    if (root.visibilities.launcher && !search.activeFocus)
+                        search.forceActiveFocus();
+                }
+            }
+
+            Connections {
+                function onActiveChanged(): void {
+                    if (root.Window.window?.active && root.visibilities.launcher)
+                        keyboardRetry.restart();
+                }
+
+                target: root.Window.window
             }
 
             Connections {
                 function onLauncherChanged(): void {
                     if (root.visibilities.launcher) {
-                        if (Visibilities.launcherInitialSearch) {
-                            search.text = Visibilities.launcherInitialSearch;
-                            Visibilities.launcherInitialSearch = "";
-                        }
-                        // Re-opening reuses an already-built Content, which does not
-                        // run Component.onCompleted again — without this the search
-                        // field never regains focus, and since the Alt release that
-                        // commits the window switcher is delivered to this field,
-                        // the switcher would stay open and stop cycling.
+                        search.text = root.searchTextForMode(Visibilities.launcherMode);
                         search.forceActiveFocus();
+                        // The drawers window may still be activating, and the keyboard
+                        // handler holds focus until something in here claims it. Ask
+                        // again once that settles so typing always lands in the field.
+                        keyboardRetry.restart();
                     } else {
-                        KWinActiveWindowBridge.clearHighlight();
+                        Windows.isSwitching = false;
+                        Kwin.clearHighlight();
+                        Wallpapers.stopPreview();
                     }
                 }
 
@@ -356,17 +610,21 @@ Item {
             }
 
             Connections {
-                function onModifierReleased(): void {
-                    if (root.visibilities.launcher && search.text.startsWith(`${GlobalConfig.launcher.actionPrefix}windows `)) {
-                        const switcherKey = (typeof KeybindsModel !== "undefined" && KeybindsModel.getKey("windowSwitcher")) || "Alt+Tab";
-                        if (!CUtils.isShortcutModifierPressed(switcherKey)) {
-                            Windows.focusSelectedWindow();
-                            root.visibilities.launcher = false;
-                        }
-                    }
+                // A different mode asked for while the panel is already open.
+                function onLauncherOpened(mode: string): void {
+                    if (Visibilities.launcherScreen === root.visibilities)
+                        search.text = root.searchTextForMode(mode);
                 }
 
-                target: CUtils
+                target: Visibilities
+            }
+
+            Connections {
+                function onClosed(): void {
+                    search.text = "";
+                }
+
+                target: root.panels.launcher
             }
         }
 
@@ -375,21 +633,13 @@ Item {
 
             anchors.verticalCenter: parent.verticalCenter
             anchors.right: clearIcon.left
-            anchors.rightMargin: Tokens.spacing.small
+            anchors.rightMargin: (root.isClipboardMode && Clipboard.items.length > 0) ? Tokens.spacing.small : 0
 
-            width: (root.isClipboardMode && Clipboard.items.length > 0) ? implicitWidth : implicitWidth / 2
-            opacity: {
-                if (!root.isClipboardMode || Clipboard.items.length === 0)
-                    return 0;
-                if (clipboardMouse.pressed)
-                    return 0.7;
-                if (clipboardMouse.containsMouse)
-                    return 0.8;
-                return 1;
-            }
+            width: (root.isClipboardMode && Clipboard.items.length > 0) ? implicitWidth : 0
+            opacity: (root.isClipboardMode && Clipboard.items.length > 0) ? 1 : 0
 
             text: "delete"
-            color: Colours.palette.m3onSurfaceVariant
+            color: clipboardMouse.containsMouse ? Colours.palette.m3error : Colours.palette.m3onSurfaceVariant
 
             MouseArea {
                 id: clipboardMouse
@@ -409,6 +659,10 @@ Item {
                 }
             }
 
+            Behavior on color {
+                CAnim {}
+            }
+
             Behavior on width {
                 Anim {
                     type: Anim.StandardSmall
@@ -426,22 +680,14 @@ Item {
             id: clearIcon
 
             anchors.verticalCenter: parent.verticalCenter
-            anchors.right: parent.right
-            anchors.rightMargin: root.padding
+            anchors.right: commandsBtn.left
+            anchors.rightMargin: search.text ? Tokens.spacing.small : 0
 
-            width: search.text ? implicitWidth : implicitWidth / 2
-            opacity: {
-                if (!search.text)
-                    return 0;
-                if (mouse.pressed)
-                    return 0.7;
-                if (mouse.containsMouse)
-                    return 0.8;
-                return 1;
-            }
+            width: search.text ? implicitWidth : 0
+            opacity: search.text ? 1 : 0
 
             text: "close"
-            color: Colours.palette.m3onSurfaceVariant
+            color: mouse.containsMouse ? Colours.palette.m3primary : Colours.palette.m3onSurfaceVariant
 
             MouseArea {
                 id: mouse
@@ -451,6 +697,10 @@ Item {
                 cursorShape: search.text ? Qt.PointingHandCursor : undefined
 
                 onClicked: search.text = ""
+            }
+
+            Behavior on color {
+                CAnim {}
             }
 
             Behavior on width {
@@ -463,6 +713,33 @@ Item {
                 Anim {
                     type: Anim.StandardSmall
                 }
+            }
+        }
+
+        IconButton {
+            id: commandsBtn
+
+            isToggle: true
+            type: IconButton.Text
+            implicitWidth: 32
+            implicitHeight: 32
+            radius: Tokens.rounding.full
+            radiusMorph: false
+            icon: "menu"
+
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.right: parent.right
+            anchors.rightMargin: root.padding
+            checked: search.text.startsWith(GlobalConfig.launcher.actionPrefix)
+
+            onClicked: {
+                if (search.text.startsWith(GlobalConfig.launcher.actionPrefix)) {
+                    search.text = "";
+                } else {
+                    search.text = GlobalConfig.launcher.actionPrefix;
+                }
+                search.forceActiveFocus();
+                search.cursorPosition = search.text.length;
             }
         }
     }

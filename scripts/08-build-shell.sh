@@ -2,20 +2,76 @@
 
 set -euo pipefail
 
+source "$(dirname "${BASH_SOURCE[0]}")/lib/install-kind.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/lib/log.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/lib/privileges.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/lib/install-fs.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/lib/packages.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/lib/download.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/lib/toolchain.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/lib/update-state.sh"
-source "$(dirname "${BASH_SOURCE[0]}")/lib/submodules.sh"
 
-BUNDLE_DIR="${BUNDLE_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+export BUNDLE_DIR="${BUNDLE_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 SHELL_DIR="$BUNDLE_DIR/shell"
 
-# Prefer Ninja for faster builds; fall back to CMake's default generator when
-# it is not available (e.g. a standalone/update run before package install).
-# Reflected in the toolchain stamp so a build dir is invalidated if the
-# available generator changes.
+write_shell_environment() {
+    local env_d="$HOME/.config/environment.d"
+    local plasma_env_d="$HOME/.config/plasma-workspace/env"
+    local rc
+
+    info "Writing the shell environment to $env_d/caelestia.conf"
+    mkdir -p "$env_d"
+    cat > "$env_d/caelestia.conf" << EOF
+# Written by Caelestia. Read by systemd for every session process and by the
+# user manager the shell's unit runs under.
+QML2_IMPORT_PATH=$(install_qml_import_path)
+CAELESTIA_LIB_DIR=$(install_lib_dir)
+CAELESTIA_BIN_DIR=$(install_bin_dir)
+CAELESTIA_SHELL_CONFIG=$(install_shell_config)
+EOF
+    ok "Shell environment written."
+
+    info "Writing the Plasma session environment to $plasma_env_d/caelestia.sh"
+    mkdir -p "$plasma_env_d"
+    cat > "$plasma_env_d/caelestia.sh" << EOF
+#!/bin/sh
+# Written by Caelestia. Sourced by KDE Plasma during session startup for KWin,
+# kscreenlocker_greet, and graphical session processes.
+#
+# The command directory goes on PATH because a checkout's command lives in
+# ~/.local/bin, which a session does not carry on every distribution: without
+# this, a terminal here cannot run caelestia update by name. A package's
+# /usr/bin is already on PATH, so this only matters for a checkout.
+export PATH="$(install_bin_dir)\${PATH:+:\$PATH}"
+export QML2_IMPORT_PATH="$(install_qml_import_path)\${QML2_IMPORT_PATH:+:\$QML2_IMPORT_PATH}"
+export CAELESTIA_LIB_DIR="$(install_lib_dir)"
+export CAELESTIA_BIN_DIR="$(install_bin_dir)"
+export CAELESTIA_SHELL_CONFIG="$(install_shell_config)"
+EOF
+    chmod +x "$plasma_env_d/caelestia.sh"
+    ok "Plasma session environment written."
+
+    for rc in "$HOME/.bashrc" "$HOME/.config/fish/config.fish" "$HOME/.zshrc"; do
+        [[ -f "$rc" ]] || continue
+        if grep -q 'CAELESTIA_LIB_DIR\|QML2_IMPORT_PATH.*caelestia' "$rc"; then
+            sed -i '/CAELESTIA_LIB_DIR/d; /QML2_IMPORT_PATH.*caelestia/d' "$rc"
+            info "Removed the Caelestia environment lines from ${rc##*/}"
+        fi
+    done
+}
+
+packaged_shell_setup() {
+    write_shell_environment
+
+    skip "Nothing to build: the shell tree is the package's."
+}
+
+if install_is_packaged; then
+    packaged_shell_setup
+    exit 0
+fi
+
+
 if command -v ninja >/dev/null 2>&1; then
     CMAKE_GENERATOR="Ninja"
 else
@@ -23,31 +79,18 @@ else
     CMAKE_GENERATOR="Unix Makefiles"
 fi
 
-# Fingerprint of the toolchain that builds Caelestia. Build directories are
-# kept between runs so repeated installs/updates rebuild incrementally; they
-# are only wiped when this fingerprint changes (e.g. a distro Qt/CMake
-# upgrade that would otherwise leave stale object files behind).
-# Only the feature version is fingerprinted: patch releases (6.11.2 -> 6.11.3)
-# keep their ABI and their headers hash the same in ccache, so wiping the build
-# directory for one costs a full rebuild and buys nothing.
-# Cava had a version change and hence requires a clean rebuild.
 caelestia_toolchain_stamp() {
-    local cmake_ver qt_ver cava_state
+    local cmake_ver qt_ver cava
     cmake_ver="$(cmake --version | head -n1 | grep -oE '[0-9]+\.[0-9]+' | head -n1)"
     qt_ver="$(pkg-config --modversion Qt6Core 2>/dev/null | grep -oE '^[0-9]+\.[0-9]+' || true)"
-    cava_state="$(pkg-config --modversion libcava 2>/dev/null || pkg-config --modversion cava 2>/dev/null || { [[ -f /usr/include/cava/cavacore.h ]] && echo "sdk"; } || echo "none")"
-    printf 'bundle:%s cmake:%s qt6core:%s gen:%s cava:%s\n' "$BUNDLE_DIR" "$cmake_ver" "$qt_ver" "$CMAKE_GENERATOR" "$cava_state"
+    cava="$(cava_state)"
+    printf 'bundle:%s cmake:%s qt6core:%s gen:%s cava:%s\n' "$BUNDLE_DIR" "$cmake_ver" "$qt_ver" "$CMAKE_GENERATOR" "$cava"
 }
 
-# Stamps written before the fingerprint dropped patch versions carried the full
-# `cmake version X.Y.Z` string. Normalizing both sides keeps those build dirs
-# alive instead of forcing one gratuitous full rebuild on upgrade.
 caelestia_normalise_stamp() {
     sed -E -e 's/cmake version //' -e 's/([0-9]+\.[0-9]+)\.[0-9]+/\1/g'
 }
 
-# Reuse an existing CMake build directory unless the toolchain fingerprint
-# changed since the last configure.
 prepare_build_dir() {
     local dir="$1"
     if [[ -f "$dir/CMakeCache.txt" && -f "$dir/.caelestia_toolchain_stamp" ]] \
@@ -60,8 +103,6 @@ prepare_build_dir() {
     caelestia_toolchain_stamp > "$dir/.caelestia_toolchain_stamp"
 }
 
-# Print only the error lines from a build log (skipping warning spam), plus a
-# short tail for context. The full log is always preserved on disk.
 show_build_errors() {
     local log="$1"
     grep -E 'error:|FAILED:|ninja: build stopped|CMake Error|make(\[[0-9]+\])?: \*\*\*|undefined reference|ld: ' "$log" || true
@@ -69,9 +110,6 @@ show_build_errors() {
     tail -n 20 "$log"
 }
 
-# Leave a core for the desktop: a -j$(nproc) build makes the running session
-# stutter for as long as it lasts. CAELESTIA_BUILD_JOBS overrides, and Ninja
-# additionally backs off when the load average is already above the core count.
 BUILD_JOBS="${CAELESTIA_BUILD_JOBS:-}"
 if [[ -z "$BUILD_JOBS" ]]; then
     BUILD_JOBS=$(( $(nproc 2>/dev/null || echo 2) - 1 ))
@@ -80,12 +118,8 @@ if [[ -z "$BUILD_JOBS" ]]; then
     fi
 fi
 
-# Both Ninja and Make take -l: hold off on starting new jobs while the machine
-# is already loaded, so a build never fully monopolises the desktop.
 BUILD_LOAD="$(nproc 2>/dev/null || echo 2)"
 
-# Run compilers at a lower priority so the shell stays responsive during a
-# build. Ignored when nice is unavailable.
 caelestia_build() {
     if command -v nice >/dev/null 2>&1; then
         nice -n 10 "$@"
@@ -95,22 +129,92 @@ caelestia_build() {
 }
 
 cleanup_legacy_lockscreen() {
-    # Remove deprecated plasma-wallpaper-application if present
     if command -v kpackagetool6 >/dev/null 2>&1; then
         kpackagetool6 -t Plasma/Wallpaper -r net.dosowisko.PlasmaApplicationWallpaper >/dev/null 2>&1 || true
     fi
     rm -rf "$HOME/.local/share/plasma/wallpapers/net.dosowisko.PlasmaApplicationWallpaper" 2>/dev/null || true
     rm -f "${XDG_CACHE_HOME:-$HOME/.cache}/caelestia-kde/wallpaper-plugin-installed" 2>/dev/null || true
 
-    # Clean up old plasma-wallpaper-application config
     if command -v kwriteconfig6 >/dev/null 2>&1; then
-        # NOTE: Switching to org.kde.image always is required for nexus lockscreen config
         kwriteconfig6 --file kscreenlockerrc --group Greeter --key WallpaperPlugin "org.kde.image" 2>/dev/null || true
         kwriteconfig6 --file kscreenlockerrc --group Greeter --group Wallpaper --group net.dosowisko.PlasmaApplicationWallpaper --group General --key command --delete 2>/dev/null || true
         kwriteconfig6 --file kscreenlockerrc --group Greeter --group Wallpaper --group net.dosowisko.PlasmaApplicationWallpaper --group General --key fps --delete 2>/dev/null || true
         kwriteconfig6 --file kscreenlockerrc --group Greeter --group LnF --group General --key alwaysShowClock --delete 2>/dev/null || true
         kwriteconfig6 --file kscreenlockerrc --group Greeter --group LnF --group General --key showMediaControls --delete 2>/dev/null || true
         kwriteconfig6 --file kscreenlockerrc --group "Greeter" --key "Theme" --delete 2>/dev/null || true
+    fi
+}
+
+# The shell used to load every font under `assets/fonts`, so an install can hold two copies
+# of them: the tree's own, which the CMake install puts in the config directory and never
+# deletes files from, and the copy the 12-fetch-assets.sh step (since removed) downloaded
+# into the user's asset directory. Nothing reads either directory now, and the two together
+# are about 600 MiB on a machine that has both. Only what those two mechanisms could have
+# put there is removed; anything the user added themselves stays.
+#
+# A package's tree lives under /etc and belongs to pacman, which drops the fonts with the
+# upgrade that removes them from the package, so install_shell_config() resolves to the
+# package's path there and the packaged half returns before this runs anyway.
+cleanup_legacy_fonts() {
+    local -a roots=(
+        "$(dirname -- "$(install_shell_config)")/assets/fonts"
+        "${XDG_DATA_HOME:-$HOME/.local/share}/caelestia/assets/fonts"
+    )
+    local -a removed
+    local root entry
+
+    for root in "${roots[@]}"; do
+        [[ -d "$root" ]] || continue
+
+        removed=()
+        for entry in SF-Pro SF-Mono google-sans-flex; do
+            if [[ -e "$root/$entry" ]]; then
+                rm -rf "${root:?}/$entry"
+                removed+=("$entry")
+            fi
+        done
+
+        # The download copied the tree's own three-line README along with the fonts, and it
+        # describes a directory nothing reads now. Only that exact text is removed.
+        if [[ "$(head -n 1 "$root/README.md" 2>/dev/null || true)" == "# Fonts" ]]; then
+            rm -f "$root/README.md"
+        fi
+
+        rmdir "$root" 2>/dev/null || true
+
+        if [[ ${#removed[@]} -gt 0 ]]; then
+            ok "Reclaimed the fonts an older install left in $root (${removed[*]}); the shell no longer loads them."
+        fi
+    done
+}
+
+SHELL_PRUNE_KEEP=(
+    shell.json
+    .current_commit
+    .current_version
+    .update_branch
+    .checkout
+    assets/fonts
+    assets/icons/yet-another-monochrome-icon-set
+)
+
+prune_deployed_shell() {
+    local listing="$1" prefix="$2"
+    local root pruned
+    local -a removed=()
+
+    root="$(dirname -- "$(install_shell_config)")"
+
+    pruned="$(prune_install_root "$root" "$listing" "$prefix" "${SHELL_PRUNE_KEEP[@]}")" \
+        || warn "Could not remove everything an older revision left in $root."
+
+    [[ -n "$pruned" ]] || return 0
+    mapfile -t removed <<< "$pruned"
+
+    ok "Removed ${#removed[@]} path(s) the new revision no longer ships."
+    printf '     %s\n' "${removed[@]:0:5}"
+    if [[ ${#removed[@]} -gt 5 ]]; then
+        printf '     ... and %s more\n' "$(( ${#removed[@]} - 5 ))"
     fi
 }
 
@@ -124,11 +228,6 @@ install_lockscreen_greeter() {
     fi
 
     info "Installing Caelestia lock screen greeter."
-    # Swap the tree in atomically. The installed greeter is the only working
-    # copy the user has, so an interrupted copy has to leave it alone rather
-    # than delete it first and fail to replace it - that strands the session
-    # with no greeter at all (issue #662). `metadata.json` is the file Plasma
-    # needs to load the package, so it doubles as the completeness check.
     if ! atomic_replace_tree "$src" "$dest" metadata.json; then
         warn "Failed to install Caelestia lock screen greeter to $dest"
         return 1
@@ -149,7 +248,6 @@ configure_lockscreen_greeter() {
         return 1
     fi
 
-    # Set Caelestia shell package
     if kwriteconfig6 --file plasmashellrc --group "Shell" --key "ShellPackage" "caelestia.desktop" 2>/dev/null; then
         ok "KDE Lock Screen configured to use Caelestia greeter."
     else
@@ -158,9 +256,26 @@ configure_lockscreen_greeter() {
     fi
 }
 
-# Persistent ccache so repeated installs/updates reuse compiled objects even
-# across clean build-directory wipes. The shell build already wires ccache up
-# via CMAKE_CXX_COMPILER_LAUNCHER; this only gives it a stable cache dir.
+sparsify_checkout_paths() {
+    local rule path sparse_file
+
+    for rule in "$@"; do
+        path="${rule%/}"
+        [[ -e "$BUNDLE_DIR/$path" ]] && continue
+
+        (
+            cd "$BUNDLE_DIR" || exit 0
+            sparse_file="$(git rev-parse --git-path info/sparse-checkout 2>/dev/null || true)"
+            [[ -n "$sparse_file" && -f "$sparse_file" ]] || exit 0
+
+            grep -q "^$rule" "$sparse_file" 2>/dev/null || echo "$rule" >> "$sparse_file"
+            git read-tree -mu HEAD 2>/dev/null ||
+                git checkout HEAD -- "$path" 2>/dev/null || true
+        )
+    done
+    return 0
+}
+
 CCACHE_DIR="${CCACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/caelestia-kde/ccache}"
 export CCACHE_DIR
 mkdir -p "$CCACHE_DIR"
@@ -170,60 +285,19 @@ fi
 
 
 if [[ "${CAELESTIA_SETUP_RUNNING:-0}" == "0" ]]; then
-    info "Running standalone update mode... syncing submodules first."
+    info "Running standalone update mode... ensuring prerequisites."
 
-    if [[ -f "$BUNDLE_DIR/.gitmodules" ]]; then
-        info "Initializing all submodules..."
-        prune_removed_submodules "$BUNDLE_DIR"
-        git -C "$BUNDLE_DIR" submodule sync --recursive >/dev/null 2>&1 || true
-        # submodule update already checks out the exact commit the superproject
-        # pins. Do not force a hardcoded tag over it afterwards - that silently
-        # discarded any submodule bump.
-        git -C "$BUNDLE_DIR" submodule update --init --recursive --depth 1 --jobs "$(nproc 2>/dev/null || echo 1)" >/dev/null 2>&1 || die "Failed to initialize all submodules"
+    if [[ -f "$BUNDLE_DIR/scripts/02a-submodules.sh" ]]; then
+        bash "$BUNDLE_DIR/scripts/02a-submodules.sh" || die "Failed to initialize submodules"
     fi
 
-    info "Installing Caelestia Services..."
-    if [[ -f "$BUNDLE_DIR/scripts/06-services.sh" ]]; then
-        bash "$BUNDLE_DIR/scripts/06-services.sh" || warn "06-services.sh failed"
-    fi
+    sparsify_checkout_paths installer/ assets/ uninstall.sh
 
-    # Only escalate when something is actually missing. Running the package
-    # manager unconditionally cost a root prompt and a repo round-trip on every
-    # single update, even though the packages were already there.
-    missing_packages() {
-        local pkg
-        for pkg in "$@"; do
-            if command -v pacman >/dev/null; then
-                pacman -Qq "$pkg" >/dev/null 2>&1 || printf '%s\n' "$pkg"
-            elif command -v rpm >/dev/null; then
-                rpm -q "$pkg" >/dev/null 2>&1 || printf '%s\n' "$pkg"
-            elif command -v dpkg >/dev/null; then
-                dpkg -s "$pkg" >/dev/null 2>&1 || printf '%s\n' "$pkg"
-            fi
-        done
-    }
-
-    # ksshaskpass is in the list so a GUI-launched update has a way to ask for
-    # the password once, instead of polkit prompting per privileged command.
-    info "Checking Wayland and KDE build dependencies..."
-    if command -v pacman >/dev/null; then
-        mapfile -t MISSING < <(missing_packages qt6-wayland kpipewire kglobalaccel kglobalacceld ksshaskpass)
-        if [[ ${#MISSING[@]} -gt 0 ]]; then
-            info "Installing via pacman: ${MISSING[*]}"
-            caelestia_sudo pacman -S --needed --noconfirm "${MISSING[@]}" || warn "pacman install failed..."
-        fi
-    elif command -v dnf >/dev/null; then
-        mapfile -t MISSING < <(missing_packages qt6-qtwayland qt6-qtwayland-devel kf6-kglobalaccel-devel kf6-kwindowsystem-devel qt6-qtbase-private-devel kf6-kpipewire kf6-kpipewire-devel ksshaskpass)
-        if [[ ${#MISSING[@]} -gt 0 ]]; then
-            info "Installing via dnf: ${MISSING[*]}"
-            caelestia_sudo dnf install -y "${MISSING[@]}" || warn "dnf install failed..."
-        fi
-    elif command -v apt-get >/dev/null; then
-        mapfile -t MISSING < <(missing_packages qt6-wayland qt6-wayland-dev libkf6globalaccel-dev libkf6windowsystem-dev qt6-base-private-dev libkf6kpipewire-dev ksshaskpass)
-        if [[ ${#MISSING[@]} -gt 0 ]]; then
-            info "Installing via apt: ${MISSING[*]}"
-            caelestia_sudo apt-get update && caelestia_sudo apt-get install -y "${MISSING[@]}" || warn "apt install failed..."
-        fi
+    if [[ -f "$BUNDLE_DIR/scripts/02-all-packages.sh" && -d "$BUNDLE_DIR/installer" ]]; then
+        info "Checking core, shell, theme, and utility dependencies..."
+        bash "$BUNDLE_DIR/scripts/02-all-packages.sh" || warn "02-all-packages.sh reported warnings"
+    else
+        warn "Skipping the dependency check: scripts/02-all-packages.sh or installer/ is missing."
     fi
 
     info "Deleting yet-another-monochrome-icon-set for lag free update..."
@@ -239,13 +313,25 @@ if [[ "${CAELESTIA_SETUP_RUNNING:-0}" == "0" ]]; then
         fi
     fi
 
+    info "Installing Caelestia Services..."
+    if [[ -f "$BUNDLE_DIR/scripts/06-services.sh" ]]; then
+        bash "$BUNDLE_DIR/scripts/06-services.sh" || warn "06-services.sh failed"
+    fi
+
     info "Updating autostart environment variables"
     if [[ -f "$BUNDLE_DIR/scripts/10-autostart.sh" ]]; then
         bash "$BUNDLE_DIR/scripts/10-autostart.sh" || warn "10-autostart.sh failed"
     fi
-fi
 
-# UPDATER ONLY BLOCK END
+    # The default wallpaper pack is a step of its own in a full install, but an
+    # update only runs 03-deploy-configs, this script and 09-system-tweaks, so
+    # fetch it from here to keep updates supplied with it. The script is
+    # idempotent: it exits on its own once the pack is already present.
+    info "Downloading the default wallpaper pack..."
+    if [[ -f "$BUNDLE_DIR/scripts/03a-wallpapers.sh" ]]; then
+        bash "$BUNDLE_DIR/scripts/03a-wallpapers.sh" || warn "03a-wallpapers.sh failed"
+    fi
+fi
 
 info "Building the Caelestia shell..."
 
@@ -263,26 +349,39 @@ fi
 
 cd "$SHELL_DIR" || exit 1
 
-# The prebuilt shell tarball is keyed by the Qt feature version it was built
-# against (patch releases share an ABI). A machine on a different Qt misses
-# the asset, 404s, and falls back to a local compile.
 shell_qt_abi() {
     pkg-config --modversion Qt6Core 2>/dev/null | grep -oE '^[0-9]+\.[0-9]+' || true
 }
 
-# The release tag this checkout corresponds to. The prebuilt tarball lives on
-# the release for this VERSION - the same tag setup.sh uses for the installer
-# TUI binary.
 shell_release_tag() {
     sed -nE 's/^[[:space:]]*VERSION=//p' "$BUNDLE_DIR/.github/version.env" 2>/dev/null | tr -d '[:space:]'
 }
 
-# Download the prebuilt shell tarball from the version release and extract it.
-# The tarball has two top-level trees: lib/ (compiled QML plugins and the
-# version binary) into $HOME/.local, and quickshell/caelestia/ (the shell QML
-# source with the install-time shell.qml patch) into $HOME/.config.
+# The prebuilt archive holds one released revision, so it may only stand in for a
+# tree that is that revision: the released tag itself (an update pinned to a
+# version) or main sitting on its remote tip. A branch, a stale main, or a
+# checkout carrying commits of its own builds locally instead of letting the
+# archive replace them. Main that has moved on since its last release cannot be
+# told apart from that release here - version.env still names it - so such a tree
+# is replaced by the release the archive was built from.
+checkout_may_use_prebuilt() {
+    local head revision
+    revision="$(shell_release_tag)"
+    [[ -n "$revision" ]] || return 1
+
+    head="$(git -C "$BUNDLE_DIR" rev-parse HEAD 2>/dev/null || true)"
+    [[ -n "$head" ]] || return 1
+
+    if [[ "$(git -C "$BUNDLE_DIR" describe --tags --exact-match "$head" 2>/dev/null || true)" == "$revision" ]]; then
+        return 0
+    fi
+
+    [[ "$(git -C "$BUNDLE_DIR" branch --show-current 2>/dev/null || true)" == "main" ]] || return 1
+    [[ "$head" == "$(git -C "$BUNDLE_DIR" rev-parse --verify --quiet refs/remotes/origin/main 2>/dev/null || true)" ]]
+}
+
 try_download_prebuilt_shell() {
-    local arch qt_abi tag tmp_archive url checksum expected actual asset candidate
+    local arch qt_abi tag tmp_archive url checksum_status asset candidate listing
     arch="$(uname -m)"
     [[ "$arch" == "x86_64" ]] || return 1
     [[ -f /etc/arch-release ]] || return 1
@@ -290,16 +389,12 @@ try_download_prebuilt_shell() {
     tag="$(shell_release_tag)"
     [[ -n "$qt_abi" && -n "$tag" ]] || return 1
 
-    # The asset is named after the project: caelestia-kde-<arch>-qt<abi>.tar.gz.
-    # Releases cut before that rename still carry the old caelestia-shell- name,
-    # so try the current one first and fall back rather than dropping those
-    # users onto a local compile.
     tmp_archive="$(mktemp --suffix=.tar.gz)"
     url=""
     info "Downloading prebuilt shell artifacts (${tag}, Qt ${qt_abi})..."
     for asset in "caelestia-kde-${arch}-qt${qt_abi}.tar.gz" "caelestia-shell-${arch}-qt${qt_abi}.tar.gz"; do
-        candidate="https://github.com/ladybug-me/caelestia-kde/releases/download/${tag}/${asset}"
-        if curl -fL --connect-timeout 10 --progress-bar "$candidate" -o "$tmp_archive"; then
+        candidate="https://github.com/caelestia-kde/caelestia/releases/download/${tag}/${asset}"
+        if fetch_asset "$candidate" "$tmp_archive" --progress-bar; then
             url="$candidate"
             break
         fi
@@ -310,54 +405,53 @@ try_download_prebuilt_shell() {
         return 1
     fi
 
-    # The archive is unpacked straight over $HOME, so verify it against the
-    # checksum published beside it first (issue #667). A truncated or corrupted
-    # download then falls back to the local build instead of half-extracting a
-    # broken tree into ~/.local/lib/qt6/qml.
-    #
-    # A missing checksum only warns: releases published before the checksum
-    # existed have none, and refusing those would take the prebuilt path away
-    # from users who never had a problem. A present-but-wrong checksum is a hard
-    # failure.
-    checksum="$(mktemp)"
-    if curl -fsSL --connect-timeout 10 "$url.sha256" -o "$checksum"; then
-        expected="$(cut -d' ' -f1 < "$checksum")"
-        actual="$(sha256sum "$tmp_archive" | cut -d' ' -f1)"
-        if [[ -z "$expected" || "$expected" != "$actual" ]]; then
-            warn "Checksum mismatch for $url"
-            warn "Expected ${expected:-<empty>}, got $actual - falling back to a local build."
-            rm -f "$tmp_archive" "$checksum"
-            return 1
-        fi
-        ok "Prebuilt shell artifacts match the published checksum."
+    checksum_status=0
+    verify_download "$url" "$tmp_archive" || checksum_status=$?
+    if [[ "$checksum_status" -eq 1 ]]; then
+        warn "Checksum mismatch for $url - falling back to a local build."
+        rm -f "$tmp_archive"
+        return 1
+    elif [[ "$checksum_status" -eq 2 ]]; then
+        warn "No published checksum for $url - extracting without verification (SHA-256 $(file_sha256 "$tmp_archive"))."
     else
-        warn "No published checksum for $url - extracting without verification."
+        ok "Prebuilt shell artifacts match the published checksum."
     fi
-    rm -f "$checksum"
+
+    # Nothing above compared the archive against a published hash for the first two
+    # cases, and this extraction writes into $HOME/.config and $HOME/.local, so refuse an
+    # archive carrying setuid or escaping entries even when there is no hash to check.
+    if ! archive_entries_are_safe "$tmp_archive"; then
+        warn "Refusing to extract $url: the archive has setuid, setgid or escaping entries."
+        rm -f "$tmp_archive"
+        return 1
+    fi
 
     info "Extracting prebuilt shell artifacts..."
     mkdir -p "$HOME/.local" "$HOME/.config"
-    if ! tar -C "$HOME/.local" -xzf "$tmp_archive" lib; then
-        warn "Failed to extract lib from prebuilt shell archive"
+    listing="$(mktemp)" || {
         rm -f "$tmp_archive"
         return 1
+    }
+    if ! tar -tzf "$tmp_archive" > "$listing" \
+        || ! grep -q '^bin/' "$listing" \
+        || ! grep -q '^lib/caelestia/' "$listing"; then
+        warn "Prebuilt shell artifact has no CMake-owned CLI/data tree - falling back to a local build."
+        rm -f "$listing" "$tmp_archive"
+        return 1
     fi
-    if ! tar -C "$HOME/.config" -xzf "$tmp_archive" quickshell; then
-        warn "Failed to extract quickshell from prebuilt shell archive"
-        rm -f "$tmp_archive"
+    if ! tar -C "$HOME/.local" -xzf "$tmp_archive" lib bin \
+        || ! tar -C "$HOME/.config" -xzf "$tmp_archive" quickshell; then
+        warn "Failed to extract the prebuilt shell archive"
+        rm -f "$listing" "$tmp_archive"
         return 1
     fi
     rm -f "$tmp_archive"
+
+    prune_deployed_shell "$listing" "quickshell/caelestia"
+    rm -f "$listing"
     return 0
 }
 
-# Snapshot the live shell tree before either install path overwrites it, so
-# local edits made per CONTRIBUTING.md survive an update instead of vanishing.
-#
-# This runs before the prebuilt download is attempted, not inside the
-# local-build branch: the prebuilt path extracts the release archive straight
-# over ~/.config, and it is the default on Arch/x86_64 - so a backup taken only
-# on the build path never happened for most users (issue #663).
 backup_shell_config() {
     local src="$HOME/.config/quickshell/caelestia"
     local root="${XDG_CACHE_HOME:-$HOME/.cache}/caelestia-kde/backups"
@@ -378,39 +472,33 @@ backup_shell_config() {
 
 backup_shell_config || exit 1
 
-# Prefer the prebuilt shell from the release when available so a fresh install
-# downloads the compiled .so files instead of building Qt6/C++ locally. The
-# workspace-tracker KWin effect is still built locally either way (its ABI is
-# Plasma-version-specific).
 SHELL_PREBUILT=0
-if [[ -z "${CAELESTIA_FORCE_BUILD_SHELL:-}" ]] && command -v curl >/dev/null 2>&1; then
+if [[ -z "${CAELESTIA_FORCE_BUILD_SHELL:-}" ]] \
+    && checkout_may_use_prebuilt \
+    && command -v curl >/dev/null 2>&1; then
     if try_download_prebuilt_shell; then
         SHELL_PREBUILT=1
         ok "Using prebuilt shell artifacts from the release."
     fi
 fi
 
+
 if [[ "$SHELL_PREBUILT" -eq 1 ]]; then
     info "Skipping local shell build; prebuilt artifacts installed."
 else
-    # lrelease compiles shell/translations into the .qm catalogs the shell loads.
-    # Checked here rather than with the other dependencies so it also covers a fresh
-    # setup run; without it CMake just warns and the shell ships English only.
     if ! linguist_tools_available; then
         info "Installing Qt Linguist tools for UI translations..."
-        install_linguist_tools || warn "Linguist tools install failed; the shell will stay in English."
+        install_linguist_tools "$BASE_DISTRO" || warn "Linguist tools install failed; the shell will stay in English."
     fi
 
     info "Configuring CMake..."
     prepare_build_dir build
-    cmake -G "$CMAKE_GENERATOR" -B build -DCMAKE_BUILD_TYPE=Release -DCAELESTIA_CACHE_DEPS=ON -DCMAKE_INSTALL_PREFIX="$HOME/.local" -DINSTALL_QSCONFDIR="$HOME/.config/quickshell/caelestia" -DINSTALL_LIBDIR="lib/caelestia" -DINSTALL_QMLDIR="lib/qt6/qml" || {
+    cmake -G "$CMAKE_GENERATOR" -B build -DCMAKE_BUILD_TYPE=Release -DCAELESTIA_CACHE_DEPS=ON -DCAELESTIA_OFFLINE="${CAELESTIA_OFFLINE:-OFF}" -DCMAKE_INSTALL_PREFIX="$HOME/.local" -DINSTALL_BINDIR="bin" -DINSTALL_DATADIR="lib/caelestia" -DINSTALL_QSCONFDIR="$HOME/.config/quickshell/caelestia" -DINSTALL_LIBDIR="lib/caelestia" -DINSTALL_QMLDIR="lib/qt6/qml" || {
         err "CMake configuration failed."
         exit 1
     }
 
     info "Building with $BUILD_JOBS parallel jobs..."
-    # Stream the build live while filtering compiler warning/note spam, and keep
-    # the full output in a log for diagnostics on failure.
     BUILD_LOG="${XDG_CACHE_HOME:-$HOME/.cache}/caelestia-kde/shell-build.log"
     mkdir -p "$(dirname "$BUILD_LOG")"
     set +e
@@ -423,19 +511,31 @@ else
         exit 1
     fi
 
-    # The live shell tree was snapshotted by backup_shell_config() before either
-    # install path ran.
     info "Installing to user local dir..."
     if ! cmake --install build 2>&1 | tee -a "$BUILD_LOG"; then
         err "Installation failed. Full log: $BUILD_LOG"
         exit 1
     fi
+
+    prune_deployed_shell build/install_manifest.txt "$(dirname -- "$(install_shell_config)")"
 fi
 
-# The install step strips the effect, so the installed file never matches the
-# built one byte for byte. Track what we last installed instead: skip the root
-# install when the freshly built effect is the one already on the system and
-# nothing has replaced it since.
+kwin_plugin_version() {
+    local ver=""
+    if [[ -f /usr/include/kwin/config-kwin.h ]]; then
+        ver="$(grep -oE 'KWIN_PLUGIN_VERSION_STRING "[^"]+"' /usr/include/kwin/config-kwin.h 2>/dev/null | cut -d'"' -f2 || true)"
+    fi
+    if [[ -z "$ver" ]] && command -v kwin_wayland >/dev/null 2>&1; then
+        ver="$(kwin_wayland --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)"
+    fi
+    printf '%s\n' "${ver:-unknown}"
+}
+
+effect_kwin_version() {
+    local so="$1"
+    grep -aoE 'org\.kde\.kwin\.EffectPluginFactory[0-9]+\.[0-9]+\.[0-9]+' "$so" 2>/dev/null | head -n1 | sed 's/org\.kde\.kwin\.EffectPluginFactory//' || true
+}
+
 WS_STAMP="${XDG_CACHE_HOME:-$HOME/.cache}/caelestia-kde/workspace-tracker.installed"
 
 ws_built_effect() {
@@ -452,8 +552,9 @@ ws_built_effect() {
 
 ws_signature() {
     local built="$1" installed="$2"
-    printf '%s %s\n' \
-        "$(sha256sum "$built" | cut -d' ' -f1)" \
+    printf '%s %s %s\n' \
+        "$(kwin_plugin_version)" \
+        "$(file_sha256 "$built")" \
         "$(stat -c '%s:%Y' "$installed" 2>/dev/null || echo missing)"
 }
 
@@ -466,9 +567,14 @@ ws_installed_path() {
 }
 
 ws_effect_up_to_date() {
-    local built installed
+    local built installed kwin_ver
     built="$(ws_built_effect)" || return 1
     installed="$(ws_installed_path "$(basename "$built")")" || return 1
+    kwin_ver="$(kwin_plugin_version)"
+    if [[ -n "$kwin_ver" && "$kwin_ver" != "unknown" ]]; then
+        [[ "$(effect_kwin_version "$installed")" == "$kwin_ver" ]] || return 1
+        [[ "$(effect_kwin_version "$built")" == "$kwin_ver" ]] || return 1
+    fi
     [[ -f "$WS_STAMP" ]] || return 1
     [[ "$(cat "$WS_STAMP")" == "$(ws_signature "$built" "$installed")" ]]
 }
@@ -481,7 +587,30 @@ ws_record_install() {
     ws_signature "$built" "$installed" > "$WS_STAMP"
 }
 
+# A run that could not put the plugin in place must not leave KWin loading an effect
+# that is not on disk: KWin reports nothing, and the shell's guard turns it into a
+# warning toast on every login. Switch the effect off and drop the stamp, so the next
+# run rebuilds instead of trusting a file that is missing.
+ws_leave_effect_off() {
+    ws_installed_path kwin_workspace_tracker.so >/dev/null 2>&1 && return 0
+
+    rm -f "$WS_STAMP"
+    if command -v kwriteconfig6 >/dev/null 2>&1; then
+        kwriteconfig6 --file kwinrc --group Plugins --key kwin_workspace_trackerEnabled false
+    fi
+    qdbus6 org.kde.KWin /KWin reconfigure 2>/dev/null || true
+    info "Workspace tracking is off until the effect can be installed."
+}
+
 info "Building and installing workspace-tracker KWin Effect..."
+ws_target_kwin_ver="$(kwin_plugin_version)"
+if ws_prev_built="$(ws_built_effect 2>/dev/null)"; then
+    if [[ -n "$ws_target_kwin_ver" && "$ws_target_kwin_ver" != "unknown" ]] \
+        && [[ "$(effect_kwin_version "$ws_prev_built")" != "$ws_target_kwin_ver" ]]; then
+        info "KWin version changed ($ws_target_kwin_ver) — cleaning workspace-tracker build cache..."
+        rm -rf kwin-effects/workspace-tracker/build
+    fi
+fi
 prepare_build_dir kwin-effects/workspace-tracker/build
 WS_INSTALLED=0
 WS_RECONFIGURE=1
@@ -491,13 +620,10 @@ if cmake -G "$CMAKE_GENERATOR" -B kwin-effects/workspace-tracker/build -S kwin-e
         warn "Workspace tracker build failed. Full log: $WS_BUILD_LOG"
         show_build_errors "$WS_BUILD_LOG"
     elif ws_effect_up_to_date; then
-        # Installing this needs root. Skipping it when the built effect is
-        # byte-identical to the installed one keeps a normal update from
-        # asking for a password at all.
         info "Workspace tracker already up to date; skipping system install."
         WS_INSTALLED=1
         WS_RECONFIGURE=0
-    elif ! caelestia_sudo cmake --install "$PWD/kwin-effects/workspace-tracker/build" >/dev/null; then
+    elif ! install_staged_tree / cmake --install "$PWD/kwin-effects/workspace-tracker/build"; then
         warn "Workspace tracker system installation failed."
     else
         WS_INSTALLED=1
@@ -511,17 +637,15 @@ if [[ $WS_INSTALLED -eq 1 ]]; then
     if command -v kwriteconfig6 >/dev/null 2>&1; then
         kwriteconfig6 --file kwinrc --group Plugins --key kwin_workspace_trackerEnabled true
     fi
-    # Only poke KWin when the effect actually changed - a reconfigure blanks
-    # and rebuilds every effect, which is visible to the user.
     if [[ $WS_RECONFIGURE -eq 1 ]]; then
+        qdbus6 org.kde.KWin /Effects org.kde.kwin.Effects.loadEffect kwin_workspace_tracker 2>/dev/null || true
         qdbus6 org.kde.KWin /KWin reconfigure 2>/dev/null || true
         ok "Installed workspace-tracker to KDE."
     fi
+else
+    ws_leave_effect_off
 fi
 
-# Validate every generated QML module before declaring success. Checking only
-# Caelestia.Config lets a partial install reach Quickshell and fail as a large
-# cascade of "Type unavailable" errors.
 QML_BASE="$HOME/.local/lib/qt6/qml"
 QML_MODULES=(
     Caelestia
@@ -530,6 +654,7 @@ QML_MODULES=(
     Caelestia/Settings
     Caelestia/Models
     Caelestia/Services
+    Caelestia/Services/QuickShare
     Caelestia/Blobs
     Caelestia/Images
     Caelestia/Layouts
@@ -554,46 +679,35 @@ done
 
 export QML2_IMPORT_PATH="$QML_BASE${QML2_IMPORT_PATH:+:$QML2_IMPORT_PATH}"
 
-# Add wrapper config to bashrc/fish
-if grep -q "QML2_IMPORT_PATH" ~/.bashrc; then
-    if ! grep -q "quickshell/caelestia" ~/.bashrc; then
-        sed -i '/QML2_IMPORT_PATH/ s|\(.*[^"]\)\("*\)$|\1:$HOME/.config/quickshell/caelestia\2|' ~/.bashrc
-    fi
-else
-    echo 'export QML2_IMPORT_PATH="$HOME/.local/lib/qt6/qml:$HOME/.config/quickshell/caelestia"' >> ~/.bashrc
-fi
-
-if ! grep -q "CAELESTIA_LIB_DIR" ~/.bashrc; then
-    echo 'export CAELESTIA_LIB_DIR="$HOME/.local/lib/caelestia"' >> ~/.bashrc
-fi
-
-if [ -f "$HOME/.config/fish/config.fish" ]; then
-    if grep -q "QML2_IMPORT_PATH" ~/.config/fish/config.fish; then
-        if ! grep -q "quickshell/caelestia" ~/.config/fish/config.fish; then
-            sed -i '/QML2_IMPORT_PATH/ s|\(.*[^"]\)\("*\)$|\1:$HOME/.config/quickshell/caelestia\2|' ~/.config/fish/config.fish
-        fi
+# The two helpers the shell elevates through polkit. They are installed here as root
+# rather than read from next to the shell, because a source install keeps the shell in
+# the user's home: pkexec handed a path from there would run this user's code as root
+# behind a prompt for a feature they did ask for.
+info "Installing the privileged helpers..."
+for helper in quickshare_setup.sh ollama_setup.sh; do
+    if installed_helper="$(install_privileged_helper "$BUNDLE_DIR/shell/scripts/$helper")"; then
+        ok "Privileged helper installed to $installed_helper"
     else
-        echo 'set -gx QML2_IMPORT_PATH "$HOME/.local/lib/qt6/qml:$HOME/.config/quickshell/caelestia"' >> ~/.config/fish/config.fish
+        warn "Could not install $helper as a root-owned helper; the matching feature will ask for a manual run."
     fi
+done
 
-    if ! grep -q "CAELESTIA_LIB_DIR" ~/.config/fish/config.fish; then
-        echo 'set -gx CAELESTIA_LIB_DIR "$HOME/.local/lib/caelestia"' >> ~/.config/fish/config.fish
-    fi
-fi
+write_shell_environment
 
 mkdir -p ~/.local/bin ~/.config/systemd/user
 
-info "Installing Caelestia bin wrappers..."
-install -m 755 "$BUNDLE_DIR/src/bin/caelestia-record" ~/.local/bin/caelestia-record
-install -m 755 "$BUNDLE_DIR/src/bin/caelestia-screenshot" ~/.local/bin/caelestia-screenshot
-install -m 755 "$BUNDLE_DIR/src/bin/caelestia-shell-ipc" ~/.local/bin/caelestia-shell-ipc
-install -m 755 "$BUNDLE_DIR/src/bin/caelestia" ~/.local/bin/caelestia
-install -m 755 "$BUNDLE_DIR/src/bin/caelestia-update" ~/.local/bin/caelestia-update
-install -m 755 "$BUNDLE_DIR/src/bin/caelestia-check-updates" ~/.local/bin/caelestia-check-updates
-ok "Caelestia bin wrappers installed to ~/.local/bin"
+install -m 644 "$BUNDLE_DIR/scripts/lib/update-state.sh" "$(install_lib_dir)/update-state.sh"
+info "Installing the update-checker units..."
+install -m 644 "$BUNDLE_DIR/src/systemd/caelestia-update-checker.service" ~/.config/systemd/user/caelestia-update-checker.service
+install -m 644 "$BUNDLE_DIR/src/systemd/caelestia-update-checker.timer" ~/.config/systemd/user/caelestia-update-checker.timer
+if [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then
+    systemctl --user daemon-reload || true
+    systemctl --user enable --now caelestia-update-checker.timer || true
+    ok "Update-checker timer enabled"
+else
+    info "Skipping update-checker timer setup (no XDG_RUNTIME_DIR)"
+fi
 
-
-# Copying mono icon theme
 DEST_DIR="$HOME/.config/quickshell/caelestia/assets/icons/yet-another-monochrome-icon-set"
 TMP_DIR="${DEST_DIR}.tmp"
 
@@ -611,12 +725,12 @@ else
     warn "Failed to copy yet-another-monochrome-icon-set."
 fi
 
-# Record which revision the artifacts just installed came from, for the update
-# checker. The build has happened by this point, so the checkout is what the
-# running shell really is.
 record_installed_revision "$BUNDLE_DIR" "$HOME/.config/quickshell/caelestia" || true
 
-# Lockscreen Installation is at the end because if system gets locked during update, lockscreen may fail to start.
+# Outside the deploy guard on purpose: CAELESTIA_SKIP_DEPLOY is about the config files this
+# step deploys, and this is the assets an older install left behind.
+cleanup_legacy_fonts
+
 if [[ "${CAELESTIA_SKIP_DEPLOY:-0}" == "0" && "${APPLY_LOCKSCREEN:-true}" != "false" ]]; then
     cleanup_legacy_lockscreen
     if install_lockscreen_greeter; then

@@ -2,61 +2,83 @@
 
 set -euo pipefail
 
-# ---- paths --------------------------------------------------------------------
 RECORDER="${RECORDER:-gpu-screen-recorder}"
 STATE_DIR="${STATE_DIR:-$HOME/.local/state/caelestia/record}"
 PID_FILE="${STATE_DIR}/recorder.pid"
 LOCK_FILE="${STATE_DIR}/recorder.lock"
 CURRENT_FILE="${STATE_DIR}/current_recording_path"
 MODE_FILE="${STATE_DIR}/current_recording_mode"
-IPC_SOCK="${XDG_RUNTIME_DIR:-/tmp}/caelestia-gsr.sock"
 
-# Where finished recordings actually live - must match shell/utils/Paths.qml's
-# recsdir so the Recordings list in the shell can find them.
-RECS_DIR="${CAELESTIA_RECORDINGS_DIR:-${XDG_VIDEOS_DIR:-$HOME/Videos}/Recordings}"
+# Everything two invocations share while a recording runs lives in one directory this
+# user owns. This helper is installed on its own and cannot source scripts/lib, so it
+# claims the directory itself the way caelestia_runtime_dir() does.
+RUNTIME_DIR="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/caelestia-$UID"
+if ! install -d -m 700 "$RUNTIME_DIR" 2>/dev/null || [[ -L "$RUNTIME_DIR" ]] || [[ ! -O "$RUNTIME_DIR" ]]; then
+    echo "caelestia-record: cannot secure the runtime directory at $RUNTIME_DIR" >&2
+    exit 1
+fi
+IPC_SOCK="${RUNTIME_DIR}/caelestia-gsr.sock"
+RECORDER_LOG="${RUNTIME_DIR}/gpu-screen-recorder.log"
+
+# Where finished recordings live; must match the shell's recordingsDir so the shell finds them.
+# Resolved via user-dirs (not $XDG_VIDEOS_DIR, which is empty in the shell session).
+RECS_DIR="${CAELESTIA_RECORDINGS_DIR:-$(xdg-user-dir VIDEOS 2>/dev/null || echo "$HOME/Videos")/Recordings}"
 
 mkdir -p "$STATE_DIR" "$RECS_DIR"
 
-# ---- helpers ------------------------------------------------------------------
 _notify() {
     local urgency="$1" summary="$2" body="$3"
     notify-send -u "$urgency" -a "Caelestia Recorder" "$summary" "$body" 2>/dev/null || true
 }
 
 _is_recording() {
+    local recorder_name
+    recorder_name=$(basename -- "$RECORDER")
+
     if [[ -f "$PID_FILE" ]]; then
         local pid
         pid=$(cat "$PID_FILE" 2>/dev/null || true)
-        local recorder_name
-        recorder_name=$(basename -- "$RECORDER")
-        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null \
-            && [[ "$(ps -o comm= -p "$pid" 2>/dev/null | tr -d ' ')" == "$recorder_name" ]]; then
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            # Check /proc/$pid/cmdline to avoid the 15-character truncation limit
+            if grep -q -- "$recorder_name" "/proc/$pid/cmdline" 2>/dev/null; then
+                return 0
+            fi
+        fi
+    fi
+
+    # Fallback when the pid file is stale: a live recorder with a real output file
+    local current_path=""
+    [[ -f "$CURRENT_FILE" ]] && current_path=$(cat "$CURRENT_FILE" 2>/dev/null || true)
+    if [[ -n "$current_path" ]] && [[ -f "$current_path" ]]; then
+        if pgrep -u "$(id -u)" -f "$recorder_name" >/dev/null 2>&1; then
             return 0
         fi
     fi
-    # Fallback: pidof check plus the active recording's file existing
-    local current_path=""
-    [[ -f "$CURRENT_FILE" ]] && current_path=$(cat "$CURRENT_FILE" 2>/dev/null || true)
-    pidof "$RECORDER" >/dev/null 2>&1 && [[ -n "$current_path" ]] && [[ -f "$current_path" ]]
-}
 
+    return 1
+}
 _get_focused_refresh_rate() {
     local rr=60  # fallback
     local active_output=""
-    local runtime_dir="${XDG_RUNTIME_DIR:-/tmp}"
 
-    if [[ -f "$runtime_dir/qs_kwin_active_output.txt" ]]; then
-        active_output=$(cat "$runtime_dir/qs_kwin_active_output.txt" 2>/dev/null || true)
+    # The focused output comes from KWin, the same property the shell's bridge reads
+    # (KWinActiveWindowBridge::cursorOutputName). An earlier build also wrote it to a file
+    # under XDG_RUNTIME_DIR, but that writer was deleted in the same change that added this
+    # reader, so the file is not a source here - it made every recording `-f 60`.
+    if command -v qdbus6 >/dev/null 2>&1; then
+        active_output="$(qdbus6 org.kde.KWin /KWin org.kde.KWin.activeOutputName 2>/dev/null || true)"
     fi
 
     if [[ -n "$active_output" ]] && command -v kscreen-doctor >/dev/null 2>&1; then
         local kscreen_json
         kscreen_json=$(kscreen-doctor -j 2>/dev/null || true)
         if [[ -n "$kscreen_json" ]]; then
-            rr=$(echo "$kscreen_json" | python3 -c "
-import sys, json
+            # The output name is data, not code: pass it through the environment rather
+            # than into the snippet's source text.
+            rr=$(printf '%s' "$kscreen_json" | CAELESTIA_ACTIVE_OUTPUT="$active_output" python3 -c "
+import os, sys, json
 data = json.load(sys.stdin)
-active = '${active_output}'
+active = os.environ['CAELESTIA_ACTIVE_OUTPUT']
 for o in data.get('outputs', []):
     if o.get('name') == active and o.get('connected'):
         current_id = o.get('currentModeId')
@@ -72,8 +94,7 @@ print(60)
 }
 
 _ensure_portals() {
-    # Restart the portal stack if either component isn't running â€” pipewire
-    # screen capture requires both xdg-desktop-portal and the KDE backend.
+    # Pipewire screen capture needs both the portal and its KDE backend running.
     if ! systemctl --user is-active --quiet plasma-xdg-desktop-portal-kde 2>/dev/null || \
        ! systemctl --user is-active --quiet xdg-desktop-portal 2>/dev/null; then
         systemctl --user restart plasma-xdg-desktop-portal-kde 2>/dev/null || true
@@ -87,25 +108,32 @@ _stop_recording() {
         local pid
         pid=$(cat "$PID_FILE" 2>/dev/null || true)
         if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-            # Send SIGINT for clean finalization (writes the mp4 trailer)
+            # SIGINT so gpu-screen-recorder finalizes the mp4 trailer
             kill -INT "$pid" 2>/dev/null || true
-            # Wait up to 5 seconds for graceful exit, then force-kill
+
+            # Wait up to 5s for clean shutdown
             local waited=0
             while kill -0 "$pid" 2>/dev/null && [[ $waited -lt 50 ]]; do
                 sleep 0.1
                 waited=$((waited + 1))
             done
-            kill -KILL "$pid" 2>/dev/null || true
+
+            # Only force kill if it actually hung
+            if kill -0 "$pid" 2>/dev/null; then
+                kill -KILL "$pid" 2>/dev/null || true
+            fi
         fi
         rm -f "$PID_FILE"
     fi
-    # Also kill any stray gpu-screen-recorder processes owned by us
+
+    # Kill stray instances: use -f (full cmdline) to bypass kernel 15-char name truncation
     local recorder_name
     recorder_name=$(basename -- "$RECORDER")
     while read -r pid; do
         [[ -z "$pid" ]] && continue
         kill -INT "$pid" 2>/dev/null || true
-    done < <(pgrep -u "$(id -u)" -x "$recorder_name" 2>/dev/null || true)
+    done < <(pgrep -u "$(id -u)" -f "$recorder_name" 2>/dev/null || true)
+
     rm -f "$LOCK_FILE" "$CURRENT_FILE" "$MODE_FILE"
     rm -f "$IPC_SOCK"
 }
@@ -134,9 +162,9 @@ _convert_to_gif() {
     return 1
 }
 
-# Stop the active recording, converting it to a GIF when that session asked for one.
-# The mode is read before _stop_recording clears the session files: a session that
-# never wrote one is a plain recording, whatever an earlier session asked for.
+# Stops the active recording, converting to a GIF when that session asked for one. The
+# mode is read before _stop_recording clears the session files, so a session that wrote
+# none is a plain recording.
 _finish_recording() {
     local saved_path=""
     local mode=""
@@ -156,7 +184,6 @@ _finish_recording() {
     fi
 }
 
-# ---- command dispatch ---------------------------------------------------------
 ACTION="start"
 SOUND_OUTPUT=false
 SOUND_INPUT=false
@@ -210,7 +237,7 @@ done
 
 case "$ACTION" in
     start)
-        # Already recording? Toggle stop.
+        # A second start means stop.
         if _is_recording; then
             _finish_recording
             exit 0
@@ -237,12 +264,10 @@ case "$ACTION" in
             exit 1
         fi
 
-        # Unique per-recording filename so a new recording never clobbers the
-        # previous one.
+        # Timestamped so a new recording never clobbers the previous one.
         REC_PATH="${RECS_DIR}/recording_$(date +%Y%m%d_%H-%M-%S).mp4"
         echo "$REC_PATH" > "$CURRENT_FILE"
-        # Written for every session, not just GIF ones, so a mode left behind by a
-        # session that died can never decide what happens to the next recording.
+        # Written for every session, so a mode left by a session that died cannot decide the next.
         if [[ "$GIF_MODE" == "true" ]]; then
             echo "gif" > "$MODE_FILE"
         else
@@ -263,16 +288,16 @@ case "$ACTION" in
         args+=("-ipc" "$IPC_SOCK")
         args+=("-o" "$REC_PATH")
 
-        # Launch in background via a subshell so we can capture the PID
+        # Subshell so the recorder's PID can be captured.
         (
-            exec "${args[@]}" >/tmp/gpu-screen-recorder.log 2>&1 &
+            exec "${args[@]}" >"$RECORDER_LOG" 2>&1 &
             echo $! > "$PID_FILE"
             wait
             rm -f "$PID_FILE" "$LOCK_FILE" "$CURRENT_FILE" "$MODE_FILE"
         ) &
         disown
 
-        # Wait briefly for PID file to be populated
+        # Wait for the PID file to appear.
         pid=""
         waited=0
         while [[ -z "$pid" ]] && [[ $waited -lt 20 ]]; do
@@ -281,7 +306,7 @@ case "$ACTION" in
             waited=$((waited + 1))
         done
 
-        # Wait while the recorder process is alive and the recording file has not yet appeared (e.g. portal dialog is open)
+        # Wait out the portal dialog: recorder alive, output file not yet created.
         while [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && [[ ! -f "$REC_PATH" ]]; do
             sleep 0.1
         done

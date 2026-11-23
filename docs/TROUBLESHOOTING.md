@@ -1,10 +1,6 @@
-# TROUBLESHOOTING
+# Troubleshooting
 
-## Troubleshooting guide
-
-This document catalogs known failure modes, error conditions, and edge cases discovered through analysis of the installer, shell build system, scripts, documentation, and runtime architecture of this port.
-
----
+Known failure modes, how to confirm the cause, and the command that repairs it.
 
 ## Table of Contents
 
@@ -15,18 +11,20 @@ This document catalogs known failure modes, error conditions, and edge cases dis
 5. [Configuration Issues](#5-configuration-issues)
 6. [Network & Proxy Issues](#6-network--proxy-issues)
 7. [KDE & Plasma Specific Issues](#7-kde--plasma-specific-issues)
+   1. [Installer Window Rules](#77-installer-window-rules)
+   2. [Quick Share Cannot Receive Files](#78-quick-share-cannot-receive-files)
+   3. [Plasma Audio Visualizer](#79-plasma-audio-visualizer)
+   4. [skwd-wall](#710-skwd-wall)
 8. [Post-Install Issues](#8-post-install-issues)
 9. [Uninstall Issues](#9-uninstall-issues)
 10. [Update Issues](#10-update-issues)
 11. [Diagnostic Commands Reference](#11-diagnostic-commands-reference)
 
----
-
 ## 1. Build & Compilation Issues
 
 ### 1.1 C++ Installer Compilation Fails
 
-The installer compiles the `caelestia-install` TUI binary during `setup.sh`. The CMake project requires **C++20** (`CMAKE_CXX_STANDARD 20`).
+`setup.sh` downloads the prebuilt `caelestia-install` binary for the release and verifies it. When no artifact matches the architecture or `tui.version`, it falls back to compiling `installer/tui`, which needs **C++20** (`CMAKE_CXX_STANDARD 20`) and the build toolchain.
 
 | Symptom | Likely Cause | Fix |
 |---|---|---|
@@ -51,6 +49,8 @@ The shell build (`08-build-shell.sh`) requires **Qt 6.9+** and several system li
 | KF6WindowSystem | KWindowSystem not found | `kwindowsystem` | `kf6-kwindowsystem-devel` |
 | KGlobalAccel | kglobalaccel not found | `kglobalaccel` | `kf6-kglobalaccel-devel` |
 | KPipeWire | pipewire integration | `kpipewire` | `kf6-kpipewire-devel` |
+| Protobuf | Quick Share: `find_package(Protobuf)` | `protobuf` | `protobuf-devel` |
+| OpenSSL | Quick Share: `find_package(OpenSSL)` | `openssl` | `openssl-devel` |
 
 #### Library Dependencies (pkg_check_modules)
 
@@ -87,8 +87,6 @@ The project enables ccache in both `installer/CMakeLists.txt` and `shell/CMakeLi
 - The cache directory (`~/.cache/ccache`) may be too small — increase it: `ccache -M 5G`
 - Debug builds (`-DCMAKE_BUILD_TYPE=Debug`) are much slower; the installer uses `Release`
 
----
-
 ## 2. Dependency & Package Issues
 
 ### 2.1 Arch Linux / yay Failures
@@ -103,8 +101,7 @@ The project enables ccache in both `installer/CMakeLists.txt` and `shell/CMakeLi
 | AUR Package | Failure Symptoms |
 |---|---|
 | `quickshell-git` | Shell won't start; autostart fails with exit 127 |
-| `caelestia-cli` | `caelestia` command not found; shell falls back to direct `quickshell` calls |
-| `kde-material-you-colors` | Colors won't sync with wallpaper |
+| `matugen` | `caelestia wallpaper` and `caelestia scheme` fail with "matugen is not installed". It is in Arch's `extra`, so it is not an AUR package; it is listed here because nothing themes without it. |
 | `darkly` | KDE theme won't apply |
 
 ### 2.2 Fedora / COPR Failures
@@ -120,7 +117,7 @@ The project enables ccache in both `installer/CMakeLists.txt` and `shell/CMakeLi
 
 **RPM Fusion requirement:** `ffmpeg` with H264 support requires RPM Fusion. The script auto-enables it, but this may fail behind a proxy or on air-gapped systems.
 
-**kde-material-you-colors on Fedora:** Installed via `uv tool install`. Requires `dbus-devel`, `dbus-glib-devel`, and `python3-devel`.
+**matugen on Fedora:** available from the `avengemedia/danklinux` COPR repository. The installer auto-enables it and installs `matugen` via DNF.
 
 ### 2.3 CRLF / dos2unix Failure
 
@@ -142,20 +139,18 @@ $XDG_CACHE_HOME/caelestia-kde/failed_packages.txt
 
 The installer does **not** abort on package failure — it logs and continues. Check this file after installation if something doesn't work.
 
----
-
 ## 3. Runtime Issues — Shell
 
 ### 3.1 Shell Doesn't Start After Login
 
-The shell autostarts via `~/.config/autostart/caelestiashell.desktop` which runs `~/.local/bin/caelestia-autostart.sh`.
+The shell starts from the systemd user unit `caelestia-shell.service`, which `caelestia install` enables once. The environment the shell needs is set by `~/.local/bin/caelestia-autostart.sh` for a source install, and by `/usr/bin/caelestia-autostart` for a packaged one; the unit runs whichever belongs to that install.
 
 | Symptom | Likely Cause |
 |---|---|
 | Blank screen at login | Shell binary launched but crashed immediately. Check `journalctl --user -xe`. |
-| Plasma desktop visible, no shell | Autostart entry didn't execute. Verify the `.desktop` file exists. |
+| Plasma desktop visible, no shell | The unit didn't start. `systemctl --user status caelestia-shell.service`, and `systemctl --user is-enabled caelestia-shell.service` for whether it is on at all. |
 | Shell appears briefly then disappears | Quickshell crashed. Run manually from a terminal. |
-| `quickshell: command not found` | Quickshell not in PATH at login. The autostart wrapper resolves the binary path. |
+| `quickshell: command not found` | Quickshell not in PATH at login. The wrapper the unit runs resolves the binary path. |
 
 **Manual start for debugging:**
 ```bash
@@ -166,17 +161,19 @@ quickshell -d -n -p ~/.config/quickshell/caelestia/shell.qml
 
 ### 3.2 Environment Variables Not Set On Login
 
-The build script appends to `~/.bashrc` and `~/.config/fish/config.fish`:
+They live in two locations:
+1. `~/.config/environment.d/caelestia.conf`: read by systemd for every session process and for the user manager the shell's unit runs under.
+2. `~/.config/plasma-workspace/env/caelestia.sh`: sourced by KDE Plasma on session startup for KWin, `kscreenlocker_greet`, and graphical applications.
 
 ```bash
-export QML2_IMPORT_PATH="$HOME/.local/lib/qt6/qml"
-export CAELESTIA_LIB_DIR="$HOME/.local/lib/caelestia"
+QML2_IMPORT_PATH=$HOME/.local/lib/qt6/qml:$HOME/.config/quickshell/caelestia
+CAELESTIA_LIB_DIR=$HOME/.local/lib/caelestia
+CAELESTIA_BIN_DIR=$HOME/.local/bin
+CAELESTIA_SHELL_CONFIG=$HOME/.config/quickshell/caelestia/shell.qml
 ```
 
-**Known issues:**
-- **Zsh users:** Only `.bashrc` and `fish/config.fish` are updated — add the exports to `~/.zshrc` manually
-- **Duplicate lines:** Running the installer multiple times adds duplicate exports
-- **Fish users:** The grep check may miss existing entries if they're set via a different mechanism
+**If they are missing:** re-run `scripts/08-build-shell.sh`, then log out and back
+in. `systemctl --user show-environment` lists what the systemd user manager has.
 
 ### 3.3 Window Thumbnails / Screencast Not Working
 
@@ -210,32 +207,79 @@ causing that app to freeze or crash.
 This falls back to static app icons for thumbnails instead of live video and
 avoids Caelestia's use of the protocol entirely.
 
-### 3.4 Material You Colors Not Working
+### 3.3.2 Black Window in Screen Center (xwaylandvideobridge) ([#1006](https://github.com/caelestia-kde/caelestia/issues/1006))
+
+On systems where `xwaylandvideobridge` autostarts (such as Fedora KDE), an opaque black floating window can appear in the center of the display at startup and reappear whenever clicking the desktop.
+
+**Cause:**
+`xwaylandvideobridge` creates an idle dummy X11 helper window (`ContentsWindow`, painted `Qt::black` with `setOpacity(0)`). On some builds (e.g., Fedora), this window is flagged as a dialog (`types 32`). Because Caelestia's `caelestia-dialogs` rule centers all dialogs (`placement 5`) and `caelestia-opacity` forces inactive opacity to 95% on `types 33` (`Normal | Dialog`), KWin centered the bridge helper window and rendered it at 95% opacity above Quickshell's bottom layer. When focused, the window reverted to its native 0% active opacity (disappearing), but returned to 95% opacity as soon as focus shifted back to the desktop.
+
+Because KWin evaluates rules top-to-bottom and resolves attribute conflicts by **first match wins**, specific application rules must precede general catch-all rules in `[General] rules=` to prevent general rules from overriding them.
+
+**Fix:**
+Re-apply the Caelestia window rules to write the `caelestia-xwaylandvideobridge` rule ahead of general rules in `~/.config/kwinrulesrc`:
+
+```bash
+bash scripts/04a-window-rules.sh
+```
+
+The rule uses substring matching (`wmclassmatch 2`), omits `types` (matching both Dialog and Normal window types), enforces `placement 0` (NoPlacement to prevent centering), forces 0% active and inactive opacity, and marks the window to stay below others while skipping taskbars, pagers, and window switchers.
+
+### 3.3.3 Shell Crash-Loops When MangoHud Is Enabled Session-Wide ([#940](https://github.com/caelestia-kde/caelestia/issues/940))
+
+With `MANGOHUD=1` set for the whole session (common on gaming distributions, e.g. in
+`~/.config/environment.d/`), the shell dies seconds after it starts and
+`caelestia-shell.service` restarts it in a loop — the "What's new" window reappears each
+time and shortcuts stop working.
+
+**Cause:**
+MangoHud installs an implicit Vulkan layer, which the loader adds to *every* process in
+the session. QtMultimedia's FFmpeg backend creates a Vulkan device for hardware decode as
+soon as a `MediaPlayer` exists, and MangoHud crashes inside `vkCreateDevice`. The
+backtrace ends in `libMangoHud.so` ← `vkCreateDevice` ← `libavutil` ←
+`libffmpegmediaplugin.so`, and the same crash happens outside the shell with
+`MANGOHUD=1 qml6 player.qml`.
+
+**Fix:**
+The shell's unit opts out of MangoHud with `Environment=DISABLE_MANGOHUD=1`, so the layer
+is never loaded into the shell while games keep their overlay. That is shipped since this
+change; an existing install gets it by re-running:
+
+```bash
+bash scripts/10-autostart.sh
+```
+
+For an older install, the same thing without touching the shell:
+
+```ini
+# ~/.config/systemd/user/caelestia-shell.service.d/no-mangohud.conf
+[Service]
+Environment=DISABLE_MANGOHUD=1
+```
+
+**Verify:**
+```bash
+systemctl --user show -p NRestarts --value caelestia-shell.service   # stays at 0
+journalctl --user -u caelestia-shell.service | grep -c core-dump     # no new entries
+```
+
+### 3.4 Colors Not Applying
 
 | Symptom | Fix |
 |---|---|
-| Colors not updating with wallpaper | Check service: `systemctl status --user kde-material-you-colors.service` |
-| Service failed to start | On Fedora, installed via `uv`. If `uv` isn't in PATH at login, the service fails. |
-| Old schemes accumulating | The installer removes old `MaterialYou*.colors`, but multiple restarts can recreate them. |
-| Colors come back as the built-in default (Mocha) | The CLI derives dynamic colors from the wallpaper it was last told about. When it has none it writes nothing, the shell keeps its own default palette and pushes that into KMY, so the whole desktop follows. The shell now re-derives from the wallpaper it is showing at every start. |
-| The service has to be restarted after every login | It was started with the session, before plasmashell existed, so it could read neither the wallpaper nor the current scheme. The unit is now ordered after `plasma-plasmashell.service` and restarts on a clean early exit too. |
+| Colors do not change with the wallpaper | `caelestia wallpaper -f <image>` generates and applies the palette. If Plasma stays on the old one, check that `plasma-apply-colorscheme --list-schemes` names `Matugen`. |
+| Two Material You entries in System Settings | Expected: `Matugen` and `Matugen Alt`. `plasma-apply-colorscheme` does nothing when handed the scheme already in effect, so the palette is applied under whichever of the two is not current. |
+| A leftover accent color wins over the palette | Plasma rewrites the focus, link and selection colors from `kdeglobals`' accent, so the palette is applied with that key removed. If it is set again - System Settings, or a theme tool of your own - the colors it drives will follow it. |
+| Colors come back as the built-in default (Mocha) | The CLI derives dynamic colors from the wallpaper it was last told about. When it has none it writes nothing, and the shell keeps its own default palette. The shell re-derives from the wallpaper it is showing at every start. |
+| Konsole keeps its own colors | The command writes `~/.local/share/konsole/Matugen.colorscheme` and points the profiles that exist at it. Konsole's built-in default profile is not a file, so a fresh account has nothing to point: create a profile once and the next change themes it. |
+| The desktop flickers between two palettes | A `kde-material-you-colors` unit from an older install is still applying a scheme of its own. See 3.7. |
 
-**Manual restart:**
-```bash
-systemctl --user restart kde-material-you-colors.service
-journalctl --user -u kde-material-you-colors.service -n 50
-```
-
-An existing install keeps the old unit until the step that writes it runs again,
-so re-run `scripts/10-autostart.sh` (or the installer/update) once to pick up the
-ordering and the restart policy.
-
-The shell re-derives the scheme from the wallpaper at every start, so a palette
-stuck on the built-in default corrects itself on the next shell restart. To do it
-without restarting the shell:
+There is no service to restart. A palette is generated and applied by the command the shell calls, so
+the way to redo it by hand is:
 
 ```bash
-~/.config/quickshell/caelestia/scripts/reseed-scheme.sh
+caelestia scheme set -n dynamic      # re-derive from the wallpaper on screen
+caelestia wallpaper -f ~/Pictures/Wallpapers/one.png
 ```
 
 ### 3.5 Screen Recording Issues
@@ -260,40 +304,461 @@ The screenshot tool uses `spectacle` (KDE's native screenshot utility) via the `
 The screen flashes, colors look briefly wrong and the shell hangs for about a
 second, repeating on a rhythm of roughly one second.
 
-The cause is `kde-material-you-colors` getting stuck. It decides on every loop
-that the palette changed, applies an identical scheme again and spawns
-`plasma-apply-colorscheme` each time. Every apply rewrites `kdeglobals` and
-makes every window repaint, which is what the flash is. Restarting the service
-clears it, which is also why it disappears when you restart it by hand.
+That was `kde-material-you-colors` getting stuck. It decided on every loop that
+the palette had changed, applied an identical scheme again and spawned
+`plasma-apply-colorscheme` each time, and every apply rewrites `kdeglobals` and
+repaints every window. Nothing here runs it any more: it is not installed, the
+installer removes its unit, and the palette is applied once per change rather than
+once per poll.
 
-The shell now watches for this and stops it at the source:
-
-- applies only count when the `plasma-apply-colorscheme` process was started by
-  `kde-material-you-colors`, so applying a scheme yourself is never mistaken for
-  the loop
-- eight applies inside ten seconds restarts the service
-- a second storm within ten minutes pauses it instead, through its own
-  `pause_mode`, and shows a toast
-
-To check by hand:
+If it is still happening, a unit from an older install is behind it:
 
 ```bash
-journalctl --user -u app-caelestiashell@autostart.service -n 50 | grep 'KMY guard'
-pgrep -af plasma-apply-colorscheme   # a new pid every second means the loop is back
+systemctl --user status kde-material-you-colors   # active means it is still applying
+systemctl --user disable --now kde-material-you-colors
+pgrep -af plasma-apply-colorscheme                # a new pid every second means something still loops
 ```
 
-If the service was paused, turn it back on once the loop has cleared. The
-switch is in Settings, under Appearance then Advanced Colors, or:
-
-```bash
-~/.config/quickshell/caelestia/scripts/sync-kmyc.sh --set pause_mode False
-systemctl --user restart kde-material-you-colors
-```
+`bash scripts/10-autostart.sh` stops that unit and deletes it, if you would rather
+not do it by hand. It also removes the `MaterialYou*.colors` files KMY left in
+System Settings.
 
 Applying once when the wallpaper or theme changes is expected and does not
 trigger any of this.
 
----
+### 3.8 Workspace Tracker Effect Stops Loading After a KDE Update
+
+The workspace pills show the focused screen's desktop on every screen, swiping
+does not track the gesture, and the shell reports that the workspace tracker
+effect is not running.
+
+`kwin_workspace_tracker` is a compiled KWin effect, and KWin makes no promise
+that a binary effect keeps working across releases: it is linked against
+libkwin's internals and has to be relinked when KDE updates them. KWin then
+refuses the stale binary, so per-output desktops and the swipe offset stop
+arriving. A routine `pacman -Syu` is enough to cause it; nothing in Caelestia is
+corrupted.
+
+Rebuild it by re-running the installer or `update.sh`, then log out and back in -
+KWin only loads effects at startup:
+
+```bash
+bash update.sh                     # rebuilds and reinstalls the effect
+qdbus6 org.kde.KWin /Caelestia/Workspaces org.freedesktop.DBus.Introspectable.Introspect
+```
+
+The last command prints the effect's interface once it is loaded again, and
+fails while it is not. `bash shell/scripts/check-workspace-tracker.sh` answers the
+same question with an exit status (3 means enabled but not loaded).
+
+The shell checks the same thing at login, but only raises the *Desktop tracking
+is off* toast the first time it sees a given failure. After that the reason goes
+to the log (`journalctl --user -u caelestia-shell | grep WorkspaceTrackerGuard`)
+instead of a toast, because the same mismatch would otherwise cover the panels at
+every login until the effect is rebuilt. Rebuilding it and logging back in clears
+the record, so a later breakage is announced again.
+
+### 3.9 Copy/Paste Crashes Krita or Inkscape (cliphist.service)
+
+Krita crashes when a selection is copied and pasted inside the document, while
+pasting an image copied from another application works. Inkscape crashes on
+copy/paste of anything. Stopping the clipboard service stops the crashes:
+
+```bash
+systemctl --user stop cliphist.service   # the crash should go away with it
+systemctl --user start cliphist.service
+pgrep -a wl-clip-persist                 # confirms the helper below is running
+```
+
+The unit runs three helpers: two `wl-paste --watch cliphist store` watchers and
+`wl-clip-persist`. The watchers only read the clipboard, so they cannot disturb
+it. `wl-clip-persist` does: it reads **every** MIME type of a new selection into
+memory and then re-offers the clipboard itself, so the application that copied no
+longer owns the selection.
+
+Applications that put a process-private payload on the clipboard expect to read
+it back out of their own clipboard object. Krita serialises raw `KisNode*`
+pointers into `application/x-krita-node-internal-pointer` and hands the payload
+straight back to `dynamic_cast` on paste as long as the pid in it is its own
+(`KisMimeData::tryLoadInternalNodes`); Inkscape does the same for
+`image/x-inkscape-svg`. Once `wl-clip-persist` re-offers the payload, the
+pointers are stale and the paste dies in `__dynamic_cast`.
+
+The unit therefore passes `--all-mime-type-regex` to `wl-clip-persist`, which
+makes it leave alone any selection event that offers one of those private
+formats. `wl-clip-persist` handles an event only when **every** MIME type it
+offers matches the filter, so a selection carrying both a private format and,
+say, `text/plain` is skipped whole: the watchers still add it to the clipboard
+history, but it no longer survives the application it was copied from.
+Selections offering only public formats persist as before; the install keeps that
+list in `~/.local/bin/caelestia-cliphist`, next to the flag that reads it.
+
+On an install older than the fix, or if you run your own clipboard setup, pass
+the same flag yourself:
+
+```bash
+wl-clip-persist --clipboard regular \
+    --all-mime-type-regex '(?i)^(?!(?:application/x-krita-|image/x-inkscape-svg)).+'
+```
+
+Any other application that crashes when pasting its own content while the
+service runs belongs to the same class: report it so its format can be added to
+the filter.
+
+### 3.10 Launcher Search Mode Finds Nothing
+
+The launcher's system-wide search (`>search <query>`) is powered by KDE's
+KRunner, which reaches files, places, web shortcuts, the dictionary, unit and
+currency conversion and settings modules. KRunner's D-Bus service only exposes
+UI control methods, so the shell talks to the library instead, and the bridge is
+built only when the development package is present:
+
+```bash
+pacman -Q kf6-krunner          # Arch: the runtime is usually already there
+pacman -S kf6-krunner          # headers + CMake config the bridge needs
+dnf install kf6-krunner-devel  # Fedora
+apt install libkf6runner-dev   # Debian and Ubuntu
+```
+
+The indexer behind *Files* results is a separate package (`baloo` on Arch,
+`kf6-baloo` on Fedora, `baloo6` on Debian); the installers pull in both.
+
+If `>search` shows nothing at all while `>calc` still works, the shell was
+compiled without it. Check what the installed plugin was built against:
+
+```bash
+ldd ~/.local/lib/qt6/qml/Caelestia/lib/libcaelestia-services.so | grep -i runner
+```
+
+No `libKF6Runner` line means the plugin predates KRunner or was built on a
+machine without the headers; reinstall the shell after installing the package.
+A build with KRunner gets `search` in the launcher's action list, and
+`KRunnerBridge.available` is `false` without it, so the mode simply has no
+results rather than erroring.
+
+Empty results with the bridge in place usually mean the runner itself is not
+enabled. Turn the relevant one on in *System Settings → Search → Plasma Search*
+(in particular *Files* for Baloo), and check that the file index exists:
+
+```bash
+balooctl6 status                # "indexing" or "idle" is healthy
+```
+
+Results that say *Search DuckDuckGo for …* are web searches: KRunner's *Web
+Search Keywords* runner offers the configured engine once nothing else matches,
+and search mode adds the same row itself when KRunner has not. The engine is
+KDE's choice, stored as `DefaultWebShortcut` in `~/.config/kuriikwsfilterrc`;
+with no such file the built-in default applies, which is DuckDuckGo. Providers
+ship with `kio` as `/usr/share/kf6/searchproviders/*.desktop`, and the value is
+the *file name* of the provider (`google`, `duckduckgo`, …) rather than one of
+the aliases on its `Keys=` line. Those aliases only apply to what you type, so
+`ddg:cats` searches directly whichever engine is configured.
+
+Pick the engine in *Nexus → Apps → Web search engine*, from KDE's own page in
+*System Settings → Search → Web Search Keywords* (`kcmshell6 kcm_webshortcuts`),
+or set it once:
+
+```bash
+kwriteconfig6 --file kuriikwsfilterrc --group General --key DefaultWebShortcut google
+```
+
+Until Baloo has an index the web row is often the only match for a filename, which makes the shortcut look
+like a bug rather than a fallback.
+
+### 3.11 The Calendar Agenda Stays Empty
+
+The agenda reads iCalendar (`.ics`) sources; the shell has no PIM stack of its own.
+It lives in the clock popout — hover the clock or click it. The month grid marks the
+days that have events, and the list under it shows the day you have selected: click
+any day to see its events, with times and locations. If the popout says
+*No calendars yet*, nothing is configured: click that row, or go to
+*Nexus → Services → Calendars & agenda*. For Google Calendar the address is
+**Settings → the calendar → "Secret address in iCal format"**; Nextcloud, Fastmail
+and KOrganizer all hand out an equivalent export link, and a local `.ics` path works
+too.
+
+If the popout does not appear at all, the *Calendar popout* switch is off in
+*Nexus → Panels → Clock* — it is on by default, but a `shell.json` written before
+that default may still carry `bar.popouts.clock: false`.
+
+If sources are configured but no events appear:
+
+```bash
+# What the shell runs, and what it gets back
+python3 ~/.config/quickshell/caelestia/scripts/calendar_events.py \
+  --days 14 --source 'Work=https://calendar.google.com/…/basic.ics'
+```
+
+* `No time zone found with key …` means the system tz database is missing — install
+  `tzdata`.
+* A `[[errors]]` entry names the source that failed; the others still load, so one
+  bad link cannot empty the agenda.
+* Recurring events are expanded here, and only `DAILY`, `WEEKLY`, `MONTHLY` and
+  `YEARLY` rules are understood. A calendar relying on exotic `BY*` combinations will
+  show the master event and its plain recurrences, not every exception.
+* Fetched URLs are cached for five minutes under `~/.cache/caelestia/calendar`, and the
+  cache is revalidated with the calendar's `ETag` rather than downloaded again. The
+  agenda re-reads on its own every five minutes and whenever the popout is opened, so
+  an edit in Google shows up within a few minutes; *Refresh* in Nexus forces a re-fetch.
+* The address Google hands out is **read only**: the shell can show the calendar, not
+  write to it. Editing stays in Google Calendar or whatever client you already use.
+
+### 3.12 Focus Sessions Turn Notifications Off at the Wrong Time
+
+A focus session is a window (days plus start and end) during which the shell turns
+Do Not Disturb on itself. A window whose end is before its start runs overnight and
+belongs to the day it started on — `22:00–07:00` on a Monday covers Tuesday morning.
+
+* If DND will not clear, check whether a session is still running:
+  *Nexus → Notifications → Focus sessions* names the window and the time it ends.
+* Turning DND off by hand during a session keeps it off until the window ends; the
+  shell only clears a DND it turned on itself.
+* An app that should still reach you goes in *Allowed through*; the name has to match
+  the application name the notification carries, which is what
+  `notify-send -a <name>` and most messaging apps set.
+
+### 3.12.1 An Application's Notifications Stopped Arriving
+
+Two per-app lists can silence an application, and they answer different questions.
+*Nexus → Audio → Muted notification apps* shows both:
+
+* **Notifications turned off** — nothing arrives: no banner, no sound, nothing added to
+  the notification list, and nothing counted as unread. This is what the bell-with-a-slash
+  button on a notification does, so an application can be turned off from the notification
+  itself without opening settings.
+* **Notifications without sound** — the notification still arrives and is still listed;
+  only the chime is skipped.
+
+The first list is `mutedApps` in the notifications config, the second is
+`audio.sounds.disabledNotifApps`; an application can be in both and the stronger answer
+wins. Neither is the same thing as Do Not Disturb, which is a session-wide switch with an
+end time, or as the focus allow-list, which decides who gets through while DND is on:
+
+```bash
+caelestia shell notifs mutedApps                   # the apps that send nothing, as JSON
+caelestia shell notifs mute firefox                # turn one off
+caelestia shell notifs unmute firefox              # and back on
+caelestia shell notifs search invoice              # what the search box would show
+```
+
+The list in the sidebar can be searched: the magnifier beside "Notifications" narrows the
+history (kept across restarts, up to *Nexus → Notifications → Max stored notifications*) by
+application name, summary and body text.
+
+### 3.13 Shell Text Does Not Follow the System Text Size
+
+The shell draws with its own type tokens, so KDE's font size does not reach it
+unless *Nexus → Accessibility → Follow system text size* is on (it is by default).
+With it on, the shell reads `[General] font` from `~/.config/kdeglobals` and uses its
+point size as the scale, against a 10 pt base:
+
+```bash
+kreadconfig6 --file kdeglobals --group General --key font   # e.g. "Noto Sans,11,-1,5,…"
+```
+
+An absent key means KDE is running its default, which is the 10 pt base, so the shell
+stays at 100%. If a different size is wanted in the shell alone, switch the toggle off
+and use *Font scale* instead.
+
+### 3.14 Magnifier, Colour Filters or Screen Reader Do Nothing
+
+Those are not shell features: the magnifier, colour inversion and colour-blindness
+correction are **KWin effects**, so the shell can only load or unload them, and the
+shortcuts and filter choice live in *System Settings → Accessibility*. Check what
+KWin reports:
+
+```bash
+qdbus6 org.kde.KWin /Effects org.kde.kwin.Effects.isEffectLoaded zoom
+qdbus6 org.kde.KWin /Effects org.kde.kwin.Effects.listOfEffects | tr ',' '\n' | grep -i colour
+```
+
+The screen reader is Orca, which has to be installed (`orca` on Arch, `gnome-orca`
+elsewhere). The page reports it as missing rather than offering a button that cannot
+work.
+
+### 3.15 Displays Page Is Empty or Changes Do Not Stick
+
+Nexus reads and writes the screen layout through **KScreen**, the same component System
+Settings uses, so what it shows is the real layout and every change is applied by KScreen
+rather than by the shell:
+
+```bash
+kscreen-doctor -j | head -20        # what the page reads
+kscreen-doctor output.eDP-1.scale.1.5   # what the page runs for a change
+```
+
+If the page shows the "no kscreen-doctor" note, the package is missing (`kscreen` on
+Arch, `kscreen5`/`libkscreen` elsewhere). A change that reverts after a moment means KScreen
+rejected it — for example disabling the only enabled output, which the enabled switch
+refuses to do on purpose. Rotation is reported by KScreen as a bit flag (1 none, 2 left,
+4 upside down, 8 right), so the page names it before showing it.
+
+Input (pointer, touchpad, keyboard) is deliberately not duplicated here: those settings are
+applied by Plasma's KCMs, so the page opens them rather than keeping a second copy that
+would drift.
+
+### 3.16 A Startup Program Does Not Run
+
+Log-in programs are XDG autostart desktop files. The shell lists `~/.config/autostart` and
+every `XDG_CONFIG_DIRS` directory (usually `/etc/xdg/autostart`), and switches a *system*
+entry off by keeping a copy of its own in `~/.config/autostart` with `Hidden=true` — the same
+mechanism System Settings uses, so the two never disagree about what starts:
+
+```bash
+python3 ~/.config/quickshell/caelestia/scripts/autostart.py --list
+grep -H Hidden ~/.config/autostart/*.desktop
+```
+
+A program that shows as enabled but never starts usually has an `Exec` line that needs a full
+path, or an entry restricted with `OnlyShowIn=` to a desktop the session does not advertise.
+Removing the user's copy (`--remove NAME`, or the bin icon in Nexus, which only appears for
+entries the user owns) restores whatever the package shipped.
+
+### 3.17 The Privacy Indicator Does Not Appear
+
+The privacy icon in the status area is only drawn while an application is capturing, which is
+why it is missing most of the time. It reports two things:
+
+- **Microphone** — every PipeWire capture stream (`media.class` of `Stream/Input/Audio`). These
+  nodes exist only while an application is recording, so the list is the answer; the shell's own
+  capture is excluded so the icon means "somebody else is listening".
+- **Video capture** — the client video streams `PipewireStreamWatcher` reports: screen sharing and
+  apps that open a camera. Camera *devices* are excluded on purpose, because a `Video/Source` node
+  exists even when nothing is looking through it.
+
+```bash
+pw-dump | grep -B4 'Stream/Input/Audio'      # what the microphone row is built from
+pactl -f json list source-outputs            # the same capture streams as PulseAudio sees them
+```
+
+An application that opens the camera or microphone **through V4L2/ALSA directly** rather than
+through PipeWire is invisible to this: the shell can only see what the sound and video servers
+know about. Applications routed through `xdg-desktop-portal` — Firefox, Chromium, Zoom, OBS — are
+reported for as long as they hold a stream open. If the icon is enabled in *Nexus → Panels → Status
+icons* but never appears, check `pw-dump` for a `Stream/Input/Audio` node while the application
+claims to be recording — a node that is not there is a capture the shell was not told about.
+
+### 3.18 Storage Page Is Empty or a Mount Does Nothing
+
+The page lists what `lsblk` reports and mounts through `udisksctl`, the same path GNOME Disks
+and Dolphin use, so the answer is always a polkit prompt or a refusal instead of a half-mounted
+filesystem:
+
+```bash
+python3 ~/.config/quickshell/caelestia/scripts/disks.py    # what the page shows
+udisksctl mount -b /dev/sdb1                               # what a toggle runs
+journalctl -u polkit --since "5 min ago"                   # when it was refused
+```
+
+Loop devices, zram, swap and device-mapper internals are filtered out on purpose, and
+filesystems the system is running from (anything mounted at `/`, `/boot`, `/usr`, `/var`) are
+shown with the switch disabled: unmounting those is not a settings-page action.
+
+The list is one row per disk with its filesystems under it, because every action the page
+offers is a disk action: **Eject** runs `udisksctl power-off -b` on the disk, and a removable
+disk with no filesystem at all — a stick that was never formatted — is still listed and
+ejectable. An optical drive with no disc in it is not, since there is nothing to act on.
+
+A page that says *No disks were reported by lsblk* and a page that shows an error are
+different answers: the script prints nothing and fails when `python3`, `lsblk` or the script
+itself is missing, and that failure is shown rather than reported as an empty machine.
+
+### 3.19 A Captive Portal Is Not Detected or Its Page Does Not Open
+
+Detection is NetworkManager's own verdict, and the sign-in address is found the way plasma-nm
+finds it — ask a known URL and read where the redirect went:
+
+```bash
+nmcli -t -f CONNECTIVITY general                            # full | portal | limited | none
+curl -sS -m 6 -o /dev/null -w '%{url_effective}' http://networkcheck.kde.org/
+```
+
+The **Open sign-in page** row in *Nexus → Network* only appears while NetworkManager reports
+`portal`. If it appears and nothing opens, the second command above tells you why: a URL that
+is still the check URL means nothing intercepted the request (so there is no page to open), and
+the row's own status line then shows curl's message. A hotspot that gates traffic on a DNS
+answer without redirecting HTTP cannot be followed automatically; open its address by hand.
+
+### 3.20 The Dock Menu Lists No Recent Files
+
+The jump list is the application's own history from `~/.local/share/recently-used.xbel`, the
+freedesktop list every toolkit writes to and Plasma's recent-documents runner reads. A file only
+appears under an application that registered itself when it opened it, so a program that does not
+add bookmarks has no jump list at all:
+
+```bash
+python3 ~/.config/quickshell/caelestia/scripts/recents.py --limit 5 --app org.kde.spectacle
+grep -c '<bookmark ' ~/.local/share/recently-used.xbel
+```
+
+Entries whose file has since been deleted are dropped, and so are `http://` bookmarks, because
+a jump list is a list of things that can be opened again. The menu asks for five.
+
+The list is that application's own history in that application's own order: when the same file
+was opened by two applications, each records its own visit, and the jump list keeps the visit
+that application made rather than dropping the file because something else opened it later.
+
+### 3.21 A Timer Did Not Fire, or Disappeared
+
+Timers are countdowns, and they live in the utilities drawer (*the card titled Timers*),
+in `~/.local/state/caelestia/timers.json` between shell restarts, and on the CLI:
+
+```bash
+caelestia shell timers startFor 25m "take the bread out"   # a duration as typed
+caelestia shell timers list                                # what is running, seconds left
+caelestia shell timers toggleActive                        # pause or resume the timer on the card
+caelestia shell timers cancel <id>                         # the id from list
+caelestia shell timers clear                               # all of them
+```
+
+The card's field is a keypad, not a duration box: it counts digits rather than units. Two
+digits or fewer are seconds, up to four are minutes and seconds, and past that the field
+grows an hour column, so `30` is half a minute, `300` is 3:00 and `10300` is 1:03:00. The
+CLI keeps the other grammar, because a command line has room to say `25m`: a bare number
+there is minutes, `90s` is ninety seconds, and `1h30` is an hour and a half.
+
+The card shows one countdown in large type — the pinned timer, or the one ending soonest —
+with a bar for how much of it has run, and Start/Pause and Reset under it. The rest are
+listed below, each with its own pause, pin and cancel. Start/Pause acts on the countdown
+in large type: it starts what is typed when nothing is running, and stops or restarts that
+one otherwise.
+
+What is stored is the moment a timer *ends*, not the time it has left, so restarting the
+shell does not restart the countdown. A paused timer is the exception, because its clock
+has stopped on purpose: it stores the seconds it had left and comes back paused. A timer
+whose end passed while the shell was not running is reported once on the next start
+("2 timers finished while the shell was not running") instead of replaying every one of
+them. Timers that end while the shell is running are each announced with their own
+message, since that message is still news.
+
+A timer that finishes raises a notification as *Timers*, which means it follows the same
+rules as any other: a banner and a chime, unless Do Not Disturb is on. It also repeats an
+alarm until it is answered, so a timer set in another room is noticed. *Nexus → System
+Services → Timers* sets which of the system's own sounds it plays, how many seconds it
+repeats for (0 silencing it), or switches it to keep going until the timer is reset. The
+sounds are KDE's, read from `/usr/share/sounds`, so the list is whatever that machine has
+installed; a sound that is no longer there falls back to the shell's notification chime.
+*Reset* on the card, or `timers clear`, stops it either way.
+
+Typing a duration and pressing Enter starts the timer; leaving the field alone does not,
+so a click elsewhere cannot start a timer nobody asked for.
+The card can be hidden entirely with *Nexus → Utilities panel → Timers*; the timers keep
+running, they are simply not in the drawer.
+
+### 3.22 Where Unit and Currency Conversion Lives
+
+In the launcher. Its calculator is powered by `libqalculate`, which answers unit and
+currency questions as expressions: typing `10 km to miles`, `3 tbsp in ml` or
+`20 usd in eur` gives the converted value, and <kbd>Enter</kbd> copies it.
+
+```bash
+qalc "10 km to miles"        # the same answer from a terminal
+```
+
+`libqalculate` is a hard dependency of the shell's plugin, so this works wherever the
+shell itself does. Currency rates come from the sources `qalc` knows about and go stale
+when it cannot reach them; `qalc -e "20 usd in eur"` prints the rate it used when asked to
+show its work.
 
 ## 4. Runtime Issues — Lock Screen
 
@@ -317,11 +782,9 @@ ls -la ~/.local/share/plasma/shells/caelestia.desktop/contents/lockscreen/LockSc
 | Symptom | Cause | Solution |
 |---|---|---|
 | Stock Breeze lock screen appears | `ShellPackage` reset after KDE update or theme switch. | Caelestia autostart (`caelestia-autostart.sh`) automatically self-heals this at next login if `caelestia.desktop` is present. To restore immediately in session: `kwriteconfig6 --file plasmashellrc --group "Shell" --key "ShellPackage" "caelestia.desktop" && kwriteconfig6 --file kscreenlockerrc --group "Greeter" --key "Theme" --delete`. |
-| Lock screen fails or crashes | Greeter files missing or corrupted in `~/.local/share/plasma/shells/`. | Re-deploy via `BUNDLE_DIR=. ./scripts/02-packages.sh` or `cp -r src/kde/shells/caelestia.desktop ~/.local/share/plasma/shells/`. |
+| Lock screen fails or crashes | Greeter files missing or corrupted in `~/.local/share/plasma/shells/`. | Re-deploy via `BUNDLE_DIR=. ./scripts/08-build-shell.sh` or `cp -r src/kde/shells/caelestia.desktop ~/.local/share/plasma/shells/`. |
 | Lock screen shows wallpaper error | Legacy `PlasmaApplicationWallpaper` left in `kscreenlockerrc`. | Reset WallpaperPlugin: `kwriteconfig6 --file kscreenlockerrc --group Greeter --key WallpaperPlugin "org.kde.image"`. |
 | Profile picture missing | `~/.face` does not exist and no system user avatar set. | Place your avatar image at `~/.face` or configure an avatar in KDE System Settings → Users. |
-
----
 
 ## 5. Configuration Issues
 
@@ -352,60 +815,123 @@ Some KDE versions (6.1 vs 6.2) may use slightly different config keys.
 
 ### 5.3 Wrong Number of Virtual Desktops
 
-The installer configures exactly **5 desktops**. If you had a different count before:
-- Re-run `scripts/09-system-tweaks.sh` to re-apply
-- The uninstaller resets desktop count to `1`
+The installer configures **5 desktops** when it runs, and only then: a system update never touches the count. A count you chose yourself — anything other than KWin's default of `1` — is left alone even on an install.
+
+- To apply the 5 desktops again, set the count back to `1` (or remove `Number` from the `[Desktops]` group) and run the installer: `bash scripts/setup.sh`, or `caelestia install` on a packaged install
+- The uninstaller resets the desktop count to `1`
 
 ### 5.4 Keyboard Shortcut Conflicts
 
 Caelestia's `GlobalShortcut` system uses `kglobalacceld`. When it registers a shortcut that conflicts with another app, it "steals" the binding and records it in:
 
 ```text
-~/.config/caelestia/stolen-shortcuts.json
+${XDG_CONFIG_HOME:-~/.config}/caelestia/stolen-shortcuts.json
 ```
 
 **If shortcuts are missing or wrong:**
 ```bash
-rm -f ~/.config/caelestia/stolen-shortcuts.json
+rm -f "${XDG_CONFIG_HOME:-$HOME/.config}/caelestia/stolen-shortcuts.json"
 systemctl --user status plasma-kglobalaccel.service
 ```
 
+A file an older version left at `~/.config/caelestia/` because it ignored `XDG_CONFIG_HOME` is not read any more. If you set `XDG_CONFIG_HOME` somewhere other than `~/.config`, remove that leftover by hand.
+
 If `keyd` is active and manages Meta+1..5, the tweak script skips KWin bindings for those combos to avoid conflicts.
 
-### 5.5 Terminal Sequence Bleeding (Garbled Output)
+### 5.5 Keep Awake Comes Back After a Restart — How to Turn It Off for Good
 
-If ANSI escape sequences leak from the `caelestia` CLI into your terminal:
+"Keep awake" is stored outside the config, in
+`${XDG_RUNTIME_DIR:-/tmp/caelestia-$USER}/caelestia-keepawake.json`, because it is runtime state rather
+than a setting: the shell writes it on every toggle and reads it back on start, so restarting (or crashing
+and restarting) the shell does not quietly hand the machine back to the idle timers while a long build is
+running. The runtime directory is per boot, so a reboot or a new login starts with it off — an inhibitor
+that outlived a reboot would stop the machine from ever sleeping.
 
 ```bash
-cat $XDG_CACHE_HOME/caelestia-kde/failed_patches.txt
+caelestia shell idleInhibitor isEnabled    # what the shell currently believes
+caelestia shell idleInhibitor disable      # the normal way, writes the file
+caelestia shell idleInhibitor setFor 1800  # stay awake for half an hour, then let go
+caelestia shell idleInhibitor remaining    # seconds left, or -1 while it has no end
+rm -f "${XDG_RUNTIME_DIR:-/tmp/caelestia-$USER}/caelestia-keepawake.json"   # or forget it until the next restart
 ```
 
-If `Caelestia CLI Theme Sequence Patch` appears in the failed list, re-run:
+The file stores the mode and the moment the hold ends, not the time left, so a hold set for an hour still
+has whatever was left of it after the shell restarts — it does not start over, and one whose moment passed
+while the shell was down comes back off.
+
+The inhibitor is a Wayland idle inhibitor, so it shows up in neither `systemd-inhibit --list` nor the power
+settings; only the shell knows about it.
+
+### 5.6 The Proxy Page Changes Nothing for a Program
+*Nexus → Network → Proxy* writes `[Proxy Settings]` in `${XDG_CONFIG_HOME:-~/.config}/kioslaverc`,
+because that is the file KIO applications read — Plasma, Dolphin, Konsole and everything else
+built on KIO:
+
 ```bash
-bash scripts/09-system-tweaks.sh
+python3 ~/.config/quickshell/caelestia/scripts/proxy.py --get
+grep -A6 '\[Proxy Settings\]' ~/.config/kioslaverc
 ```
 
----
+Programs started from a shell inherit `http_proxy` and friends instead, so they keep whatever
+their environment says until they are restarted; changing the mode to *Use environment variables*
+makes KDE read those too. The page edits only the keys it owns and leaves every other section,
+comment and unknown key in the file alone, and it replaces the file in one step: a failed write
+leaves the old `kioslaverc` intact and says so on the page instead of emptying it.
+
+### 5.7 Toasts Appear in the Wrong Corner
+
+Toasts stack in one corner of the focused screen. *Nexus → Notifications → Toasts →
+Corner* offers **automatic**, top-left, top-right, bottom-left and bottom-right;
+**automatic** is the corner the shell has always used — the bottom, on the left when the
+bar runs along the bottom, and away from the bar when it runs along a side — so nothing
+moves until the row is changed. The reset button on the row deletes the key and hands the
+choice back to automatic.
+
+The stack grows away from the edge it is anchored to: from a top corner downwards, from a
+bottom corner upwards, newest outermost. A left- or right-hand corner steps aside for the
+sidebar when it is open on that side, and a bottom corner steps aside for the utilities
+drawer when that is open along the bottom.
+
+### 5.8 Where the Corner Radii Come From
+
+There are two classes of corner, and each has one owner:
+
+* **The shell's own surfaces.** The drawer's frame and the surface drawn inside it use
+  the same value, `border.rounding` (25 by default, `border.smoothing` for the fillet).
+  They are deliberately one number: a frame rounded differently from the panel inside it
+  leaves a sliver of wallpaper at every corner, which is what a mismatch of 25 against a
+  hard-coded 28 does. Changing `border.rounding` moves both.
+* **Cards and rows inside a surface** use `Tokens.rounding.*` (16 for a card, 28 for a
+  grouped list, `full` for a pill). These follow the appearance rounding scale, so they
+  move together when the scale changes.
+
+Anything that is its own surface — the bar island when *islands* is on — keeps a token
+radius, because there is no frame around it to line up with.
 
 ## 6. Network & Proxy Issues
 
-### 6.1 Pacman Mirror Ranking Fails
+### 6.1 Package Repository Problems
 
-On CachyOS, the installer uses the native `cachyos-rate-mirrors` command, which ranks both Arch and CachyOS repositories. Other Arch-based systems use `reflector` as a fallback. Fedora refreshes its configured DNF metadata and Debian-based systems refresh their configured APT indexes; neither needs mirror-list rewriting during installation. Failure modes:
-- **Offline:** Mirror ranking fails and the existing mirror lists are kept
-- **cachyos-rate-mirrors unavailable:** CachyOS mirror ranking is skipped and the existing mirror lists are kept
-- **reflector not installed:** On non-Cachy Arch systems, it is auto-installed via `pacman -Sy reflector`; if that fails, ranking is skipped
-- **DNF or APT refresh fails:** Fedora/Debian package installation continues and reports the package-manager error later if the configured sources remain unavailable
+The installer does not change mirror lists or refresh package repositories as a separate step. If package installation fails, check that your distribution's configured repositories are reachable and refresh them using the distribution's normal tools before retrying.
 
 ### 6.2 Git / Submodule Failures
 
-The submodule `src/dots` is critical. If `git submodule update --init --recursive` fails:
+The submodule `src/dots` is critical. If it cannot be fetched:
 
 ```text
-[ERR] Missing src/dots content. Run: git submodule update --init --recursive src/dots
+[ERR] src/dots is still empty, and the installer cannot deploy without it.
 ```
 
-This is a **hard failure** — the installer cannot proceed past config deployment.
+Step 02a checks the submodule has content and fetches it again by other means before reporting this: a normal update, then a sync of the recorded URL followed by another update, then a forced update, and finally a plain clone of the URL `.gitmodules` records. So this message means all four were attempted and every one failed, which is usually a network that cannot reach GitHub or a checkout that cannot be written to.
+
+This is a **hard failure** - the installer cannot proceed past config deployment. Fetch it by hand and re-run the step:
+
+```bash
+git -C ~/caelestia-kde submodule update --init --recursive src/dots
+bash ~/caelestia-kde/scripts/02a-submodules.sh
+```
+
+The shared folder mounted at `/mnt/hgfs/` is read-only, so an install run from there cannot fetch anything: clone the repository to a writable directory first.
 
 **Behind a proxy?**
 ```bash
@@ -423,7 +949,38 @@ export https_proxy=http://proxy:port
 export ALL_PROXY=http://proxy:port
 ```
 
----
+### 6.4 The Wi-Fi Icon Never Shows Full Strength
+
+The bar reads the link's signal from the driver (`iw dev <interface> link`), not from
+NetworkManager, because the two disagree:
+
+```bash
+nmcli -t -f IN-USE,SIGNAL,SSID device wifi list | grep '^\*'   # NetworkManager's view
+iw dev wlan0 link | grep signal                                 # the driver's view
+```
+
+NetworkManager publishes the strength of the *associated* access point as a snapshot
+taken when that BSS was last scanned. On a 6 GHz link that snapshot can read far lower
+than the link really is — a station 40 cm from the router at -45 dBm was published as
+73 %, and 73 % is a three-bar icon. The same SSID's 2.4 GHz radio usually reads 100 %,
+which is what makes the icon look wrong: that is a different BSSID on a different band.
+
+So the icon now follows the driver: -50 dBm and better is full, -100 dBm and worse is
+empty, linear in between. If the driver cannot answer, the shell falls back to
+NetworkManager's percentage — that is also what the first second after the shell starts
+shows, before the first reading lands.
+
+The installer ships `iw` with the other utility packages, so a fresh install needs
+nothing. An install made before it did keeps working, on the old percentage:
+
+```bash
+sudo pacman -S iw      # Arch
+sudo dnf install iw    # Fedora
+sudo apt install iw    # Debian / Ubuntu
+```
+
+A connection whose link quality is genuinely poor still shows fewer bars, and so does a
+roaming client sitting on a weak radio of a strong network.
 
 ## 7. KDE & Plasma Specific Issues
 
@@ -442,15 +999,19 @@ The recording patch restarts `plasma-xdg-desktop-portal-kde` before each recordi
 
 ### 7.3 ydotoold (On-Screen Keyboard)
 
-`ydotoold` needs access to `/dev/uinput`. The installer:
-1. Creates `/etc/udev/rules.d/80-uinput.rules`
-2. Adds user to `input` group
-3. Creates sudoers NOPASSWD rule
+`ydotoold` needs access to `/dev/uinput`. The installer writes
+`/etc/udev/rules.d/70-uinput.rules`, which tags the device for the active session
+(`TAG+="uaccess"`). Nothing is added to a group, and the device stays closed to
+programs running outside your session.
 
 **If ydotoold doesn't work:**
-- Re-login (group changes take effect on next login)
-- Verify: `groups $USER` should include `input`
+- Check the rule exists and `/dev/uinput` is present (`sudo modprobe uinput` if not)
 - Verify: `ls -la /run/user/$(id -u)/.ydotool_socket`
+- Restart it: `systemctl --user restart ydotoold.service`
+
+Installs older than this rule put your user in the `input` group instead. The
+installer removes that membership when it replaces the old rule, and the change
+takes effect on your next login.
 
 ### 7.4 Krohnkite Tiling Disabled on Uninstall
 
@@ -463,7 +1024,294 @@ The plugin injects a temporary KWin script for window tracking. If KWin scriptin
 qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.loadScript
 ```
 
----
+### 7.6 The Login Screen (Plasma Login and SDDM)
+
+Plasma 6.6 and newer boot into Plasma Login, KDE's fork of SDDM. The two are
+configured in different places, and the installer picks a branch at install time:
+
+| | Plasma Login | SDDM |
+|---|---|---|
+| How to tell | `plasmalogin.service` is active/enabled | `sddm.service` is active/enabled |
+| Theme | none: its greeter is a Plasma shell, and it loads no SDDM theme | `/usr/share/sddm/themes/caelestia` |
+| Wallpaper | `[Greeter][Wallpaper][org.kde.image][General] Image` in `/etc/plasmalogin.conf`, pointing at a copy under the `plasmalogin` user's `wallpapers/` | `assets/background` inside the theme |
+| Colors | the `plasmalogin` user's own `~/.config/kdeglobals` plus the scheme files in its `~/.local/share/color-schemes/` | `theme.conf` inside the theme |
+| Sync helper | `/usr/local/bin/caelestia-greeter-sync` | `/usr/share/sddm/themes/caelestia/scripts/sync.sh` |
+
+The greeter runs as its own system user, which cannot read your home directory, so
+anything it shows has to be copied to it. That is what the sync helper does, and it
+runs after every wallpaper or color change through the posthook in
+`~/.config/caelestia/cli.json`. An install that switches display managers replaces
+its hook rather than stacking a second one.
+
+**The login screen shows Breeze colors or no background:**
+
+```bash
+# Which display manager is actually installed
+command -v plasmalogin sddm
+
+# Plasma Login: what the greeter is told to show
+kreadconfig6 --file /etc/plasmalogin.conf --group Greeter --group Wallpaper \
+    --group org.kde.image --group General --key Image
+
+# SDDM: which theme each config source selects, last one read wins
+grep -rn "Current=" /etc/sddm.conf /etc/sddm.conf.d/ /usr/lib/sddm/sddm.conf.d/ 2>/dev/null
+ls /usr/share/sddm/themes/caelestia/theme.conf
+
+# Re-copy the wallpaper and the scheme, then log out
+sudo /usr/local/bin/caelestia-greeter-sync          # Plasma Login
+sudo /usr/share/sddm/themes/caelestia/scripts/sync.sh   # SDDM
+```
+
+Both greeters read their configuration when they start, so a change is visible at
+the next logout rather than immediately.
+
+**After switching display managers:**
+
+The step above picks its branch when it runs, so switching the machine over leaves
+the greeter it is no longer using configured. Which manager the machine boots is read
+from `/etc/systemd/system/display-manager.service` first, so the two units still being
+enabled does not send it down the wrong branch. Switch the services over, re-run the
+step, and reboot:
+
+```bash
+sudo systemctl disable plasmalogin.service    # the manager being switched away from
+sudo systemctl enable sddm.service
+caelestia login-screen                        # configure the manager that boots now
+```
+
+`caelestia login-screen` runs the same step the installer runs, for the display
+manager the machine boots. It installs the theme in the variant that is already
+there, so an install made with `SDDM_THEME_VARIANT=mini` stays on mini.
+
+**The login screen hangs, or the greeter crash-loops:**
+
+SDDM 0.21 and newer run the greeter binary the theme asks for: `QtVersion=6` in the
+theme's `metadata.desktop` runs `sddm-greeter-qt6`, and any other value - the key
+being absent included - runs the Qt 5 greeter. Arch and CachyOS build that greeter
+into the `sddm` package with `qt5-declarative` only an optional dependency, so it
+dies on `libQt5Quick.so.5: cannot open shared object file` with exit code 127, and
+SDDM respawns it instead of drawing a login screen. Caelestia's theme is Qt 6, and
+the installer selects it only after checking that the greeter it asks for exists;
+when that check fails the theme is installed but left unselected, and the output
+names the greeter that is missing.
+
+```bash
+# What the theme asks for, and whether that greeter is installed
+grep -rn '^QtVersion' /usr/share/sddm/themes/*/metadata.desktop
+command -v sddm-greeter-qt6
+
+# What the greeter last said (the theme it was told to load, and why it stopped)
+journalctl -b -u sddm --no-pager | tail -n 40
+```
+
+A machine that is already stuck on the crashing greeter comes back from a TTY
+(`Ctrl+Alt+F3`) or by booting with `systemd.unit=multi-user.target`. Stop SDDM, make
+the theme and the greeter agree, then start it again. A theme that asks for Qt 6 needs
+`sddm-greeter-qt6`, which an SDDM older than 0.21 does not have: upgrade it, or select
+a theme that matches the greeter in `[Theme] Current`. Installing `qt5-declarative` is
+the other way out on Arch and CachyOS: it makes the Qt 5 greeter work for the Qt 5
+themes that ask for it, which is what that optional dependency is for.
+
+### 7.7 Installer Window Rules
+
+The installer writes five groups into `~/.config/kwinrulesrc` in priority order:
+`caelestia-shell-opacity` keeps the shell's own toplevels at full opacity,
+`caelestia-xwaylandvideobridge` keeps `xwaylandvideobridge` transparent and uncentered
+out of switchers and taskbars (resolving a black centered box glitch on distros like Fedora; see [issue #1006](https://github.com/caelestia-kde/caelestia/issues/1006)),
+`caelestia-pip` keeps windows whose title matches `Picture(-| )in(-| )[Pp]icture` above others,
+`caelestia-dialogs` forces centered placement on dialogs, and `caelestia-opacity` gives
+normal windows and dialogs an inactive opacity of 95 percent. Specific rules are intentionally
+indexed before catch-all rules because KWin evaluates rules top-to-bottom and resolves attribute
+conflicts using first-match-wins. Opacity is a per-activation-state key, so a window is dimmed only
+while it is not focused, and the dialog rule is the one that can disagree with a placement policy
+chosen in System Settings.
+
+`caelestia-opacity` is a catch-all: it dims every normal window and dialog nobody has
+focused, including the shell's own toplevels, which are windows too. The launcher runs
+inside the shell, so opening it takes the keyboard from Nexus without anything being
+switched away from, and Nexus dims to 95 percent over the wallpaper behind it: over a
+bright wallpaper the settings window visibly lightens while the launcher is open and
+darkens again when it closes. `caelestia-shell-opacity` matches those windows by
+`wmclass` (`quickshell`, a substring match) and forces the same keys to 100 percent.
+It has to come first in both the file and the index, because the catch-all forces the
+same opacity keys and the first rule that matches a key wins; a copy of it written
+after `caelestia-opacity` never applies.
+
+A group only takes effect if the index names it. `[General] rules=` is the list KWin
+loads its rule groups from, and a group that is present in the file but missing from
+that list is never loaded, and is removed the next time KWin saves the file. The
+installer writes the list with the user's existing rules first, followed by Caelestia's
+rules in priority order, with `count` set to the number of entries, so the user's own
+rules are preserved and keep precedence. The group names and their order are written down
+once, in `scripts/lib/kwin-rules.sh`, which both the installer step and `uninstall.sh`
+read: a second copy is how a group gets written into the file but never evaluated.
+
+To read a value back:
+
+```bash
+kreadconfig6 --file kwinrulesrc --group caelestia-shell-opacity --key opacityinactive
+kreadconfig6 --file kwinrulesrc --group caelestia-opacity --key opacityinactive
+kreadconfig6 --file kwinrulesrc --group caelestia-dialogs --key placement
+kreadconfig6 --file kwinrulesrc --group caelestia-pip --key above
+kreadconfig6 --file kwinrulesrc --group caelestia-xwaylandvideobridge --key opacityinactive
+kreadconfig6 --file kwinrulesrc --group General --key rules
+```
+
+To remove the rules, delete the five `[caelestia-...]` sections out of the file, or
+delete the key that switches each group on. A group that is deleted has to leave the
+index with it, or the list keeps a name whose group is gone and `count` no longer
+matches it. `uninstall.sh` removes the keys, strips the five names out of the list,
+rewrites `count`, and deletes both index keys once no name is left. KWin does not
+watch kwinrulesrc, so the reload is not optional:
+
+```bash
+kwriteconfig6 --file kwinrulesrc --group caelestia-shell-opacity \
+    --key opacityinactiverule --delete
+kwriteconfig6 --file kwinrulesrc --group caelestia-opacity \
+    --key opacityinactiverule --delete
+kwriteconfig6 --file kwinrulesrc --group caelestia-dialogs \
+    --key placementrule --delete
+kwriteconfig6 --file kwinrulesrc --group caelestia-pip --key aboverule --delete
+kwriteconfig6 --file kwinrulesrc --group caelestia-xwaylandvideobridge \
+    --key opacityinactiverule --delete
+qdbus6 org.kde.KWin /KWin reconfigure
+```
+
+Those commands delete each group's `*rule` key, which is the action. The match keys
+are left behind, and a group that matches but carries no action is empty as far as
+KWin is concerned: it discards such a rule once a window it matches has been
+withdrawn, so the residue is harmless.
+
+A window that is already open keeps what a rule forced on it. Opacity and keep-above
+are set on the window itself, so an open window stays dimmed or pinned after the rules
+are gone, until it is closed and reopened or another rule forces the value back. Only
+windows created after the removal start clean.
+
+The installer always applies the rules; `APPLY_WINDOW_RULES=false` is an override
+for running the step by hand (`APPLY_WINDOW_RULES=false bash ./scripts/setup.sh`).
+`WINDOW_OPACITY` changes the percentage the opacity rule writes.
+
+### 7.8 Quick Share Cannot Receive Files
+
+Before anything else, both devices have to be on the same network. A nearby device
+finds this machine through an mDNS advertisement Avahi publishes on the local link and
+connects to the address it resolves, so a phone on mobile data, on another Wi-Fi
+network, or on the same SSID behind AP/client isolation never reaches it, and a VPN on
+this machine resolves the name to an address the other device cannot route. Nothing
+here can see the other device's network, so the shell cannot tell those apart from
+something broken on this machine — and discovery over Bluetooth survives the wrong
+network, which is why a device that cannot be reached still appears in the list.
+
+Sending works and receiving does not: the other device is visible and asks to send,
+but no incoming-file notification appears and the transfer times out. Two things
+outside the shell have to be true for an incoming connection to arrive, and both fail
+silently from the shell's side — a connection that is never allowed looks exactly like
+a device that never tried.
+
+The first is the Avahi daemon. It carries the mDNS advertisement a nearby device
+resolves this machine through, so without it there is nothing to connect to. The
+second is the firewall. The transfer listener binds a fixed port so that a rule can be
+written for it ahead of time; that port has one definition,
+`shell/scripts/quickshare-port`, which the plugin build bakes into the listener and the
+install step reads to open the same port on the firewall. It reaches the setup helper
+as `--port`. A listener on a random port could only be opened while the shell runs,
+which needs administrator rights on every start.
+
+`scripts/06-services.sh` does both during a source install. A package install leaves
+them to the shell, because a package must not enable a system daemon or open a port
+behind the user's back. There, the first time Quick Share is switched on the shell
+checks the system through
+`/usr/lib/caelestia/scripts/quickshare_setup.sh --status`, and if something is missing
+asks through `pkexec` to put it right. The same helper is behind **Quick Share setup**
+on the Quick Share settings page (Nexus → Services → Quick Share), which is the way
+back if the check was declined, if the firewall changed later, or if the report reads
+`SETUP=unknown` because the rule set cannot be read without root. The row says what it
+knows: where the report cannot see the port, it reports that the port could not be
+checked again rather than claiming a success it cannot confirm.
+
+That path is not the copy that ships with the shell. A source install keeps the shell
+in the user's home, and `pkexec` given a file the user can rewrite would run the
+rewrite as root, so `scripts/08-build-shell.sh` installs the two helpers it elevates
+(`quickshare_setup.sh` and `ollama_setup.sh`) into `/usr/lib/caelestia/scripts/` as
+root's own. The shell only ever elevates a copy root owns and nobody else can write,
+and says the helper is missing — with a reinstall as the remedy — when there is none.
+An existing checkout that has not been reinstalled since this changed reads the same
+way: run `update.sh`, or the installer, once.
+
+To see what the machine reports:
+
+```bash
+bash /usr/lib/caelestia/scripts/quickshare_setup.sh --status --port 65000
+```
+
+The report is four lines. `AVAHI` is `active`, `inactive`, `absent` or `unknown`,
+`FIREWALL` names the manager in charge (`none`, `firewalld` or `ufw`), `PORT` is
+`allowed`, `blocked` or `unknown`, and `SETUP` is `ok`, `needed` or `unknown`. Only
+`needed` is acted on automatically; ufw reports `PORT=unknown` because reading its
+rule set needs root, and guessing there would raise a password prompt for nothing.
+
+To do it by hand, run the helper as root:
+
+```bash
+sudo /usr/lib/caelestia/scripts/quickshare_setup.sh --port 65000
+```
+
+It is idempotent: it enables and starts `avahi-daemon.service` (falling back to
+`avahi-daemon.socket`, which is what Debian uses) and adds the transfer port plus mDNS
+to whichever of firewalld or ufw is running. What it does not touch is a hand-rolled
+`nftables` or `iptables` rule set, which is invisible without root — those have to
+allow inbound TCP 65000 and UDP 5353 themselves. Equivalently, by manager:
+
+```bash
+systemctl enable --now avahi-daemon.service                       # the daemon
+
+firewall-cmd --permanent --add-port=65000/tcp                     # firewalld, with
+firewall-cmd --permanent --add-service=mdns                       # mDNS for discovery
+firewall-cmd --reload
+
+ufw allow 65000/tcp                                               # ufw
+ufw allow 5353/udp
+```
+
+Port 65000 rather than anything lower because it sits above Linux's default ephemeral
+range (32768–60999), so the listener never collides with the local port of an outgoing
+connection. If it is taken by something else, Quick Share reports that it could not
+listen and stays off.
+
+Sending: both devices now show a four-digit code, and the sending side will not send
+until you confirm that the two match. The code is derived from the handshake itself, so
+a device that relayed the connection between two others ends up with a different code
+on each end, which is the point of comparing them. Decline the prompt if the code on
+the receiving device is not the one shown here — that is a device in the middle, not the
+one you picked. Nothing leaves the machine before you confirm, and a request left
+unanswered is dropped after two minutes.
+
+### 7.9 Plasma Audio Visualizer
+
+- **Not installed:**
+  The desktop visualizer is a Plasma widget from `plasma-audio-visualizer`, not a shell module. Install it first; on Arch it is in the AUR (`yay -S plasma-audio-visualizer`).
+- **Empty config:**
+  The shell drives the widget through presets such as `Double Reverse` and `Single`. Editing the widget in Plasma saves the result as `User Defined`, which the shell reapplies. A fresh install can leave the preset on *User Defined* with nothing shown; pick another preset to bring it back.
+- **Hidden by wallpaper:**
+  The widget draws on the Plasma desktop. When the Quickshell wallpaper layer is on (`background.wallpaperEnabled`), the widget is hidden behind it, hence disabled automatically. In wallpaper settings, change wallpaper engine to skwd/plasma to use it.
+- **Customize:**
+  To use the visualizer without the shell's presets, turn it off in the shell and add the widget from Plasma's widget picker. To keep the shell's preset but change the look, pick Single or Double Reverse here, then edit the widget in Plasma's edit mode (right-click the desktop, *Edit Plasma Widgets*).
+
+### 7.10 skwd-wall
+
+`skwd-wall-v2` renders animated and video wallpapers. Without it, the shell falls back to its own wallpaper engine and the skwd-specific settings (tags, filters, effect pipelines) are unavailable. Installation is automatic; if that fails, see [liixini/skwd-wall](https://github.com/liixini/skwd-wall).
+
+The shell treats the engine as present when the `skwd-walld` user service is active:
+
+```bash
+systemctl --user status skwd-walld
+```
+
+The service can take more than one restart to register after the first install. To run the renderer by hand:
+
+```bash
+skwd-wall-v2
+```
 
 ## 8. Post-Install Issues
 
@@ -497,13 +1345,13 @@ If the script is killed with **SIGKILL** (not SIGTERM), lock files may persist:
 
 | Lock File | Script |
 |---|---|
-| `${XDG_RUNTIME_DIR:-/tmp}/caelestia-setup.lock` | `setup.sh` |
-| `${XDG_RUNTIME_DIR:-/tmp}/caelestia-update.lock` | `update.sh` |
+| `${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/caelestia-$UID/setup.lock` | `setup.sh` |
+| `${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/caelestia-$UID/update.lock` | `update.sh` |
 
 **Always use Ctrl+C (SIGINT)** which is handled gracefully. Remove stale locks:
 ```bash
-rm -f "${XDG_RUNTIME_DIR:-/tmp}/caelestia-setup.lock"
-rm -f "${XDG_RUNTIME_DIR:-/tmp}/caelestia-update.lock"
+rm -f "${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/caelestia-$UID/setup.lock"
+rm -f "${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/caelestia-$UID/update.lock"
 ```
 
 ### 8.5 Update.sh Fails
@@ -536,30 +1384,72 @@ the files on disk.
 Choosing **ignore** at the prompt continues anyway. The plugin build may then fail with Wayland or
 ABI errors that look unrelated to the upgrade.
 
-### 8.7 Prebuilt Shell Download Is Rejected
+### 8.7 Checksums on Downloaded Artifacts
 
-`08-build-shell.sh` extracts the release tarball straight over `$HOME`, so it first checks the
-download against the `.sha256` published beside it:
+Three artifacts the installer fetches are checked against the `.sha256` published beside them. A
+mismatch always means the file is not used. What happens when a release publishes no checksum at
+all depends on what the artifact is for:
+
+| Artifact | No published checksum | On mismatch |
+|---|---|---|
+| Prebuilt shell tarball (`08-build-shell.sh`, extracted over `$HOME`) | Warns and extracts | Builds the shell locally instead |
+| Prebuilt installer binary (executed straight away) | Compiles the installer locally instead | Same |
+| Prebuilt CAVA SDK (unpacked into `/usr` as root) | Warns and unpacks | Not unpacked; `libcava` comes from the repositories instead |
+
+Messages to expect:
 
 | Message | Meaning |
 |---|---|
 | `Prebuilt shell artifacts match the published checksum.` | Normal: the prebuilt archive is installed. |
 | `No published checksum for ... - extracting without verification.` | The release predates checksums. The install continues. |
+| `No published checksum for the prebuilt installer - compiling locally.` | The release predates checksums. The installer is built from source instead. |
+| `No published checksum for ... - unpacking without verification.` | The CAVA release publishes no checksums. The SDK is unpacked anyway. |
 | `No prebuilt shell artifacts published for <tag> (Qt <abi>) - falling back to a local build.` | The release carries no archive for this Qt feature version. The step builds locally instead. |
-| `Checksum mismatch for ...` | The download was truncated or tampered with. The step falls back to building the shell locally. |
+| `Checksum mismatch for ...` | The download was truncated or tampered with. That artifact is not used. |
 
-A mismatch is not fatal: the installer builds from source instead, which takes longer but cannot
-unpack a damaged tree into `~/.local/lib/qt6/qml`.
+A mismatch is not fatal for any of the three: each one has somewhere else to get what it needs,
+and none of them is used in a damaged state.
 
----
+The CAVA SDK is the one artifact that still installs without verification. Its releases come from
+a separate repository that publishes no checksums, and refusing them would only move the same work
+to the `libcava` package. Publishing an `<asset>.sha256` in that repository turns verification on
+with no change here.
+
+The archive is also only used for the revision it was built from: `main` sitting on its remote
+tip, or a checkout that is exactly the released tag (an update pinned to a version). A branch, a
+stale `main`, or a checkout carrying commits of its own builds locally, because the archive would
+replace that tree with the release's. `main` that has moved on since its last release cannot be
+told apart from that release, so it is installed as the release its `version.env` names.
 
 ## 9. Uninstall Issues
 
-### 9.1 No Backups Available
+### 9.1 Uninstalling from the Shell
+
+Settings > About > Uninstall Caelestia opens the uninstaller in a terminal, where it
+asks for confirmation of its own. The button finds the script by looking where a
+checkout is expected, in this order:
+
+1. `$CAELESTIA_DIR/uninstall.sh`
+2. `~/caelestia-kde/uninstall.sh`
+3. `$(cat ~/.config/quickshell/caelestia/.checkout)/uninstall.sh`
+4. `~/.config/caelestia-update/repo/uninstall.sh`
+5. `~/.cache/caelestia-update-repo/uninstall.sh`
+
+The third is the checkout the running shell was installed from, recorded by the
+installer. It is what makes a clone that is not named `~/caelestia-kde` - a manual
+`git clone` anywhere else - still uninstallable from here; reinstall or update once
+for an install that predates that recording. It is tried after `~/caelestia-kde`
+because that is where an install's backups live, and the uninstaller restores from
+its own checkout's `backups/`.
+
+A packaged install has no script, so the row names the command that removes it instead
+(`sudo pacman -Rns caelestia-kde`, or the `dnf`/`apt-get` equivalent).
+
+### 9.2 No Backups Available
 
 Backups are stored in `$BUNDLE_DIR/backups/YYYYMMDD_HHMMSS/`. If you moved or deleted the repository, backups are gone.
 
-### 9.2 konsave Restore Fails
+### 9.3 konsave Restore Fails
 
 If the `.knsv` archive is corrupted or konsave can't be installed:
 - Falls back to manual restore of individual config files
@@ -568,36 +1458,42 @@ If the `.knsv` archive is corrupted or konsave can't be installed:
 **Expected warning when restoring a Caelestia backup:**
 > *"The selected backup contains Caelestia configurations. Restoring this backup will NOT revert to a clean KDE desktop!"*
 
-### 9.3 Shell RC Files Not Cleaned
+### 9.4 Shell RC Files Not Cleaned
 
 The uninstaller uses state files (`shellrc/bashrc.state`, etc.) to determine whether to restore or remove shell config files. If these are missing (older installer version), a fallback `sed` cleanup removes `QML2_IMPORT_PATH` and `CAELESTIA_LIB_DIR` lines.
 
-### 9.4 Package Removal Leaves Dependencies
+### 9.5 The Login Shell Is Not Changed Back
+
+The installer only changes the login shell to `fish` when it can record the previous one in `backups/YYYYMMDD_HHMMSS/previous_shell.txt`. The uninstaller only reverses that with the same file. With no backup there is no record that the shell was ever changed, so it is left exactly as it is and the run reports:
+
+> *"No shell backup was recorded, so the login shell (/usr/bin/fish) is left as it is."*
+
+### 9.6 Package Removal Leaves Dependencies
 
 Package removal is optional. It uses `yay -Rns` / `dnf remove` which does NOT remove:
-- Dependencies pulled in automatically (unless `-s` handles it)
+- Dependencies pulled in automatically (unless `-s` handles them)
 - Packages installed outside the defined lists
 - `base-devel` or build tools that existed before install
 
-### 9.5 Input Group Membership Persists
+### 9.6 Legacy Input Group Membership
 
-The uninstaller runs `sudo gpasswd -d $USER input`. This only works if the user was added to the group during installation, and takes effect on next login.
+Installs from before the `/dev/uinput` rule moved to `TAG+="uaccess"` added the
+user to the `input` group. The installer removes that membership when it finds the
+old `/etc/udev/rules.d/80-uinput.rules`, and the uninstaller runs
+`sudo gpasswd -d $USER input`. Either way it takes effect on next login.
 
-### 9.6 Failed Patches Tracking
+### 9.7 What the Uninstaller Keeps
 
-Failed patches are logged to:
-```text
-$XDG_CACHE_HOME/caelestia-kde/failed_patches.txt
-```
+The uninstaller removes the install and its last traces, but keeps what is the
+user's own:
 
-Possible entries:
-- `Caelestia CLI Hyprctl Mock Patch`
-- `Caelestia CLI Record/Dolphin Patch`
-- `Caelestia CLI Theme Sequence Patch`
-
-These are **cosmetic** — the shell works without them, but certain features (screenshot, recording, terminal colors) may be degraded.
-
----
+- `~/.config/caelestia/shell.json`, `keybinds.json` and `cli.json` - the shell's
+  settings, so a reinstall keeps them. `stolen-shortcuts.json` and
+  `stolen-screen-edges.json` are removed: they are crash recovery that only the
+  running shell can act on, and with the shell gone they would strand the KDE
+  shortcuts it took.
+- `~/.config/caelestia-update/` and `~/.cache/caelestia-update-repo` - the updater's
+  checkout and cache. Remove them yourself with the command in [10.1](#101-fixing-caelestia-updater-recommended).
 
 ## 10. Update Issues
 
@@ -619,12 +1515,35 @@ You can simply run `bash update.sh` in the cloned repo folder (~/caelestia-kde) 
 
 Run the following command to simply install the latest shell using installer.
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ladybug-me/caelestia-kde/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/caelestia-kde/caelestia/main/install.sh | sh
 ```
 
 - If it gives an error due to already present `~/caelestia-kde` directory in your pc, then remove that directory first and then run the above command. **Make sure to copy the `backups/` folder somewhere and then put it back here after installation completes.**
 
----
+### 10.4 The Updates page says it could not check
+
+The check reports a failure instead of "You're up to date" when it cannot get
+an answer, and leaves the last successful result untouched. The status line
+under the notice names the reason and says when the check last succeeded:
+
+```bash
+# Is GitHub reachable at all?
+git ls-remote --exit-code --heads https://github.com/caelestia-kde/caelestia.git main
+
+# The bare clone the check reads from, and its freshness
+git -C ~/.cache/caelestia-update-repo log --oneline -1 main
+```
+
+A stale or broken clone is repaired by deleting it, as in
+[10.1](#101-fixing-caelestia-updater-recommended). The check runs again the next
+time the page is opened, or immediately with **Try again**.
+
+### 10.5 Update checking is off
+
+With periodic checking off, the taskbar indicator stays hidden and the page
+answers a manual **Check** only. **Turn on** in the Updates page restores both,
+and the same switch lives under Panels → Taskbar → Update indicator, which opens
+the page for you when checking is off.
 
 ## 11. Diagnostic Commands Reference
 
@@ -635,7 +1554,7 @@ curl -fsSL https://raw.githubusercontent.com/ladybug-me/caelestia-kde/main/insta
 qdbus6 org.kde.KWin /KWin reconfigure
 
 # Check user services
-systemctl --user list-units | grep -E 'caelestia|quickshell|kde-material-you'
+systemctl --user list-units | grep -E 'caelestia|quickshell'
 
 # Check KWin plugins
 kwriteconfig6 --file kwinrc --group Plugins --key list
@@ -659,9 +1578,6 @@ kreadconfig6 --file kscreenlockerrc --group Greeter --key WallpaperPlugin
 # View failed packages log
 cat $XDG_CACHE_HOME/caelestia-kde/failed_packages.txt 2>/dev/null
 
-# View failed patches log
-cat $XDG_CACHE_HOME/caelestia-kde/failed_patches.txt 2>/dev/null
-
 # View installer build log
 cat /tmp/caelestia_build.log 2>/dev/null | tail -60
 
@@ -673,7 +1589,7 @@ cat /tmp/caelestia_installer_err.log 2>/dev/null
 
 ```bash
 # Test submodule availability
-git ls-remote https://github.com/ladybug-me/caelestia-kde.git HEAD
+git ls-remote https://github.com/caelestia-kde/caelestia.git HEAD
 
 # Test AUR access
 curl -sI https://aur.archlinux.org/rpc/?v=5\&type=info\&arg[]=quickshell-git | head -5
@@ -692,19 +1608,18 @@ update-desktop-database ~/.local/share/applications/
 systemctl --user restart plasma-plasmashell
 ```
 
----
-
 ## Quick Reference: Common Fixes
 
 | Problem | Quick Fix |
 |---|---|
 | Shell won't start | `quickshell -d -n -p ~/.config/quickshell/caelestia/shell.qml` |
 | Lock screen not active | `kwriteconfig6 --file plasmashellrc --group "Shell" --key "ShellPackage" "caelestia.desktop"` |
-| Stale lock file | `rm -f "${XDG_RUNTIME_DIR:-/tmp}/caelestia-setup.lock"` |
+| Stale lock file | `rm -f "${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/caelestia-$UID/setup.lock"` |
 | Missing QML module | `export QML2_IMPORT_PATH="$HOME/.local/lib/qt6/qml"` |
 | No window thumbnails | `kbuildsycoca6 --noincremental && qdbus6 org.kde.KWin /KWin reconfigure` |
 | Git submodule error | `git submodule update --init --recursive src/dots` |
-| Colors not updating | `systemctl --user restart kde-material-you-colors.service` |
+| Colors not updating | Run `caelestia scheme set -n dynamic`, and check that `plasma-apply-colorscheme --list-schemes` names Matugen |
 | Installer compiles but flashes/exits | Check `/tmp/caelestia_installer_err.log` |
 | Recording not working | Verify `gpu-screen-recorder` is installed |
 | Screenshot not working | Verify `spectacle` is installed |
+| Krita/Inkscape crashes on copy/paste | `systemctl --user stop cliphist.service` stops the crash; update Caelestia so `wl-clip-persist` runs with the `--all-mime-type-regex` filter (see 3.9) |

@@ -1,3 +1,5 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import Quickshell
 import Quickshell.Bluetooth
@@ -6,60 +8,183 @@ QtObject {
     property ShellScreen screen
     property bool isWindow
     property bool animatingContainer
-    property int currentPageIdx
-    property list<int> subPageIdxStack
+    property int currentPageIdx: -1
+    property var subPageKeyStack: []
     property bool searchOpen
     property string searchQuery
 
     property string selectedWallpaperCategory
-    property string wallpaperFilterType: "all"
     property BluetoothDevice selectedBtDevice
     property DesktopEntry selectedApp
+    property string selectedOutput
     property int editingVpnIndex: -1
     property string selectedNetworkSsid
+    property string selectedNetworkUuid
     property string selectedEthernetInterface
     property bool networkDetailsFromSaved
 
-    // Pre-filled SSID for AddNetworkPage when password is needed for an unsaved network
     property string pendingNetworkSsid: ""
 
-    // A sub-page to open as soon as the page it belongs to has been built.
-    // Changing page and opening a sub-page of the new page cannot be done with
-    // openSubPage: the swap is animated, so the outgoing page is still the one
-    // listening and it either opens a sub-page of its own at that index or, if
-    // it has none, cancels the request. The incoming page collects this.
-    property int pendingSubPageIdx: -1
+    property string pendingSubPageKey: ""
+    property string activeSubPageKey: ""
+    property bool compact: false
+    property bool compactSubcategories: false
+    property bool sidePane: false
 
     signal close
-    signal subPageOpened(idx: int)
+    signal subPageOpened(target: string)
     signal subPageClosed
+    signal subPagesCleared
+    signal subCategorySelected(target: string)
 
-    function openSubPage(idx: int): void {
-        subPageIdxStack.push(idx);
-        subPageOpened(idx);
+    function defaultPageForCategory(pageIdx: int): string {
+        if (!sidePane && !PageCompRegistry.isSinglePageCategory(pageIdx))
+            return "hub";
+
+        return PageCompRegistry.defaultPageForCategory(pageIdx);
     }
 
-    // Navigation that changes page, such as a search result. Landing on the
-    // page that is already showing still opens immediately: nothing to wait for.
-    function goToSubPage(pageIdx: int, subPageIdx: int): void {
-        if (pageIdx === currentPageIdx) {
-            pendingSubPageIdx = -1;
-            if (subPageIdx >= 0)
-                openSubPage(subPageIdx);
+    function parentSubCategory(pageIdx: int, key: string): string {
+        return PageCompRegistry.parentPageFor(pageIdx, key);
+    }
+
+    function rootPageFor(pageIdx: int, target: string): string {
+        if (PageCompRegistry.isSinglePageCategory(pageIdx))
+            return PageCompRegistry.defaultPageForCategory(pageIdx);
+        return sidePane ? parentSubCategory(pageIdx, target) : "hub";
+    }
+
+    function selectSubCategory(key: string): void {
+        activeSubPageKey = key;
+        pendingSubPageKey = "";
+        subPageKeyStack.length = 0;
+        subCategorySelected(key);
+    }
+
+    function openSubPage(target: string): void {
+        if (sidePane && compact)
+            compactSubcategories = true;
+        subPageKeyStack.push(target);
+        subPageOpened(target);
+    }
+
+    function goToPage(pageIdx: int): void {
+        if (pageIdx !== currentPageIdx) {
+            currentPageIdx = pageIdx;
             return;
         }
+        pendingSubPageKey = "";
+        activeSubPageKey = defaultPageForCategory(currentPageIdx);
+        subCategorySelected(activeSubPageKey);
+        if (subPageKeyStack.length === 0)
+            return;
+        subPageKeyStack.length = 0;
+        subPagesCleared();
+    }
+
+    function enterCompactPage(): void {
+        if (sidePane)
+            compactSubcategories = true;
+    }
+
+    function exitCompactPage(): void {
+        compactSubcategories = false;
+    }
+
+    function goToSubPage(pageIdx: int, subPageKey: string): void {
+        if (!sidePane) {
+            if (pageIdx !== currentPageIdx) {
+                pendingSubPageKey = subPageKey;
+                currentPageIdx = pageIdx;
+            } else {
+                goToPage(pageIdx);
+                // A single-page category is already showing its only page.
+                if (subPageKey !== "" && subPageKey !== "hub" && subPageKey !== defaultPageForCategory(pageIdx))
+                    openSubPage(subPageKey);
+            }
+            return;
+        }
+
+        if (pageIdx === currentPageIdx) {
+            pendingSubPageKey = "";
+            if (compact)
+                compactSubcategories = true;
+            if (subPageKey !== "") {
+                const parentKey = parentSubCategory(pageIdx, subPageKey);
+                selectSubCategory(parentKey);
+                if (subPageKey !== parentKey) {
+                    openSubPage(subPageKey);
+                }
+            } else {
+                goToPage(pageIdx);
+            }
+            return;
+        }
+        pendingSubPageKey = subPageKey;
         currentPageIdx = pageIdx;
-        // After the page change: changing page clears whatever was pending.
-        pendingSubPageIdx = subPageIdx;
     }
 
     function closeSubPage(): void {
         subPageClosed();
-        subPageIdxStack.pop();
+        subPageKeyStack.pop();
+    }
+
+    function openNetworkDetail(ssid: string, uuid: string, fromSaved: bool): void {
+        selectedNetworkSsid = ssid;
+        selectedNetworkUuid = uuid;
+        networkDetailsFromSaved = fromSaved;
+        openSubPage("networkDetail");
+    }
+
+    Component.onCompleted: {
+        if (currentPageIdx < 0) {
+            currentPageIdx = 0;
+        } else if (activeSubPageKey === "") {
+            if (pendingSubPageKey !== "") {
+                const target = pendingSubPageKey;
+                pendingSubPageKey = "";
+                activeSubPageKey = rootPageFor(currentPageIdx, target);
+                subPageKeyStack.length = 0;
+                if (target !== activeSubPageKey) {
+                    subPageKeyStack.push(target);
+                }
+            } else {
+                activeSubPageKey = defaultPageForCategory(currentPageIdx);
+            }
+            subCategorySelected(activeSubPageKey);
+        }
     }
 
     onCurrentPageIdxChanged: {
-        subPageIdxStack.length = 0;
-        pendingSubPageIdx = -1;
+        if (currentPageIdx < 0)
+            return;
+        compactSubcategories = compact;
+        subPageKeyStack.length = 0;
+        if (pendingSubPageKey !== "") {
+            const target = pendingSubPageKey;
+            pendingSubPageKey = "";
+            activeSubPageKey = rootPageFor(currentPageIdx, target);
+            if (target !== activeSubPageKey) {
+                subPageKeyStack.push(target);
+            }
+        } else {
+            activeSubPageKey = defaultPageForCategory(currentPageIdx);
+        }
+        subCategorySelected(activeSubPageKey);
+    }
+
+    onSearchOpenChanged: {
+        if (searchOpen && compact && compactSubcategories) {
+            exitCompactPage();
+        }
+    }
+
+    onSidePaneChanged: {
+        if (currentPageIdx < 0)
+            return;
+        compactSubcategories = false;
+        subPageKeyStack.length = 0;
+        activeSubPageKey = defaultPageForCategory(currentPageIdx);
+        subCategorySelected(activeSubPageKey);
     }
 }

@@ -1,69 +1,33 @@
 #!/usr/bin/env bash
-# ==============================================================
-#   Caelestia - installer
-#
-#   Original Hyprland dots: Caelestia
-#   KDE port and modifications: ladybug-me
-#   Co-maintainer: 0xSolanaceae
-#   Installer behavior: idempotent and safe for reruns
-# ==============================================================
 
 set -euo pipefail
 export CAELESTIA_SETUP_RUNNING=1
 
-# Hide cursor immediately for cleaner output
 tput civis 2>/dev/null || true
 
-# -- Paths ---------------------------------------------------------------------
 BUNDLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPTS_DIR="$BUNDLE_DIR/scripts"
 export BUNDLE_DIR
 export INSTALL_START_EPOCH="$(date +%s)"
 
-# Prevent concurrent runs.
-exec 9>"${XDG_RUNTIME_DIR:-/tmp}/caelestia-setup.lock"
+export PATH="$HOME/.local/bin:$PATH"
+
+# shellcheck source=scripts/lib/runtime-dir.sh
+source "$SCRIPTS_DIR/lib/runtime-dir.sh"
+
+caelestia_runtime_dir || {
+    echo "Could not secure the runtime directory for the setup lock." >&2
+    exit 1
+}
+exec 9>"$CAELESTIA_RUNTIME_DIR/setup.lock"
 flock -n 9 || { echo "Another Caelestia setup is already running."; exit 1; }
 
-detect_base_distro() {
-    local detected="unknown"
-
-    if [[ -f /etc/os-release ]]; then
-       # shellcheck disable=SC1091
-        . /etc/os-release
-        case "$ID" in
-            arch|cachyos|endeavouros|manjaro|artix)
-                detected="arch"
-                ;;
-            fedora|nobara|bazzite|rhel|centos|almalinux|rocky)
-                detected="fedora"
-                ;;
-            debian|ubuntu|pop|mint|kali|raspbian|elementary|zorin|deepin|devuan)
-                detected="debian"
-                ;;
-            *)
-                if echo "${ID_LIKE:-}" | grep -iq "arch"; then
-                    detected="arch"
-                elif echo "${ID_LIKE:-}" | grep -iq "fedora"; then
-                    detected="fedora"
-                elif echo "${ID_LIKE:-}" | grep -iq -E "debian|ubuntu"; then
-                    detected="debian"
-                fi
-                ;;
-        esac
-    fi
-
-    if [[ "$detected" == "unknown" ]]; then
-        if command -v pacman >/dev/null 2>&1; then
-            detected="arch"
-        elif command -v dnf >/dev/null 2>&1; then
-            detected="fedora"
-        elif command -v apt-get >/dev/null 2>&1; then
-            detected="debian"
-        fi
-    fi
-
-    echo "$detected"
-}
+# shellcheck source=scripts/lib/privileges.sh
+source "$SCRIPTS_DIR/lib/privileges.sh"
+# shellcheck source=scripts/lib/packages.sh
+source "$SCRIPTS_DIR/lib/packages.sh"
+# shellcheck source=scripts/lib/download.sh
+source "$SCRIPTS_DIR/lib/download.sh"
 
 run_arch_pacman_install() {
     local -a pkgs=("$@")
@@ -73,28 +37,15 @@ run_arch_pacman_install() {
         return 0
     fi
 
-    if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
-        pacman -Sy --noconfirm >/dev/null 2>&1 || echo "[WARN]  Failed to refresh pacman sources before install. Continuing..."
-        pacman "${pacman_args[@]}" "${pkgs[@]}" && return 0
-
-        echo "[WARN]  pacman install failed. Refreshing sources and retrying once..."
-        pacman -Sy --noconfirm >/dev/null 2>&1 || true
-        pacman "${pacman_args[@]}" "${pkgs[@]}"
-        return $?
-    fi
-
-    sudo pacman -Sy --noconfirm >/dev/null 2>&1 || echo "[WARN]  Failed to refresh pacman sources before install. Continuing..."
-    sudo pacman "${pacman_args[@]}" "${pkgs[@]}" && return 0
+    caelestia_sudo pacman -Sy --noconfirm >/dev/null 2>&1 || echo "[WARN]  Failed to refresh pacman sources before install. Continuing..."
+    caelestia_sudo pacman "${pacman_args[@]}" "${pkgs[@]}" && return 0
 
     echo "[WARN]  pacman install failed. Refreshing sources and retrying once..."
-    sudo pacman -Sy --noconfirm >/dev/null 2>&1 || true
-    sudo pacman "${pacman_args[@]}" "${pkgs[@]}"
+    caelestia_sudo pacman -Sy --noconfirm >/dev/null 2>&1 || true
+    caelestia_sudo pacman "${pacman_args[@]}" "${pkgs[@]}"
 }
 
-export BASE_DISTRO="$(detect_base_distro)"
-
 normalize_line_endings_first() {
-    export BASE_DISTRO="$(detect_base_distro)"
     local -a crlf_files=()
     local convert_choice=""
 
@@ -121,10 +72,10 @@ normalize_line_endings_first() {
                             run_arch_pacman_install dos2unix || return 1
                             ;;
                         fedora)
-                            sudo dnf install -y dos2unix || return 1
+                            caelestia_sudo dnf install -y dos2unix || return 1
                             ;;
                         debian)
-                            sudo apt-get update && sudo apt-get install -y dos2unix || return 1
+                            caelestia_sudo apt-get update && caelestia_sudo apt-get install -y dos2unix || return 1
                             ;;
                         *)
                             echo "[WARN]  Could not detect distro for automatic dos2unix installation."
@@ -160,25 +111,14 @@ fi
 
 BIN="$BUNDLE_DIR/caelestia-install"
 
-# The TUI data version of this checkout. The prebuilt binary is only reused
-# when it reports the same version - a stale release binary would otherwise
-# render old screens and ignore new menu actions (e.g. action_review).
 tui_version() {
     tr -d '[:space:]' < "$BUNDLE_DIR/installer/data/tui.version" 2>/dev/null || true
 }
 
-# The release tag this checkout corresponds to. The prebuilt installer is
-# attached to the release for this VERSION.
 release_tag() {
     sed -nE 's/^[[:space:]]*VERSION=//p' "$BUNDLE_DIR/.github/version.env" 2>/dev/null | tr -d '[:space:]'
 }
 
-# Try to fetch a prebuilt installer binary from the version release so we
-# don't have to compile the TUI on the user's machine. The binary is built by
-# the build-installer job in .github/workflows/version-release.yml and
-# attached to the release tagged with this checkout's VERSION. Falls back to
-# compiling when unavailable (no curl, offline, unsupported arch), when it
-# does not match this checkout's TUI version, or when forced via env var.
 try_download_prebuilt_installer() {
     local arch
     arch="$(uname -m)"
@@ -187,23 +127,31 @@ try_download_prebuilt_installer() {
         *) return 1 ;;
     esac
 
-    local version tag tmp_bin url
+    local version tag tmp_bin url status=0
     version="$(tui_version)"
     tag="$(release_tag)"
-    # The release asset name embeds the TUI data version, so a matching
-    # binary is downloaded directly and a stale/old release simply 404s.
-    # This never executes an unknown binary, which is what hung the old
-    # "--version" check (old builds launched the full TUI instead).
     [[ -n "$version" && -n "$tag" ]] || return 1
     tmp_bin="$(mktemp)"
-    url="https://github.com/ladybug-me/caelestia-kde/releases/download/${tag}/caelestia-install-${arch}-v${version}"
-    if curl -fsSL --connect-timeout 10 --max-time 30 "$url" -o "$tmp_bin" 2>/dev/null; then
-        chmod +x "$tmp_bin"
-        printf '%s\n' "$tmp_bin"
-        return 0
+    url="https://github.com/caelestia-kde/caelestia/releases/download/${tag}/caelestia-install-${arch}-v${version}"
+    if ! fetch_asset "$url" "$tmp_bin" --max-time 30 2>/dev/null; then
+        rm -f "$tmp_bin"
+        return 1
     fi
-    rm -f "$tmp_bin"
-    return 1
+
+    verify_download "$url" "$tmp_bin" || status=$?
+    if [[ "$status" -eq 1 ]]; then
+        echo "[WARN]  Checksum mismatch for the prebuilt installer - compiling locally." >&2
+    elif [[ "$status" -eq 2 ]]; then
+        echo "[WARN]  No published checksum for the prebuilt installer - compiling locally." >&2
+    fi
+    if [[ "$status" -ne 0 ]]; then
+        rm -f "$tmp_bin"
+        return 1
+    fi
+
+    chmod +x "$tmp_bin"
+    printf '%s\n' "$tmp_bin"
+    return 0
 }
 
 start_spinner() {
@@ -229,10 +177,18 @@ stop_spinner() {
 }
 
 start_spinner
+# The full cleanup trap lands later; until then a Ctrl-C must still stop
+# the spinner and hand the terminal back.
+trap 'stty sane 2>/dev/null || true; tput cnorm 2>/dev/null || true; kill "${SPINNER_PID:-}" 2>/dev/null || true' EXIT
 
 PREBUILT_BIN=""
 if [[ -z "${CAELESTIA_FORCE_BUILD_INSTALLER:-}" ]] && command -v curl >/dev/null 2>&1; then
     PREBUILT_BIN="$(try_download_prebuilt_installer || true)"
+fi
+
+if [[ -n "$PREBUILT_BIN" && ! -x "$PREBUILT_BIN" ]]; then
+    echo "[WARN]  The prebuilt installer download did not produce a binary; compiling locally." >&2
+    PREBUILT_BIN=""
 fi
 
 if [[ -n "$PREBUILT_BIN" ]]; then
@@ -247,14 +203,11 @@ else
     else
         echo "[INFO]  No prebuilt binary for v$(tui_version) - compiling locally."
     fi
-    # Reuse a previously compiled binary that matches this checkout's TUI
-    # version so repeated runs don't recompile every time.
     STAMP="$BUNDLE_DIR/installer/build/.tui_stamp"
     if [[ -x "$BIN" && -f "$STAMP" ]] && [[ "$(cat "$STAMP" 2>/dev/null)" == "$(tui_version)" ]]; then
         stop_spinner
         echo "[OK]    Reusing compiled installer binary (matches TUI version)."
     else
-        # Compiling needs build tools; install whatever is missing first.
         MISSING_PKGS=()
         if ! command -v g++ >/dev/null 2>&1; then MISSING_PKGS+=("g++"); fi
         if ! command -v cmake >/dev/null 2>&1; then MISSING_PKGS+=("cmake"); fi
@@ -265,9 +218,9 @@ else
             if [[ "$BASE_DISTRO" == "arch" ]]; then
                 run_arch_pacman_install base-devel cmake
             elif [[ "$BASE_DISTRO" == "fedora" ]]; then
-                sudo dnf install -y gcc-c++ cmake make
+                caelestia_sudo dnf install -y gcc-c++ cmake make
             elif [[ "$BASE_DISTRO" == "debian" ]]; then
-                sudo apt-get update && sudo apt-get install -y build-essential g++ cmake make
+                caelestia_sudo apt-get update && caelestia_sudo apt-get install -y build-essential g++ cmake make
             else
                 echo "Could not auto-install build tools. Please install manually: ${MISSING_PKGS[*]}"
                 exit 1
@@ -276,7 +229,13 @@ else
         fi
 
         BUILD_DIR="$BUNDLE_DIR/installer/build"
-        BUILD_LOG="/tmp/caelestia_build.log"
+        BUILD_LOG="$(mktemp "${TMPDIR:-/tmp}/caelestia-build.XXXXXX.log")"
+        # Configure from a clean directory: cmake bakes absolute source paths into
+        # CMakeCache.txt and refuses to configure over a cache naming a different tree.
+        # One checkout routinely has two names here - ~/Desktop/caelestia-kwin and
+        # /mnt/c/.../caelestia-kwin are the same tree - and reusing that cache fails the
+        # build outright instead of falling back to anything.
+        rm -rf "$BUILD_DIR"
         mkdir -p "$BUILD_DIR"
         (
             cd "$BUILD_DIR" || exit 1
@@ -303,8 +262,9 @@ else
 fi
 
 cleanup_install_state() {
-    # Always reset the terminal state on exit, regardless of how we exited (Ctrl+C, crash, etc.)
     stty sane 2>/dev/null || true
+    kill "${SPINNER_PID:-}" 2>/dev/null || true
+    rm -f "${BUILD_LOG:-}" "${ERR_LOG:-}" 2>/dev/null || true
     tput cnorm 2>/dev/null || true
     printf '\033[0m\033[?1049l\033[?25h' 2>/dev/null || true
 
@@ -339,12 +299,15 @@ if [[ ! -x "$BIN" ]]; then
 fi
 
 _installer_start=$(date +%s)
-"$BIN" "$@" 2>/tmp/caelestia_installer_err.log
-_exit_code=$?
+# Under set -e a plain invocation would kill this script on the installer's first
+# non-zero exit, making the diagnostic block below unreachable exactly when it matters.
+ERR_LOG="$(mktemp "${TMPDIR:-/tmp}/caelestia-installer-err.XXXXXX.log")"
+_exit_code=0
+"$BIN" "$@" 2>"$ERR_LOG" || _exit_code=$?
 _installer_elapsed=$(($(date +%s) - _installer_start))
 
 _reached_done=0
-if grep -q '\[installer\] done (success)' /tmp/caelestia_installer_err.log 2>/dev/null; then
+if grep -q '\[installer\] done (success)' "$ERR_LOG" 2>/dev/null; then
     _reached_done=1
 fi
 
@@ -364,7 +327,6 @@ elif [[ $_reached_done -eq 0 ]]; then
 fi
 
 if [[ $_show_diagnostic -eq 1 ]]; then
-    # Reset terminal in case the binary left it in raw/alt-screen mode
     stty sane 2>/dev/null || true
     tput cnorm 2>/dev/null || true
     printf '\033[0m\033[?1049l\033[?25h' 2>/dev/null || true
@@ -375,9 +337,9 @@ if [[ $_show_diagnostic -eq 1 ]]; then
     echo "============================================================"
     echo ""
 
-    if [[ -s /tmp/caelestia_installer_err.log ]]; then
+    if [[ -s "$ERR_LOG" ]]; then
         echo "--- stderr output ---"
-        cat /tmp/caelestia_installer_err.log
+        cat "$ERR_LOG"
         echo "--- end stderr ------"
         echo ""
     else

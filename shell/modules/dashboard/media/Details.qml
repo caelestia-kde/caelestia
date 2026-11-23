@@ -1,3 +1,5 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Layouts
 import Quickshell.Services.Mpris
@@ -10,20 +12,11 @@ import qs.services
 ColumnLayout {
     id: root
 
-    function lengthStr(length: int): string {
-        if (length < 0)
-            return "-1:-1";
-
-        const hours = Math.floor(length / 3600);
-        const mins = Math.floor((length % 3600) / 60);
-        const secs = Math.floor(length % 60).toString().padStart(2, "0");
-
-        if (hours > 0)
-            return `${hours}:${mins.toString().padStart(2, "0")}:${secs}`;
-        return `${mins}:${secs}`;
-    }
+    property bool textAnimated: false
 
     spacing: Tokens.spacing.extraSmall
+
+    Component.onCompleted: Qt.callLater(() => root.textAnimated = true)
 
     Timer {
         running: Players.active?.isPlaying ?? false
@@ -38,7 +31,7 @@ ColumnLayout {
         text: Players.active?.trackTitle ?? ""
         font: Tokens.font.title.large
         elide: Text.ElideRight
-        animate: true
+        animate: root.textAnimated
     }
 
     StyledText {
@@ -47,7 +40,7 @@ ColumnLayout {
         color: Colours.palette.m3onSurfaceVariant
         font: Tokens.font.title.medium
         elide: Text.ElideRight
-        animate: true
+        animate: root.textAnimated
     }
 
     StyledText {
@@ -56,7 +49,7 @@ ColumnLayout {
         color: Colours.palette.m3secondary
         font: Tokens.font.title.medium
         elide: Text.ElideRight
-        animate: true
+        animate: root.textAnimated
     }
 
     RowLayout {
@@ -67,7 +60,7 @@ ColumnLayout {
         TextMetrics {
             id: timeMetrics
 
-            text: Players.active ? root.lengthStr(Math.max(Players.active.position, Players.active.length)).replace(/[1-9]/g, "0") : "00:00"
+            text: Players.active ? Units.formatDuration(Math.max(Players.active.position, Players.active.length)).replace(/[1-9]/g, "0") : "00:00"
             font: Tokens.font.label.medium
         }
 
@@ -75,7 +68,7 @@ ColumnLayout {
             id: positionLabel
 
             Layout.preferredWidth: timeMetrics.width
-            text: root.lengthStr(Players.active?.position ?? -1)
+            text: Units.formatDuration(Players.active?.position ?? -1)
             color: Colours.palette.m3onSurfaceVariant
             font: timeMetrics.font
             horizontalAlignment: Text.AlignHCenter
@@ -101,14 +94,14 @@ ColumnLayout {
             Binding {
                 target: positionLabel
                 property: "text"
-                value: root.lengthStr(positionSlider.pos * (Players.active?.length ?? 0))
+                value: Units.formatDuration(positionSlider.pos * (Players.active?.length ?? 0))
                 when: positionSlider.dragging
             }
         }
 
         StyledText {
             Layout.preferredWidth: timeMetrics.width
-            text: root.lengthStr(Players.active?.length ?? -1)
+            text: Units.formatDuration(Players.active?.length ?? -1)
             color: Colours.palette.m3onSurfaceVariant
             font: timeMetrics.font
             horizontalAlignment: Text.AlignHCenter
@@ -148,6 +141,7 @@ ColumnLayout {
             id: playPauseBtn
 
             icon: Players.active?.isPlaying ? "pause" : "play_arrow"
+            animateIcon: true
             isRound: true
             shapeMorph: true
             fillWidth: true

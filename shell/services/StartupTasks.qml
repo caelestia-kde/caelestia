@@ -1,3 +1,5 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import Quickshell
 import Quickshell.Io
@@ -6,22 +8,31 @@ import qs.utils
 Item {
     id: root
 
+    readonly property string tasksDir: Quickshell.shellPath("services/startuptasks")
+    readonly property string scriptsDir: Quickshell.shellPath("scripts")
+
     Component.onCompleted: {
-        console.log("StartupTasks Loaded!");
         Quickshell.execDetached(["bash", "-c", `
             STATE_FILE="$HOME/.local/share/caelestia/state/startup_tasks.txt"
             mkdir -p "$(dirname "$STATE_FILE")"
             touch "$STATE_FILE"
-            
-            TASKS_DIR="$HOME/.config/quickshell/caelestia/services/startuptasks"
+
+            TASKS_DIR="$1"
+            SCRIPTS_DIR="$2"
+            export SCRIPTS_DIR
             MODIFIED=false
-            
+
             TASKS=(
                 "01-magic-lamp"
                 "02-krohnkite-setup"
                 "03-wallpaper-fill"
+                "04-stale-font-families"
+                "05-matugen"
+                "06-kde-desktop-mode"
+                "07-export-plasma-config"
+                "08-skwd-wall-hook"
             )
-            
+
             for script_name in "\${TASKS[@]}"; do
                 script="$TASKS_DIR/$script_name.sh"
                 if [[ -f "$script" ]]; then
@@ -34,10 +45,10 @@ Item {
                     fi
                 fi
             done
-            
+
             if [[ "$MODIFIED" == "true" ]]; then
                 qdbus6 org.kde.KWin /KWin reconfigure 2>/dev/null || true
             fi
-        `]);
+        `, "caelestia-startuptasks", root.tasksDir, root.scriptsDir]);
     }
 }

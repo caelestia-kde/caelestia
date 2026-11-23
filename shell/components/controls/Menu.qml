@@ -23,29 +23,155 @@ MouseArea {
     }
 
     required property Item attachTo
+    property bool autoFlipY: true
+    readonly property real _menuH: menu && menu.implicitHeight > 0 ? menu.implicitHeight : 200
+    readonly property bool flippedY: {
+        if (!autoFlipY || !attachTo || !parent)
+            return false;
+        watcher.transform;
+        try {
+            const pt = attachTo.mapToItem(parent, 0, attachTo.height);
+            if (!pt)
+                return false;
+            const spaceBelow = parent.height - pt.y;
+            const ptTop = attachTo.mapToItem(parent, 0, 0);
+            const spaceAbove = ptTop ? ptTop.y : 0;
+            return (spaceBelow < _menuH + Tokens.spacing.small + Tokens.padding.small) && (spaceAbove > spaceBelow);
+        } catch (e) {
+            return false;
+        }
+    }
+
     property int attachSideX: Menu.Right
-    property int attachSideY: Menu.Bottom
+    property int attachSideY: autoFlipY && flippedY ? Menu.Top : Menu.Bottom
     property int thisSideX: Menu.Right
-    property int thisSideY: Menu.Top
+    property int thisSideY: autoFlipY && flippedY ? Menu.Bottom : Menu.Top
     property real marginX
     property real marginY
 
     property list<MenuItem> items
     property var dynamicModel: items
     property MenuItem active: dynamicModel[0] ?? null
+    /// The entry worth pointing out, such as the setting that suits the hardware in hand;
+    /// null when there is nothing to say.
+    property MenuItem recommended: null
     property bool expanded
     property bool rightClickReposition: false
     property real maxHeight: 320
     readonly property alias backgroundItem: menu
+    readonly property alias submenuPanel: submenu
     property bool transparentBackground: false
+    // Unfold sideways from the anchor with a short, non-overshooting curve
+    // instead of dropping down.
+    property bool revealHorizontal: false
+    property var submenuRow: null
+    property var submenuItems: []
+    property bool submenuOpen: false
+    readonly property int firstVisibleIndex: {
+        const model = dynamicModel ?? [];
+        for (let i = 0; i < model.length; i++)
+            if (model[i]?.visible)
+                return i;
+        return -1;
+    }
+    readonly property int lastVisibleIndex: {
+        const model = dynamicModel ?? [];
+        for (let i = model.length - 1; i >= 0; i--)
+            if (model[i]?.visible)
+                return i;
+        return -1;
+    }
+    readonly property int submenuFirstVisibleIndex: {
+        const model = submenuItems ?? [];
+        for (let i = 0; i < model.length; i++)
+            if (model[i]?.visible)
+                return i;
+        return -1;
+    }
+    readonly property int submenuLastVisibleIndex: {
+        const model = submenuItems ?? [];
+        for (let i = model.length - 1; i >= 0; i--)
+            if (model[i]?.visible)
+                return i;
+        return -1;
+    }
 
     signal itemSelected(item: MenuItem)
     signal rightClickedAt(real x, real y)
 
+    function openSubmenu(row: Item, entries: var): void {
+        closeTimer.stop();
+        submenuRow = row;
+        submenuItems = entries ?? [];
+        root.positionSubmenu();
+        submenuOpen = true;
+        Qt.callLater(root.positionSubmenu);
+    }
+
+    function positionSubmenu(): void {
+        const row = submenuRow;
+        if (!row || !submenu)
+            return;
+        const panelRight = menu.x + menu.implicitWidth;
+        submenu.opensRight = panelRight + submenu.implicitWidth <= root.width;
+        const rowTop = row.mapToItem(root, 0, 0).y;
+        const rowBottom = rowTop + row.height;
+        const panelBottom = menu.y + menu.implicitHeight;
+        submenu.flushTop = rowTop - menu.y <= Tokens.padding.extraSmall;
+        submenu.flushBottom = !submenu.flushTop && panelBottom - rowBottom <= Tokens.padding.extraSmall;
+        if (submenu.flushTop)
+            submenu.y = menu.y;
+        else if (submenu.flushBottom)
+            submenu.y = panelBottom - submenu.implicitHeight;
+        else
+            submenu.y = rowTop;
+    }
+
+    function closeSubmenu(): void {
+        submenuOpen = false;
+    }
+
+    function optionText(entry: var): string {
+        const label = entry?.text ?? "";
+        return entry && entry === root.recommended ? `${label} ${qsTr("(Recommended)")}` : label;
+    }
+
+    function close(): void {
+        if (!expanded)
+            return;
+        if (closeTimer.running)
+            return;
+        if (submenuOpen) {
+            closeSubmenu();
+            closeTimer.restart();
+            return;
+        }
+        closeTimer.stop();
+        expanded = false;
+    }
+
+    onExpandedChanged: {
+        if (expanded) {
+            closeTimer.stop();
+        } else {
+            submenuOpen = false;
+            submenuRow = null;
+            submenuItems = [];
+        }
+        if (!revealHorizontal)
+            return;
+        revealIn.stop();
+        revealOut.stop();
+        if (expanded)
+            revealIn.start();
+        else
+            revealOut.start();
+    }
+
     parent: {
         let node = root.attachTo;
         let interactionsNode = null;
-        
+
         while (node && node.parent) {
             if (node.utilitiesShortcutActive !== undefined) {
                 interactionsNode = node;
@@ -68,7 +194,7 @@ MouseArea {
             rightClickedAt(mouse.x, mouse.y);
             return;
         }
-        expanded = false;
+        root.close();
     }
 
     opacity: expanded ? 1 : 0
@@ -76,8 +202,50 @@ MouseArea {
 
     Behavior on opacity {
         Anim {
-            type: Anim.DefaultEffects
+            type: root.revealHorizontal ? Anim.FastEffects : Anim.DefaultEffects
         }
+    }
+
+    // The menu lives outside the item it is attached to, so it would outlast a
+    // drawer or popout that hides that item. Close it along with the item.
+    Connections {
+        function onVisibleChanged(): void {
+            if (!root.attachTo || !root.attachTo.visible) {
+                root.closeSubmenu();
+                closeTimer.stop();
+                root.expanded = false;
+            }
+        }
+
+        enabled: root.expanded
+        target: root.attachTo
+    }
+
+    Timer {
+        id: closeTimer
+
+        interval: Tokens.anim.durations.small
+        onTriggered: root.expanded = false
+    }
+
+    NumberAnimation {
+        id: revealIn
+
+        target: menu
+        property: "hScale"
+        to: 1
+        duration: Tokens.anim.durations.small
+        easing: Tokens.anim.emphasizedDecel
+    }
+
+    NumberAnimation {
+        id: revealOut
+
+        target: menu
+        property: "hScale"
+        to: 0
+        duration: Math.round(Tokens.anim.durations.small * 0.75)
+        easing: Tokens.anim.emphasizedAccel
     }
 
     TransformWatcher {
@@ -93,33 +261,49 @@ MouseArea {
         property string vAnchor: "none"
         property string hAnchor: "none"
         property real offsetScale: 1 - animScale
-        property real animScale: root.expanded ? 1 : 0.0
+        property real vScale: root.expanded ? 1 : 0.0
+        property real hScale: 0
+        readonly property real animScale: root.revealHorizontal ? hScale : vScale
 
         x: {
-            watcher.transform; // mapToItem is not reactive so this forces updates
+            watcher.transform;
             const item = root.attachTo;
+            if (!item || !root.parent)
+                return 0;
             let off = root.attachSideX === Menu.Left ? 0 : item.width;
             if (root.thisSideX === Menu.Right)
                 off -= width;
-            return item.mapToItem(root.parent, off, 0).x + root.marginX;
+            const pt = item.mapToItem(root.parent, off, 0);
+            // Keep the panel inside the window: near the right edge there is no room
+            // to unfold outwards, and it used to end up half off screen.
+            const w = Math.max(menu.implicitWidth, menu.width);
+            return Math.max(0, Math.min(root.parent.width - w, (pt ? pt.x : 0) + root.marginX));
         }
         y: {
-            watcher.transform; // mapToItem is not reactive so this forces updates
+            watcher.transform;
             const item = root.attachTo;
+            if (!item || !root.parent)
+                return 0;
             let off = root.attachSideY === Menu.Top ? 0 : item.height;
             if (root.thisSideY === Menu.Bottom)
                 off -= height;
-            return item.mapToItem(root.parent, 0, off).y + root.marginY;
+            const pt = item.mapToItem(root.parent, 0, off);
+            // Same for the vertical axis: never leave the window.
+            const h = Math.max(menu.implicitHeight, menu.height);
+            return Math.max(0, Math.min(root.parent.height - h, (pt ? pt.y : 0) + root.marginY));
         }
 
         radius: Tokens.rounding.large
         level: root.transparentBackground ? 0 : 2
         implicitWidth: Math.max(200, column.implicitWidth + Tokens.padding.extraSmall * 2)
         implicitHeight: Math.min(root.maxHeight, column.implicitHeight + Tokens.padding.extraSmall * 2)
-        width: implicitWidth
-        height: implicitHeight * animScale
+        width: root.revealHorizontal ? implicitWidth * animScale : implicitWidth
+        height: root.revealHorizontal ? implicitHeight : implicitHeight * animScale
+        clip: root.revealHorizontal
 
-        Behavior on animScale {
+        Behavior on vScale {
+            enabled: !root.revealHorizontal
+
             Anim {}
         }
 
@@ -131,19 +315,25 @@ MouseArea {
         }
 
         StyledRect {
+            // Sideways, the content stays pinned to the edge the menu grows
+            // from and trails it by a few pixels while the panel unfolds.
+            x: {
+                if (!root.revealHorizontal)
+                    return 0;
+                const trail = (1 - menu.animScale) * Tokens.padding.extraLarge;
+                return root.thisSideX === Menu.Right ? menu.width - menu.implicitWidth + trail : -trail;
+            }
             y: root.thisSideY === Menu.Bottom ? menu.height - menu.implicitHeight : 0
             width: menu.implicitWidth
             height: menu.implicitHeight
-            
+            opacity: root.revealHorizontal ? Math.min(1, menu.animScale * 1.5) : 1
+
             transform: Scale {
-                yScale: menu.animScale
+                yScale: root.revealHorizontal ? 1 : menu.animScale
                 origin.y: root.thisSideY === Menu.Bottom ? menu.implicitHeight : 0
             }
-            
+
             radius: parent.radius
-            // Fade alpha to 0 instead of the literal "transparent" string, which
-            // would animate RGB through black via StyledRect's inherited
-            // Behavior on color.
             color: root.transparentBackground
                 ? Qt.alpha(Colours.palette.m3surfaceContainerLow, 0)
                 : (GlobalConfig.appearance.pitchBlack
@@ -158,6 +348,7 @@ MouseArea {
                 contentWidth: width
                 contentHeight: column.implicitHeight
                 clip: true
+                boundsBehavior: Flickable.StopAtBounds
 
                 interactive: contentHeight > height
 
@@ -172,88 +363,224 @@ MouseArea {
                     spacing: 0
 
                     Repeater {
-                        id: repeater
-
                         model: root.dynamicModel
-
-                    StyledRect {
-                        id: item
-
-                        required property int index
-                        required property MenuItem modelData
-                        readonly property bool active: modelData === root?.active
-
-                        visible: modelData?.visible ?? false
-
-                        Layout.fillWidth: true
-                        implicitWidth: menuOptionRow.implicitWidth + Tokens.padding.medium * 2
-                        implicitHeight: visible ? menuOptionRow.implicitHeight + Tokens.padding.medium * 2 : 0
-
-
-                        radius: active ? Tokens.rounding.medium : Tokens.rounding.extraSmall
-                        topLeftRadius: index === 0 ? Tokens.rounding.medium : radius
-                        topRightRadius: index === 0 ? Tokens.rounding.medium : radius
-                        bottomLeftRadius: index === repeater?.count - 1 ? Tokens.rounding.medium : radius
-                        bottomRightRadius: index === repeater?.count - 1 ? Tokens.rounding.medium : radius
-
-                        color: "transparent"
-
-                        Behavior on radius {
-                            Anim {}
-                        }
-
-                        StateLayer {
-                            topLeftRadius: parent.topLeftRadius
-                            topRightRadius: parent.topRightRadius
-                            bottomLeftRadius: parent.bottomLeftRadius
-                            bottomRightRadius: parent.bottomRightRadius
-
-                            color: Colours.palette.m3onSurface
-                            disabled: !root.expanded
-                            onClicked: {
-                                root.itemSelected(item.modelData);
-                                root.active = item.modelData;
-                                item.modelData.clicked();
-                                root.expanded = false;
-                            }
-                        }
-
-                        RowLayout {
-                            id: menuOptionRow
-
-                            anchors.fill: parent
-                            anchors.margins: Tokens.padding.medium
-                            spacing: Tokens.spacing.small
-
-                            MaterialIcon {
-                                Layout.alignment: Qt.AlignVCenter
-                                text: item.modelData?.icon ?? ""
-                                color: Colours.palette.m3onSurfaceVariant
-                            }
-
-                            StyledText {
-                                Layout.alignment: Qt.AlignVCenter
-                                Layout.fillWidth: true
-                                text: item.modelData?.text ?? ""
-                                color: Colours.palette.m3onSurface
-                            }
-
-                            Loader {
-                                asynchronous: true
-                                Layout.alignment: Qt.AlignVCenter
-                                active: item.modelData?.trailingIcon.length > 0
-                                visible: active
-
-                                sourceComponent: MaterialIcon {
-                                    text: item.modelData.trailingIcon
-                                    color: Colours.palette.m3onSurfaceVariant
-                                }
-                            }
-                        }
+                        delegate: rowComp
                     }
                 }
             }
         }
+    }
+
+    Elevation {
+        id: submenu
+
+        readonly property real overlap: Tokens.padding.extraSmall / 2
+        property bool opensRight: true
+        property real hScale: root.submenuOpen ? 1 : 0
+        property bool flushTop: false
+        property bool flushBottom: false
+        property string vAnchor: "none"
+        property string hAnchor: opensRight ? "left" : "right"
+
+        /* Same stacking and backdrop as the menu itself: over it, and drawn by
+           whoever paints the menu background when that one is transparent. */
+        z: root.z + 1
+        radius: Tokens.rounding.large
+        level: root.transparentBackground ? 0 : 2
+        implicitWidth: Math.max(200, submenuColumn.implicitWidth + Tokens.padding.extraSmall * 2)
+        implicitHeight: Math.min(root.maxHeight, submenuColumn.implicitHeight + Tokens.padding.extraSmall * 2)
+        x: opensRight ? (menu.x + menu.implicitWidth - overlap) : (menu.x + overlap - width)
+        width: implicitWidth * hScale
+        height: implicitHeight
+        clip: true
+        visible: hScale > 0.01
+
+        Connections {
+            function onXChanged(): void {
+                root.positionSubmenu();
+            }
+
+            function onYChanged(): void {
+                root.positionSubmenu();
+            }
+
+            function onImplicitWidthChanged(): void {
+                root.positionSubmenu();
+            }
+
+            function onImplicitHeightChanged(): void {
+                root.positionSubmenu();
+            }
+
+            target: menu
+        }
+
+        Connections {
+            function onImplicitWidthChanged(): void {
+                root.positionSubmenu();
+            }
+
+            function onImplicitHeightChanged(): void {
+                root.positionSubmenu();
+            }
+
+            target: submenu
+        }
+
+        Behavior on hScale {
+            NumberAnimation {
+                duration: Tokens.anim.durations.small
+                easing: Tokens.anim.emphasizedDecel
+            }
+        }
+
+        MouseArea {
+            anchors.fill: parent
+            hoverEnabled: true
+            onWheel: e => e.accepted = true
+            onClicked: {}
+        }
+
+        StyledRect {
+            x: submenu.opensRight ? 0 : submenu.width - submenu.implicitWidth
+            width: submenu.implicitWidth
+            height: submenu.implicitHeight
+            opacity: Math.min(1, submenu.hScale * 1.5)
+
+            radius: parent.radius
+            color: root.transparentBackground
+                ? Qt.alpha(Colours.palette.m3surfaceContainerLow, 0)
+                : (GlobalConfig.appearance.pitchBlack
+                    ? "#000000"
+                    : Colours.palette.m3surfaceContainerLow)
+
+            Flickable {
+                id: submenuFlickable
+
+                anchors.fill: parent
+                anchors.margins: Tokens.padding.extraSmall
+                contentWidth: width
+                contentHeight: submenuColumn.implicitHeight
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+
+                interactive: contentHeight > height
+
+                ScrollBar.vertical: StyledScrollBar {
+                    flickable: submenuFlickable
+                }
+
+                ColumnLayout {
+                    id: submenuColumn
+
+                    width: parent.width
+                    spacing: 0
+
+                    Repeater {
+                        model: root.submenuItems
+                        delegate: rowComp
+                    }
+                }
+            }
+        }
+    }
+
+    Component {
+        id: rowComp
+
+        StyledRect {
+            id: item
+
+            required property int index
+            required property MenuItem modelData
+            readonly property bool inSubmenu: parent === submenuColumn
+            // The entries are this module's MenuItem, which qmllint resolves to
+            // qmllint disable missing-property
+            readonly property var entries: modelData?.submenu ?? []
+            // qmllint enable missing-property
+            readonly property bool hasSubmenu: entries.length > 0
+            readonly property bool active: modelData === root?.active || root?.submenuRow === item
+            readonly property int firstIndex: (inSubmenu ? root?.submenuFirstVisibleIndex : root?.firstVisibleIndex) ?? -1
+            readonly property int lastIndex: (inSubmenu ? root?.submenuLastVisibleIndex : root?.lastVisibleIndex) ?? -1
+
+            visible: item.modelData ? item.modelData.visible : false
+
+            Layout.fillWidth: true
+            implicitWidth: menuOptionRow.implicitWidth + Tokens.padding.medium * 2
+            implicitHeight: !visible ? 0 : menuOptionRow.implicitHeight + Tokens.padding.medium * 2
+
+            radius: active ? Tokens.rounding.medium : Tokens.rounding.extraSmall
+            topLeftRadius: index === firstIndex ? Tokens.rounding.medium : radius
+            topRightRadius: index === firstIndex ? Tokens.rounding.medium : radius
+            bottomLeftRadius: index === lastIndex ? Tokens.rounding.medium : radius
+            bottomRightRadius: index === lastIndex ? Tokens.rounding.medium : radius
+
+            color: "transparent"
+
+            Behavior on radius {
+                Anim {}
+            }
+
+            StateLayer {
+                topLeftRadius: parent.topLeftRadius
+                topRightRadius: parent.topRightRadius
+                bottomLeftRadius: parent.bottomLeftRadius
+                bottomRightRadius: parent.bottomRightRadius
+
+                color: Colours.palette.m3onSurface
+                disabled: !root.expanded
+                onContainsMouseChanged: {
+                    if (!containsMouse || item.inSubmenu)
+                        return;
+                    if (item.hasSubmenu)
+                        root.openSubmenu(item, item.entries);
+                    else
+                        root.closeSubmenu();
+                }
+                onClicked: {
+                    root.itemSelected(item.modelData);
+                    if (item.hasSubmenu) {
+                        root.openSubmenu(item, item.entries);
+                        return;
+                    }
+                    root.active = item.modelData;
+                    item.modelData.clicked();
+                    root.close();
+                }
+            }
+
+            RowLayout {
+                id: menuOptionRow
+
+                anchors.fill: parent
+                anchors.margins: Tokens.padding.medium
+                spacing: Tokens.spacing.small
+
+                MaterialIcon {
+                    Layout.alignment: Qt.AlignVCenter
+                    text: item.modelData?.icon ?? ""
+                    color: Colours.palette.m3onSurfaceVariant
+                }
+
+                StyledText {
+                    Layout.alignment: Qt.AlignVCenter
+                    Layout.fillWidth: true
+                    text: root.optionText(item.modelData)
+                    color: Colours.palette.m3onSurface
+                }
+
+                Loader {
+                    asynchronous: true
+                    Layout.alignment: Qt.AlignVCenter
+                    active: item.modelData?.trailingIcon.length > 0 || item.hasSubmenu
+                    visible: active
+
+                    sourceComponent: MaterialIcon {
+                        text: item.hasSubmenu ? "chevron_right" : item.modelData.trailingIcon
+                        color: Colours.palette.m3onSurfaceVariant
+                    }
+                }
+            }
         }
     }
 }

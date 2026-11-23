@@ -67,7 +67,7 @@ StyledRect {
         console.error("[GitHubWidget] " + msg);
     }
 
-    // No credential stored yet. Say so once in the UI, pointing at the page that
+    // Say so once in the UI, pointing at the page that
     // fixes it, instead of leaving the user to find it in the log.
     function setTokenMissing(): void {
         root.lastError = "";
@@ -76,14 +76,12 @@ StyledRect {
         BarComponents.GithubStore.tokenMissing = true;
         BarComponents.GithubStore.available = false;
 
-        // The flag lives on the singleton: one notice per shell session, not one
-        // per screen's bar.
         if (BarComponents.GithubStore.tokenNoticeShown)
             return;
         BarComponents.GithubStore.tokenNoticeShown = true;
         console.warn("[GitHubWidget] no token configured");
         Toaster.toast(qsTr("GitHub widget needs a token"),
-            qsTr("Add a personal access token in Settings → Panels → Taskbar → GitHub."),
+            qsTr("Add a personal access token in Settings -> Panels -> Taskbar -> GitHub."),
             "key_off", Toast.Warning);
     }
 
@@ -95,7 +93,19 @@ StyledRect {
     color: Qt.alpha(Colours.tPalette.m3surfaceContainer, Config.bar.github.background ? Colours.tPalette.m3surfaceContainer.a : 0)
     radius: Tokens.rounding.full
 
-
+    MouseArea {
+        anchors.fill: parent
+        acceptedButtons: Qt.RightButton
+        cursorShape: Qt.PointingHandCursor
+        onClicked: mouse => {
+            if (!root.popouts)
+                return;
+            root.popouts.currentName = "githubcontext";
+            root.popouts.currentCenter = root.isHorizontal ? root.mapToItem(null, root.implicitWidth / 2, 0).x : (root.mapToItem(null, 0, root.implicitHeight / 2).y ?? 0);
+            root.popouts.hasCurrent = true;
+            mouse.accepted = true;
+        }
+    }
 
     Grid {
         id: cells
@@ -125,21 +135,8 @@ StyledRect {
                 }
             }
         }
-
-        /* Uncomment for total count beside the widget
-        StyledText {
-            id: text
-            verticalAlignment: StyledText.AlignVCenter
-            text: root.total
-            font.pointSize: Appearance.font.size.smaller
-            font.family: Appearance.font.family.mono
-            color: root.colour
-        }
-        */
     }
 
-    // Could do something with this in the future, nothing currently though to keep things decluttered
-    // var counts root.lastError !== "" ? ("GitHub: " + root.lastError) : root.weekDays.map(d => `${d.date}: ${d.count}`).join("\n")
 
     Process {
         id: proc
@@ -233,9 +230,16 @@ PY
                     return;
                 }
 
-                root.username = (obj.data && obj.data.user && obj.data.user.login) || root.username;
+                const user = obj.data && obj.data.user;
+                if (!user) {
+                    root.setUnavailable("no contribution data in the response");
+                    return;
+                }
 
-                const weeks = obj.data.user.contributionsCollection.contributionCalendar.weeks || [];
+                root.username = user.login || root.username;
+
+                const calendar = user.contributionsCollection && user.contributionsCollection.contributionCalendar;
+                const weeks = (calendar && calendar.weeks) || [];
                 const days = [];
                 weeks.forEach(w => w.contributionDays.forEach(d => days.push({
                             date: d.date,
@@ -276,8 +280,7 @@ PY
                     const idx = count === 0 ? 0 : Math.min(4, 1 + Math.floor((count * 4) / max));
                     window[i] = {
                         intensity: idx,
-                        count: count,
-                        tooltip: `${window[i].date}: ${count} contribution${count !== 1 ? 's' : ''}`
+                        count: count
                     };
                 }
 

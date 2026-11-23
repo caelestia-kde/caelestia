@@ -90,26 +90,120 @@ fi
 CAEL_STATE="$REAL_HOME/.local/state/caelestia"
 THEME_DIR="/usr/share/sddm/themes/caelestia"
 
-# 1. Generate FRESH colors from the current Caelestia scheme settings FIRST
+CAELESTIA_BIN=""
+for candidate in "$REAL_HOME/.local/bin/caelestia" /usr/local/bin/caelestia /usr/bin/caelestia; do
+    if [[ -x "$candidate" ]]; then
+        CAELESTIA_BIN="$candidate"
+        break
+    fi
+done
+if [[ -z "$CAELESTIA_BIN" ]]; then
+    CAELESTIA_BIN="$(command -v caelestia 2>/dev/null || true)"
+fi
+
+wallpaper_on_screen() {
+    local target
+    target="$(sudo -H -u "$REAL_USER" readlink -f "$CAEL_STATE/wallpaper/current" 2>/dev/null || true)"
+    [[ -n "$target" ]] && sudo -H -u "$REAL_USER" test -f "$target"
+}
+
+FAILED=0
 if [[ "${1:-}" = "--posthook" ]]; then
     : # Skip color generation when run as posthook (--posthook)
     echo "✓ Running as posthook, skipping color generation"
-elif command -v caelestia &>/dev/null; then
-    mapfile -t SCHEME < <(sudo -H -u "$REAL_USER" caelestia scheme get --name --mode --variant 2>/dev/null)
+elif [[ -z "$CAELESTIA_BIN" ]]; then
+    echo "Caelestia CLI not found, skipping color generation"
+else
+    mapfile -t SCHEME < <(sudo -H -u "$REAL_USER" "$CAELESTIA_BIN" scheme get --name --mode --variant 2>/dev/null)
     NAME="${SCHEME[0]:-}"
     MODE="${SCHEME[1]:-}"
     VARIANT="${SCHEME[2]:-}"
-    if [[ -n "$NAME" ]] && [[ -n "$MODE" ]] && [[ -n "$VARIANT" ]]; then
-        sudo -H -u "$REAL_USER" caelestia scheme set --name "$NAME" --mode "$MODE" --variant "$VARIANT" 2>/dev/null
+    if [[ -z "$NAME" || -z "$MODE" || -z "$VARIANT" ]]; then
+        echo "Could not read Caelestia scheme, skipping color generation"
+    elif [[ "$NAME" == "dynamic" ]] && ! wallpaper_on_screen; then
+        echo "No wallpaper on screen yet, skipping color generation"
+    elif regenerate="$(sudo -H -u "$REAL_USER" "$CAELESTIA_BIN" scheme set --name "$NAME" --mode "$MODE" --variant "$VARIANT" 2>&1)"; then
         echo "✓ Generated colors for scheme: $NAME/$MODE/$VARIANT"
     else
-        echo "Could not read Caelestia scheme, skipping color generation"
+        echo "Could not regenerate the colors for $NAME/$MODE/$VARIANT:" >&2
+        printf '%s\n' "$regenerate" | sed 's/^/  /' >&2
+        FAILED=1
     fi
-else
-    echo "Caelestia CLI not found, skipping color generation"
 fi
 
-# 2. Sync avatar files into theme assets so sddm can safely access them without permission issues.
+is_plasmalogin_active() {
+    local target
+    target="$(readlink -f /etc/systemd/system/display-manager.service 2>/dev/null || true)"
+
+    case "$target" in
+        *plasmalogin*) return 0 ;;
+        *sddm*) return 1 ;;
+    esac
+
+    if systemctl is-active plasmalogin.service &>/dev/null || \
+       systemctl is-enabled plasmalogin.service &>/dev/null; then
+        return 0
+    fi
+    if systemctl is-active sddm.service &>/dev/null || \
+       systemctl is-enabled sddm.service &>/dev/null; then
+        return 1
+    fi
+    if [[ -e /etc/plasmalogin.conf ]] && ! command -v sddm >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
+
+if is_plasmalogin_active; then
+    PLASMALOGIN_HOME="$(getent passwd plasmalogin | cut -d: -f6)"
+    if [[ -z "$PLASMALOGIN_HOME" || "$PLASMALOGIN_HOME" = "/" ]]; then
+        PLASMALOGIN_HOME="/var/lib/plasmalogin"
+    fi
+
+    PLASMALOGIN_CONFIG="$PLASMALOGIN_HOME/.config"
+    PLASMALOGIN_SCHEMES="$PLASMALOGIN_HOME/.local/share/color-schemes"
+    PLASMALOGIN_WALLPAPERS="$PLASMALOGIN_HOME/wallpapers/caelestia"
+    MAX_LOGIN_SCHEME_BYTES=$((1024 * 1024))
+    MAX_LOGIN_WALLPAPER_BYTES=$((50 * 1024 * 1024))
+
+    install -d -o root -g root -m 0755 "$PLASMALOGIN_CONFIG" "$PLASMALOGIN_SCHEMES" "$PLASMALOGIN_WALLPAPERS"
+
+    for scheme in "$REAL_HOME"/.local/share/color-schemes/Matugen*.colors; do
+        [[ -e "$scheme" ]] || continue
+        copy_user_file "$scheme" "$PLASMALOGIN_SCHEMES/$(basename -- "$scheme")" "$MAX_LOGIN_SCHEME_BYTES" || true
+    done
+
+    for file in kdeglobals plasmarc kxkbrc kcminputrc plasma-localerc; do
+        copy_user_file "$REAL_HOME/.config/$file" "$PLASMALOGIN_CONFIG/$file" "$((1024 * 1024))" || true
+    done
+
+    WALLPAPER_SOURCE="$(sudo -H -u "$REAL_USER" readlink -f "$CAEL_STATE/wallpaper/current" 2>/dev/null || true)"
+    if [[ -n "$WALLPAPER_SOURCE" && -f "$WALLPAPER_SOURCE" ]]; then
+        WALLPAPER_NAME="$(basename -- "$WALLPAPER_SOURCE")"
+        if copy_user_file "$WALLPAPER_SOURCE" "$PLASMALOGIN_WALLPAPERS/$WALLPAPER_NAME" "$MAX_LOGIN_WALLPAPER_BYTES"; then
+            for old in "$PLASMALOGIN_WALLPAPERS"/*; do
+                [[ "$old" == "$PLASMALOGIN_WALLPAPERS/$WALLPAPER_NAME" ]] || rm -f -- "$old"
+            done
+
+            if command -v kwriteconfig6 >/dev/null 2>&1 \
+                && kwriteconfig6 --file /etc/plasmalogin.conf --group Greeter --key WallpaperPluginId "org.kde.image" \
+                && kwriteconfig6 --file /etc/plasmalogin.conf --group Greeter --group Wallpaper --group org.kde.image --group General --key Image "file://$PLASMALOGIN_WALLPAPERS/$WALLPAPER_NAME"; then
+                echo "✓ Synced the login screen wallpaper"
+            else
+                echo "WARNING: could not write /etc/plasmalogin.conf, the wallpaper is where the greeter expects but is not selected" >&2
+            fi
+        else
+            echo "No readable wallpaper found, leaving the login screen wallpaper unchanged."
+        fi
+    else
+        echo "No readable wallpaper found, leaving the login screen wallpaper unchanged."
+    fi
+
+    chown -R plasmalogin:plasmalogin "$PLASMALOGIN_CONFIG" "$PLASMALOGIN_SCHEMES" "$PLASMALOGIN_WALLPAPERS" 2>/dev/null || true
+
+    exit "$FAILED"
+fi
+
 sync_optional_user_file \
     "$REAL_HOME/.face.icon" \
     "$THEME_DIR/assets/avatar.face.icon" \
@@ -122,12 +216,21 @@ sync_optional_user_file \
     "$((5 * 1024 * 1024))" \
     "avatar.face"
 
-# 3. Sync Colors
 THEME_CONF_SRC="$CAEL_STATE/theme/sddm-theme.conf"
 THEME_CONF_DEST="$THEME_DIR/theme.conf"
 MAX_THEME_CONF_BYTES=$((1024 * 1024))
 
 if copy_user_file "$THEME_CONF_SRC" "$THEME_CONF_DEST" "$MAX_THEME_CONF_BYTES"; then
+    chmod 644 "$THEME_CONF_DEST"
+    echo "✓ Synced theme.conf"
+else
+    echo "No exported theme.conf, keeping the installed one."
+fi
+
+# The shipped theme.conf says Linux, so the system information is written even
+# when the user never exported a theme: otherwise the login screen would show a
+# stale name and host on every other machine.
+if [[ -f "$THEME_CONF_DEST" ]]; then
     sys_os="Linux"
     if [[ -f /etc/os-release ]]; then
         sys_os=$(grep -oP '^PRETTY_NAME="\K[^"]+' /etc/os-release || grep -oP '^PRETTY_NAME=\K.+' /etc/os-release || echo "Linux")
@@ -139,14 +242,8 @@ if copy_user_file "$THEME_CONF_SRC" "$THEME_CONF_DEST" "$MAX_THEME_CONF_BYTES"; 
 
     sed -i "s/^os=.*/os=$sys_os_escaped/" "$THEME_CONF_DEST"
     sed -i "s/^host=.*/host=$sys_host_escaped/" "$THEME_CONF_DEST"
-
-    chmod 644 "$THEME_CONF_DEST"
-    echo "✓ Synced theme.conf"
-else
-    echo "No theme.conf found, leaving existing theme.conf unchanged."
 fi
 
-# 4. Sync Wallpaper LAST
 WALLPAPER_SRC="$CAEL_STATE/wallpaper/current"
 MAX_WALLPAPER_BYTES=$((50 * 1024 * 1024))
 MAX_VIDEO_WALLPAPER_BYTES=$((250 * 1024 * 1024))
@@ -185,3 +282,5 @@ if copy_user_file "$WALLPAPER_SRC" "$WALLPAPER_DEST" "$MAX_BYTES"; then
 else
     echo "No readable wallpaper found, leaving existing background unchanged."
 fi
+
+exit "$FAILED"

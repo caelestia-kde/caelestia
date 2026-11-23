@@ -5,7 +5,7 @@ We're glad you're here! This guide covers everything you need to start contribut
 ## Quick start
 
 ```bash
-git clone https://github.com/ladybug-me/caelestia-kde ~/caelestia-kde
+git clone https://github.com/caelestia-kde/caelestia ~/caelestia-kde
 cd ~/caelestia-kde
 bash scripts/setup.sh  # Full install - do this at least once
 ```
@@ -93,6 +93,14 @@ you pass one as the first argument. That is why the run above passes `$PWD`;
 `setup.sh` copies the binary to the repo root instead, where no argument is
 needed.
 
+Adding, removing or reordering a step means bumping `installer/data/tui.version`.
+The step table is compiled into the TUI binary, and `scripts/setup.sh` keys on that
+number alone: it downloads the prebuilt binary published for the version, and
+otherwise reuses a local binary whose stamp matches it. Both paths can hand you a
+binary built before your change, and then the new step silently never runs on a
+fresh install. Bumping makes the prebuilt lookup miss, so the installer compiles
+the tree instead, and the next release publishes the matching binary.
+
 ### For translation changes
 
 ```bash
@@ -106,7 +114,7 @@ the language in Nexus -> Language & region. See
 
 ### For creating plugins
 
-Head to [caelestia-kde-plugins](https://github.com/ladybug-me/caelestia-kde-plugins) for the plugin templates and guidelines.
+Head to [plugins](https://github.com/caelestia-kde/plugins) for the plugin templates and guidelines.
 
 ## Code style (the short version)
 
@@ -148,4 +156,4 @@ Head to [caelestia-kde-plugins](https://github.com/ladybug-me/caelestia-kde-plug
 
 ## Stuck?
 
-Open a [Discussion](https://github.com/ladybug-me/caelestia-kde/discussions) or ask in an issue - we're happy to help.
+Open a [Discussion](https://github.com/caelestia-kde/caelestia/discussions) or ask in an issue - we're happy to help.

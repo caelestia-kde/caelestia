@@ -36,11 +36,14 @@ public:
     Q_INVOKABLE static bool deleteFile(const QUrl& path);
     Q_INVOKABLE static QString toLocalFile(const QUrl& url);
     Q_INVOKABLE static QString sha256(const QString& path);
+    Q_INVOKABLE static bool setDesktopEntryKey(const QString& path, const QString& key, const QString& value);
 
     Q_INVOKABLE static void enableBlurBehind(QQuickWindow* window, bool enable = true);
 
     Q_INVOKABLE static qreal clamp(qreal value, qreal min, qreal max);
     Q_INVOKABLE static void setCursorPos(int x, int y);
+
+    Q_INVOKABLE static QString enumToString(const QVariant& value);
 
     Q_INVOKABLE bool isKeyPressed(int key) const;
     Q_INVOKABLE bool isAltPressed() const;
@@ -49,8 +52,6 @@ public:
     Q_INVOKABLE bool isShiftPressed() const;
     Q_INVOKABLE bool isShortcutModifierPressed(const QString& shortcutKey) const;
 
-    // Walk the visual item tree (childItems) rather than QObject children, so
-    // these traverse the QML hierarchy like QML's findChild semantics.
     Q_INVOKABLE static QQuickItem* findChild(QQuickItem* root, const QString& name);
     Q_INVOKABLE static QList<QQuickItem*> findChildren(QQuickItem* root, const QString& name);
     Q_INVOKABLE static QList<QQuickItem*> findChildrenMatching(QQuickItem* root, const QString& pattern);

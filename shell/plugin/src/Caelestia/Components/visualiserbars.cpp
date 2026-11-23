@@ -1,11 +1,12 @@
 #include "visualiserbars.hpp"
 
-#include <algorithm>
-#include <cmath>
 #include <qbrush.h>
 #include <qpainter.h>
 #include <qpainterpath.h>
 #include <qpen.h>
+
+#include <algorithm>
+#include <cmath>
 
 namespace caelestia::components {
 
@@ -18,7 +19,6 @@ void VisualiserBars::advance(qreal dt) {
     if (m_displayValues.isEmpty() || m_settled)
         return;
 
-    // dt is in seconds (from FrameAnimation.frameTime), convert to ms
     const qreal dtMs = dt * 1000.0;
     const qreal tau = m_animationDuration / 3.0;
     const qreal alpha = 1.0 - std::exp(-dtMs / tau);
@@ -71,14 +71,14 @@ void VisualiserBars::drawSide(QPainter* painter, bool rightSide) {
     if (count == 0)
         return;
 
-    const qreal sideWidth = w * 0.4;
+    const qreal sideWidth = w * m_sideWidth;
     const qreal slotWidth = sideWidth / static_cast<qreal>(count);
     const qreal barWidth = slotWidth - m_spacing;
 
     if (barWidth <= 0)
         return;
 
-    const qreal sideOffset = rightSide ? w * 0.6 : 0;
+    const qreal sideOffset = rightSide ? w * (1.0 - m_sideWidth) : 0;
     const qreal maxBarHeight = h * 0.4;
 
     for (qsizetype i = 0; i < count; ++i) {
@@ -125,11 +125,6 @@ void VisualiserBars::setValues(const QVector<double>& values) {
     }
 
     if (values.isEmpty()) {
-        // Nothing to animate, so there is nothing to settle and the frame loop in
-        // Visualiser.qml has no work to do. Report settled so that loop stops:
-        // advance() returns early for an empty list, so nothing else would ever set
-        // this, and the loop would repaint the whole desktop, blurred wallpaper
-        // included, every frame for as long as the shell runs.
         if (!m_settled) {
             m_settled = true;
             emit settledChanged();
@@ -191,6 +186,18 @@ void VisualiserBars::setSpacing(qreal spacing) {
         return;
     m_spacing = spacing;
     emit spacingChanged();
+    update();
+}
+
+qreal VisualiserBars::sideWidth() const {
+    return m_sideWidth;
+}
+
+void VisualiserBars::setSideWidth(qreal sideWidth) {
+    if (qFuzzyCompare(m_sideWidth, sideWidth))
+        return;
+    m_sideWidth = sideWidth;
+    emit sideWidthChanged();
     update();
 }
 

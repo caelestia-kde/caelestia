@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
-# 05-sddm-theme.sh  Install the Caelestia SDDM greeter theme.
 
 set -euo pipefail
 
+source "$(dirname "${BASH_SOURCE[0]}")/lib/install-kind.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/lib/log.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/lib/privileges.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/lib/install-fs.sh"
+# shellcheck source=scripts/lib/packages.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/packages.sh"
 
 BUNDLE_DIR="${BUNDLE_DIR:?BUNDLE_DIR not set}"
 SRC_DIR="$BUNDLE_DIR/src/sddm"
@@ -16,14 +19,27 @@ fi
 
 echo
 echo ""
-info "Installing Caelestia SDDM theme"
+info "Configuring the Caelestia login screen"
 echo ""
 
 THEME_NAME="caelestia"
 INSTALL_DIR="/usr/share/sddm/themes/$THEME_NAME"
 SYNC_SCRIPT="$INSTALL_DIR/scripts/sync.sh"
 
-VARIANT="${SDDM_THEME_VARIANT:-full}"
+installed_variant() {
+    [[ -f "$1/metadata.desktop" ]] || return 1
+
+    if [[ -d "$1/singletons" ]]; then
+        printf 'mini\n'
+    else
+        printf 'full\n'
+    fi
+}
+
+VARIANT="${SDDM_THEME_VARIANT:-}"
+if [[ -z "$VARIANT" ]]; then
+    VARIANT="$(installed_variant "$INSTALL_DIR")" || VARIANT="full"
+fi
 case "$VARIANT" in
     full|mini) ;;
     *) die "Unknown SDDM theme variant: $VARIANT" ;;
@@ -32,13 +48,172 @@ esac
 THEME_SOURCE="$SRC_DIR/themes/$VARIANT"
 FONT_SOURCE="$BUNDLE_DIR/src/kde/shells/caelestia.desktop/contents/fonts/GoogleSansFlex.ttf"
 
-if [[ ! -d "$THEME_SOURCE" ]]; then
-    die "SDDM theme source not found at $THEME_SOURCE"
+if install_is_packaged; then
+    THEME_SOURCE="$INSTALL_DIR"
+    FONT_SOURCE="$INSTALL_DIR/assets/google-sans-flex/GoogleSansFlex.ttf"
+    if [[ ! -f "$INSTALL_DIR/theme.conf" ]]; then
+        die "The package's login screen theme is not installed at $INSTALL_DIR"
+    fi
+else
+    if [[ ! -d "$THEME_SOURCE" ]]; then
+        die "SDDM theme source not found at $THEME_SOURCE"
+    fi
 fi
 
 ALL_OK=true
 
-if [[ "${BASE_DISTRO:-}" == "arch" ]]; then
+register_greeter_sync() {
+    local label="${1:-Login screen configured.}"
+
+    POSTHOOK_CMD="sudo -n $SYNC_SCRIPT --posthook"
+    CLI_JSON="$HOME/.config/caelestia/cli.json"
+
+    if command -v python3 &>/dev/null; then
+        python3 - "$CLI_JSON" "$POSTHOOK_CMD" <<'PYEOF'
+import json, os, re, sys
+
+cli_path, hook_cmd = sys.argv[1], sys.argv[2]
+
+config = {}
+if os.path.exists(cli_path):
+    with open(cli_path) as f:
+        config = json.load(f)
+
+# Assign rather than append: any posthook of ours comes out first, then the
+# current one goes in once, so re-running does not stack copies and a path left by
+# the other display manager's install does not survive. A hook the user wrote is
+# kept in front of ours; every other key is untouched.
+#
+# Only the two helpers this installer owns are recognised, the pair
+# uninstall.sh recognises too: matching any `--posthook` command would delete a
+# posthook the user wrote for a tool of their own.
+HELPERS = r"sudo\s+(?:-\S+\s+)*\S*(?:sync\.sh|caelestia-greeter-sync)\s+--posthook"
+ours = re.compile(
+    r"\s*&&\s*" + HELPERS
+    + r"|" + HELPERS + r"\s*&&\s*"
+    + r"|" + HELPERS
+)
+
+for section in ("wallpaper", "theme"):
+    config.setdefault(section, {})
+    existing = config[section].get("postHook", "")
+    if isinstance(existing, str):
+        cleaned = ours.sub("", existing).strip()
+        config[section]["postHook"] = f"{cleaned} && {hook_cmd}" if cleaned else hook_cmd
+
+os.makedirs(os.path.dirname(cli_path), exist_ok=True)
+with open(cli_path, "w") as f:
+    json.dump(config, f, indent=4)
+    f.write("\n")
+PYEOF
+        ok "Posthook registered in cli.json"
+    else
+        warn "python3 not found, skipping posthook registration. Wallpaper and color changes will not auto-sync to the login screen."
+        ALL_OK=false
+    fi
+
+    # The rule is checked before it is installed: a malformed file in sudoers.d stops
+    # sudo working for the whole machine, and $USER is only an environment variable, so
+    # the name comes from id instead.
+    local target_user="${SUDO_USER:-$(id -un)}"
+    if [[ ! "$target_user" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        warn "Could not tell which user the login screen sync belongs to (got '$target_user')."
+        ALL_OK=false
+        return
+    fi
+
+    local rule_tmp
+    rule_tmp="$(mktemp)"
+    printf '%s ALL=(root) NOPASSWD: %s\n' "$target_user" "$SYNC_SCRIPT" > "$rule_tmp"
+
+    if ! caelestia_sudo visudo -cf "$rule_tmp"; then
+        rm -f "$rule_tmp"
+        warn "The generated sudoers rule for $SYNC_SCRIPT did not validate; leaving sudoers alone."
+        ALL_OK=false
+        return
+    fi
+
+    SUDOERS_FILE="/etc/sudoers.d/caelestia-sddm-sync"
+    if caelestia_sudo install -m 0440 -o root -g root "$rule_tmp" "$SUDOERS_FILE"; then
+        rm -f "$rule_tmp"
+        ok "Sudoers drop-in written for $SYNC_SCRIPT."
+    else
+        rm -f "$rule_tmp"
+        warn "Could not write $SUDOERS_FILE; the login screen will not follow the theme."
+        ALL_OK=false
+    fi
+
+    if [[ "$ALL_OK" == "true" ]]; then
+        ok "$label"
+    else
+        warn "Login screen installed with warnings. Review the output above."
+    fi
+}
+
+is_plasmalogin_active() {
+    local target
+    target="$(readlink -f /etc/systemd/system/display-manager.service 2>/dev/null || true)"
+
+    case "$target" in
+        *plasmalogin*) return 0 ;;
+        *sddm*) return 1 ;;
+    esac
+
+    if systemctl is-active plasmalogin.service &>/dev/null || \
+       systemctl is-enabled plasmalogin.service &>/dev/null; then
+        return 0
+    fi
+    if systemctl is-active sddm.service &>/dev/null || \
+       systemctl is-enabled sddm.service &>/dev/null; then
+        return 1
+    fi
+    if [[ -e /etc/plasmalogin.conf ]] && ! command -v sddm >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
+
+DISPLAY_MANAGER="sddm"
+if is_plasmalogin_active; then
+    DISPLAY_MANAGER="plasmalogin"
+fi
+
+if [[ "$DISPLAY_MANAGER" == "plasmalogin" ]]; then
+    if install_is_packaged; then
+        SYNC_SCRIPT="$INSTALL_DIR/scripts/sync.sh"
+        if [[ ! -x "$SYNC_SCRIPT" ]]; then
+            die "The package's login screen helper is not installed at $SYNC_SCRIPT"
+        fi
+    else
+        SYNC_SCRIPT="/usr/local/bin/caelestia-greeter-sync"
+
+        caelestia_sudo install -d -m 0755 /usr/local/bin
+        # The helper is granted NOPASSWD sudo and run as root, so it is copied with the
+        # link refused rather than followed: `install` here would have taken whatever a
+        # planted symlink pointed at.
+        if ! privileged_copy_file "$SRC_DIR/sync.sh" "$SYNC_SCRIPT" 0755; then
+            die "Could not install the login screen helper from $SRC_DIR/sync.sh"
+        fi
+        ok "Login screen sync helper installed to $SYNC_SCRIPT"
+    fi
+
+    if sync_output="$(caelestia_sudo "$SYNC_SCRIPT" 2>&1)"; then
+        ok "Initial login screen sync complete."
+    else
+        warn "Initial login screen sync had warnings (non-fatal):"
+        if [[ -n "$sync_output" ]]; then
+            printf '%s\n' "$sync_output" | sed -e 's/\[WARN\]/warning:/g' -e 's/\[ERR\]/error:/g' -e 's/^/  /'
+        fi
+        ALL_OK=false
+    fi
+
+    register_greeter_sync "Login screen configured for Plasma Login."
+    exit 0
+fi
+
+if install_is_packaged; then
+    skip "The display manager's dependencies belong to the package."
+elif [[ "${BASE_DISTRO:-}" == "arch" ]]; then
     SDDM_DEPS=(sddm qt6-declarative qt6-5compat qt6-svg qt6-multimedia)
     MISSING=()
     for pkg in "${SDDM_DEPS[@]}"; do
@@ -82,37 +257,159 @@ else
     ALL_OK=false
 fi
 
-if [[ -d "$INSTALL_DIR" ]]; then
-    caelestia_sudo rm -rf "$INSTALL_DIR"
+install_theme_files() {
+    # Everything below is copied as root out of a tree this user can write. A link in
+    # that tree is either followed - disclosing what it points at into a world-readable
+    # theme directory - or left for root to open later, so the tree has to be plain.
+    if ! tree_has_no_symlinks "$THEME_SOURCE"; then
+        die "The login screen theme source at $THEME_SOURCE contains a symlink; refusing to install it as root."
+    fi
+
+    if [[ -d "$INSTALL_DIR" ]]; then
+        caelestia_sudo rm -rf "$INSTALL_DIR"
+    fi
+
+    caelestia_sudo mkdir -p "$INSTALL_DIR"
+    # Copied file by file as root with O_NOFOLLOW rather than with `cp -r`: the tree was
+    # checked a moment ago, and a link planted since then is refused by the kernel instead
+    # of being followed or left for root to open later.
+    if ! privileged_copy_tree "$THEME_SOURCE" "$INSTALL_DIR"; then
+        die "Could not install the login screen theme from $THEME_SOURCE."
+    fi
+    caelestia_sudo mkdir -p "$INSTALL_DIR/scripts"
+    if ! privileged_copy_file "$SRC_DIR/sync.sh" "$INSTALL_DIR/scripts/sync.sh" 0644; then
+        die "Could not install the login screen helper from $SRC_DIR/sync.sh"
+    fi
+
+    caelestia_sudo mkdir -p "$INSTALL_DIR/assets/google-sans-flex"
+    if [[ -f "$FONT_SOURCE" ]]; then
+        if ! privileged_copy_file "$FONT_SOURCE" "$INSTALL_DIR/assets/google-sans-flex/GoogleSansFlex.ttf" 0644; then
+            warn "Could not install GoogleSansFlex.ttf from $FONT_SOURCE; theme text may not render correctly."
+            ALL_OK=false
+        fi
+    else
+        warn "GoogleSansFlex.ttf not found at $FONT_SOURCE, theme text may not render correctly."
+        ALL_OK=false
+    fi
+
+    if [[ "$VARIANT" == "mini" ]]; then
+        if [[ -d "$SRC_DIR/themes/full/components/shapes" ]]; then
+            if ! tree_has_no_symlinks "$SRC_DIR/themes/full/components/shapes"; then
+                die "The shape components at $SRC_DIR/themes/full/components/shapes contain a symlink; refusing to install them as root."
+            fi
+            caelestia_sudo mkdir -p "$INSTALL_DIR/components/shapes"
+            if ! privileged_copy_tree "$SRC_DIR/themes/full/components/shapes" "$INSTALL_DIR/components/shapes"; then
+                die "Could not install the shape components from $SRC_DIR/themes/full/components/shapes."
+            fi
+        else
+            warn "Shape components not found at $SRC_DIR/themes/full/components/shapes, mini theme will not render correctly."
+            ALL_OK=false
+        fi
+    fi
+
+    caelestia_sudo find "$INSTALL_DIR" -type d -exec chmod 755 {} +
+    caelestia_sudo find "$INSTALL_DIR" -type f -exec chmod 644 {} +
+    caelestia_sudo chmod 755 "$SYNC_SCRIPT"
+    ok "Theme files installed to $INSTALL_DIR ($VARIANT variant)"
+}
+
+if install_is_packaged; then
+    skip "The theme files belong to the package."
+else
+    install_theme_files
 fi
 
-caelestia_sudo mkdir -p "$INSTALL_DIR/scripts"
-caelestia_sudo cp -r "$THEME_SOURCE"/* "$INSTALL_DIR/"
-caelestia_sudo cp "$SRC_DIR/sync.sh" "$INSTALL_DIR/scripts/"
+for required in theme.conf metadata.desktop Main.qml; do
+    if [[ ! -e "/usr/share/sddm/themes/$THEME_NAME/$required" ]]; then
+        warn "$INSTALL_DIR/$required is missing: SDDM will ignore this theme and show the default."
+        ALL_OK=false
+    fi
+done
 
-caelestia_sudo mkdir -p "$INSTALL_DIR/assets/google-sans-flex"
-if [[ -f "$FONT_SOURCE" ]]; then
-    caelestia_sudo cp "$FONT_SOURCE" "$INSTALL_DIR/assets/google-sans-flex/GoogleSansFlex.ttf"
-else
-    warn "GoogleSansFlex.ttf not found at $FONT_SOURCE, theme text may not render correctly."
+theme_qt_version() {
+    sed -n 's/^[[:space:]]*QtVersion[[:space:]]*=[[:space:]]*\([0-9][0-9]*\)[[:space:]]*$/\1/p' "$1" 2>/dev/null | tail -n 1
+}
+
+greeter_binary_for_qt() {
+    if [[ "$1" == "5" ]]; then
+        printf '%s\n' sddm-greeter
+    else
+        printf 'sddm-greeter-qt%s\n' "$1"
+    fi
+}
+
+greeter_path_for_qt() {
+    local name path
+    name="$(greeter_binary_for_qt "$1")"
+
+    if path="$(command -v "$name" 2>/dev/null)" && [[ -n "$path" ]]; then
+        printf '%s\n' "$path"
+        return 0
+    fi
+
+    local dir
+    for dir in /usr/bin /usr/local/bin /usr/lib/sddm /usr/libexec/sddm; do
+        if [[ -x "$dir/$name" ]]; then
+            printf '%s\n' "$dir/$name"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+verify_theme_greeter() {
+    local metadata="$INSTALL_DIR/metadata.desktop"
+    local version path
+    version="$(theme_qt_version "$metadata")"
+    if [[ -z "$version" ]]; then
+        warn "$metadata does not declare a QtVersion, so SDDM would run this Qt 6 theme under its Qt 5 greeter."
+        return 1
+    fi
+
+    path="$(greeter_path_for_qt "$version")" || path=""
+    if [[ -z "$path" ]]; then
+        warn "SDDM has no $(greeter_binary_for_qt "$version") to run the theme with."
+        return 1
+    fi
+
+    ok "Theme runs under $(basename -- "$path") (Qt $version)."
+}
+
+THEME_RUNNABLE=true
+if ! verify_theme_greeter; then
+    THEME_RUNNABLE=false
     ALL_OK=false
 fi
 
-# mini reuses full's shape components (coupled by design, keep in sync)
-if [[ "$VARIANT" == "mini" ]]; then
-    if [[ -d "$SRC_DIR/themes/full/components/shapes" ]]; then
-        caelestia_sudo mkdir -p "$INSTALL_DIR/components/shapes"
-        caelestia_sudo cp -r "$SRC_DIR/themes/full/components/shapes"/* "$INSTALL_DIR/components/shapes/"
-    else
-        warn "Shape components not found at $SRC_DIR/themes/full/components/shapes, mini theme will not render correctly."
-        ALL_OK=false
-    fi
-fi
+remove_theme_selection() {
+    local dropin
+    for dropin in /etc/sddm.conf.d/zz-caelestia.conf /etc/sddm.conf.d/caelestia.conf; do
+        if [[ -f "$dropin" ]]; then
+            caelestia_sudo rm -f "$dropin"
+            ok "Removed the SDDM theme drop-in: $(basename -- "$dropin")"
+        fi
+    done
 
-caelestia_sudo find "$INSTALL_DIR" -type d -exec chmod 755 {} +
-caelestia_sudo find "$INSTALL_DIR" -type f -exec chmod 644 {} +
-caelestia_sudo chmod 755 "$SYNC_SCRIPT"
-ok "Theme files installed to $INSTALL_DIR ($VARIANT variant)"
+    command -v kwriteconfig6 >/dev/null 2>&1 || return 0
+
+    local backup="${XDG_STATE_HOME:-$HOME/.local/state}/caelestia/sddm.conf.theme-current"
+    local current=""
+    if [[ -f "$backup" ]]; then
+        current="$(cat "$backup")"
+    else
+        current="$(kreadconfig6 --file /etc/sddm.conf --group Theme --key Current 2>/dev/null || true)"
+        [[ "$current" == "$THEME_NAME" ]] || return 0
+    fi
+
+    if [[ "$current" == "#none" ]]; then
+        caelestia_sudo kwriteconfig6 --file /etc/sddm.conf --group Theme --key Current --delete 2>/dev/null || true
+    else
+        caelestia_sudo kwriteconfig6 --file /etc/sddm.conf --group Theme --key Current "$current" 2>/dev/null || true
+    fi
+    rm -f "$backup"
+    ok "Restored the login screen theme selection."
+}
 
 mkdir -p "$HOME/.config/caelestia/templates"
 if [[ -f "$THEME_SOURCE/theme.conf.template" ]]; then
@@ -120,66 +417,45 @@ if [[ -f "$THEME_SOURCE/theme.conf.template" ]]; then
     ok "Template config created."
 fi
 
+if install_is_packaged; then
+    skip "The theme selection belongs to the package."
+    if [[ "$THEME_RUNNABLE" != "true" ]]; then
+        warn "The package selects the theme anyway. Point [Theme] Current at another theme until the greeter above is installed."
+    fi
+elif [[ "$THEME_RUNNABLE" != "true" ]]; then
+    warn "The theme is installed but left unselected: a login screen that cannot start is worse than the default one."
+    warn "Install the greeter above, then run 'caelestia login-screen'."
+    remove_theme_selection
+else
 caelestia_sudo mkdir -p /etc/sddm.conf.d
-cat <<'DROPIN' | caelestia_sudo tee /etc/sddm.conf.d/caelestia.conf >/dev/null
+cat <<'DROPIN' | caelestia_sudo tee /etc/sddm.conf.d/zz-caelestia.conf >/dev/null
 [General]
 GreeterEnvironment=QML_XHR_ALLOW_FILE_READ=1
 
 [Theme]
 Current=caelestia
 DROPIN
+caelestia_sudo rm -f /etc/sddm.conf.d/caelestia.conf
 ok "SDDM config drop-in created."
 
-POSTHOOK_CMD="sudo $SYNC_SCRIPT --posthook"
-CLI_JSON="$HOME/.config/caelestia/cli.json"
-
-if command -v python3 &>/dev/null; then
-    python3 - "$CLI_JSON" "$POSTHOOK_CMD" <<'PYEOF'
-import json, sys, os
-cli_path, hook_cmd = sys.argv[1], sys.argv[2]
-config = {}
-if os.path.exists(cli_path):
-    with open(cli_path) as f:
-        config = json.load(f)
-for section in ("wallpaper", "theme"):
-    if section not in config:
-        config[section] = {}
-    existing = config[section].get("postHook", "")
-    if hook_cmd in existing:
-        pass
-    elif existing:
-        config[section]["postHook"] = existing + " && " + hook_cmd
-    else:
-        config[section]["postHook"] = hook_cmd
-os.makedirs(os.path.dirname(cli_path), exist_ok=True)
-with open(cli_path, "w") as f:
-    json.dump(config, f, indent=4)
-PYEOF
-    ok "Posthook registered in cli.json"
-else
-    warn "python3 not found, skipping posthook registration. Wallpaper and color changes will not auto-sync to SDDM."
-    ALL_OK=false
+SDDM_CONF_BACKUP="${XDG_STATE_HOME:-$HOME/.local/state}/caelestia/sddm.conf.theme-current"
+if command -v kwriteconfig6 >/dev/null 2>&1; then
+    if [[ ! -f "$SDDM_CONF_BACKUP" ]] && command -v kreadconfig6 >/dev/null 2>&1; then
+        mkdir -p "$(dirname -- "$SDDM_CONF_BACKUP")"
+        PREVIOUS_CURRENT="$(kreadconfig6 --file /etc/sddm.conf --group Theme --key Current 2>/dev/null || true)"
+        printf '%s\n' "${PREVIOUS_CURRENT:-#none}" > "$SDDM_CONF_BACKUP"
+    fi
+    caelestia_sudo kwriteconfig6 --file /etc/sddm.conf --group Theme --key Current "$THEME_NAME" 2>/dev/null \
+        && ok "Theme selected in /etc/sddm.conf as well." \
+        || warn "Could not write to /etc/sddm.conf; the drop-in is the only selection."
+fi
 fi
 
-SUDOERS_FILE="/etc/sudoers.d/caelestia-sddm-sync"
-if ! caelestia_sudo_quiet test -f "$SUDOERS_FILE"; then
-    echo "$USER ALL=(root) NOPASSWD: $SYNC_SCRIPT" | caelestia_sudo tee "$SUDOERS_FILE" >/dev/null
-    caelestia_sudo chmod 440 "$SUDOERS_FILE"
-    ok "Sudoers drop-in created."
-fi
+for conf in /usr/lib/sddm/sddm.conf.d/*.conf /etc/sddm.conf /etc/sddm.conf.d/*.conf; do
+    [[ -f "$conf" ]] || continue
+    CURRENT_LINE="$(grep -E '^[[:space:]]*Current[[:space:]]*=' "$conf" 2>/dev/null | tail -n 1 || true)"
+    [[ -n "$CURRENT_LINE" ]] || continue
+    info "${conf}: ${CURRENT_LINE// /}"
+done
 
-if caelestia_sudo "$SYNC_SCRIPT"; then
-    ok "Initial sync complete."
-else
-    warn "Initial sync had warnings (non-fatal)."
-    ALL_OK=false
-fi
-
-# Non-fatal problems are reported through the [WARN] markers in this step's
-# output, which the TUI turns into a WARN status. The exit code stays 0 so a
-# theme that did install is not reported as FAILED and offered for retry.
-if [[ "$ALL_OK" == "true" ]]; then
-    ok "SDDM theme installed."
-else
-    warn "SDDM theme installed with warnings. Review the output above."
-fi
+register_greeter_sync "SDDM theme installed."

@@ -85,7 +85,7 @@ StyledRect {
 
     Behavior on radius {
         Anim {
-            type: Anim.FastSpatial
+            type: Anim.DefaultEffects
         }
     }
 
@@ -95,7 +95,6 @@ StyledRect {
         }
     }
 
-    // Tooltip - positioned absolutely, doesn't affect layout
     Loader {
         id: tooltipLoader
 
@@ -110,7 +109,6 @@ StyledRect {
                 text: root.tooltip
             }
         }
-        // Completely remove from layout
         Layout.fillWidth: false
         Layout.fillHeight: false
         Layout.preferredWidth: 0

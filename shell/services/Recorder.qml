@@ -8,11 +8,12 @@ import qs.utils
 Singleton {
     id: root
 
-    readonly property string recordBin: Paths.absolutePath("~/.local/bin/caelestia-record")
+    readonly property string recordBin: Paths.bin("caelestia-record")
 
     readonly property alias running: props.running
     readonly property alias paused: props.paused
     readonly property alias elapsed: props.elapsed
+    readonly property bool probing: running || needsStart || needsStop || needsPause
     property bool needsStart
     property list<string> startArgs
     property bool needsStop
@@ -54,7 +55,7 @@ Singleton {
 
         property bool running: false
         property bool paused: false
-        property real elapsed: 0 // Might get too large for int
+        property real elapsed: 0
 
         reloadableId: "recorder"
     }
@@ -94,7 +95,7 @@ Singleton {
     }
 
     Timer {
-        interval: 500
+        interval: root.probing ? 500 : 2500
         repeat: true
         running: true
         onTriggered: {
@@ -104,13 +105,13 @@ Singleton {
         }
     }
 
-    Connections {
-        enabled: props.running && !props.paused
+    Timer {
+        interval: 1000
+        repeat: true
+        running: props.running && !props.paused
 
-        function onSecondsChanged(): void {
+        onTriggered: {
             props.elapsed++;
         }
-
-        target: Time // qmllint disable incompatible-type
     }
 }

@@ -21,9 +21,6 @@ Item {
     property bool skipTransition: false
     property var screen: null
 
-    // True once this wallpaper has something to show, or has nothing to load at
-    // all. Background.qml keeps its fallback black until then, so a shell that is
-    // still starting does not paint the desktop black while the image decodes.
     readonly property bool shown: root.current ? (root.current.shown || root.source === "") : false
 
     function isVideo(path: string): bool {
@@ -31,6 +28,14 @@ Item {
             return false;
         const ext = path.split('.').pop().toLowerCase();
         return ["mp4", "webm", "mkv", "avi", "mov", "wmv", "flv"].includes(ext);
+    }
+
+    function releaseHidden(): void {
+        if (!current || (current.videoPath !== source && current.imagePath !== source))
+            return;
+        for (const img of [one, two])
+            if (img !== current)
+                img.videoPath = "";
     }
 
     onSourceChanged: {
@@ -50,6 +55,7 @@ Item {
                 one.screen = screen;
                 Qt.callLater(() => one.update());
                 completed = true;
+                Logger.mark("wallpaper-ready");
             });
     }
 
@@ -127,7 +133,7 @@ Item {
                             id: selectWallText
 
                             anchors.centerIn: parent
-                            text: qsTr("Set it now!")
+                            text: qsTr("Set wallpaper")
                             color: Colours.palette.m3onPrimary
                             font: Tokens.font.body.large
                         }
@@ -152,10 +158,10 @@ Item {
 
         property string imagePath: ""
         property string videoPath: ""
-        property bool isVideoImage: root.isVideo(root.source)
+        // Follows what this layer holds, not root.source: the hidden layer keeps
+        // its old content and must not start decoding a new video as well.
+        readonly property bool isVideoImage: videoPath !== ""
         property var screen: null
-        // Content is on screen for this element: an image reports it through the
-        // decode status, a video through playback actually starting.
         readonly property bool shown: {
             if (root.source === "")
                 return false;
@@ -182,10 +188,6 @@ Item {
 
         function update(): void {
             this.screen = root.screen;
-            // Ask about the source being switched to, not the isVideoImage binding:
-            // that binding can still hold the previous source's answer when this
-            // runs, which routed a video into the image loader. The image cannot
-            // decode it, so the wallpaper just went white.
             const isVideoImage = root.isVideo(root.source);
             if (isVideoImage) {
                 if (videoPath === root.source)
@@ -203,27 +205,17 @@ Item {
                 }
             }
         }
-        function updateContent(): void {
-            const isVideoImage = root.isVideo(root.source);
-            if (isVideoImage) {
-                imagePath = "";
-                videoPath = root.source;
-            } else {
-                videoPath = "";
-                imagePath = root.source;
-            }
-        }
 
-        onIsVideoImageChanged: updateContent()
         anchors.fill: parent
         opacity: 1
         scale: 1
-        Component.onCompleted: maskRadius = root.skipTransition ? maxRadius : maxRadius // Wait, original was maxRadius, but wait, onZChanged resets it
+        Component.onCompleted: maskRadius = root.skipTransition ? maxRadius : maxRadius
         z: root.current === img ? 1 : 0
         onZChanged: {
             if (z === 1) {
                 if (root.skipTransition) {
                     maskRadius = maxRadius;
+                    Qt.callLater(root.releaseHidden);
                 } else {
                     maskRadius = 0;
                     maskAnim.restart();
@@ -291,58 +283,44 @@ Item {
                 path: img.imagePath
                 visible: !img.isVideoImage && img.imagePath !== ""
                 asynchronous: true
+                // Caching every GIF frame can consume gigabytes at wallpaper sizes.
+                cache: !/\.gif(?:[?#]|$)/i.test(img.imagePath)
                 fillMode: Config.background.wallpaperFillMode
-                source: img.imagePath || ""
+                source: wallpaperImage.width > 0 && wallpaperImage.height > 0 ? (img.imagePath || "") : ""
                 playing: true
-                // Decode near the size actually drawn. Left alone, the image is
-                // decoded at whatever resolution it happens to be: an 8K wallpaper
-                // is ~132MB of pixels and a slow decode, paid twice over while the
-                // outgoing and incoming images overlap through the reveal — which
-                // is the hitch on every wallpaper change. Every other wallpaper
-                // view already asks for a size; only the one drawing the biggest
-                // image did not.
-                //
-                // Only the width is given. Setting both dimensions scales the
-                // decode to exactly that box and drops the aspect ratio, which
-                // turns a 16:9 wallpaper into a square — fillMode is configurable
-                // and PreserveAspectCrop then shows that square pillarboxed. With
-                // one dimension the other follows the image's own aspect.
-                //
-                // It asks for half again the long edge so the result still covers
-                // the item under PreserveAspectCrop even for footage much wider
-                // than the screen; Qt never upscales a decode, so nothing is lost
-                // on images that are already smaller. An 8K wallpaper on this
-                // screen still comes down from ~33MP to under 7MP.
-                //
-                // Tiling is left unconstrained: there the decode size is the tile
-                // size, so capping it would change how the wallpaper looks.
                 sourceSize: {
-                    // Nothing to size when this element is not the one drawing:
-                    // for a video the source here is empty, and handing a decode
-                    // size to an AnimatedImage in that state leaves the wallpaper
-                    // blank.
+                    // An unset size preserves GIF aspect ratio and avoids starting QMovie at 0x0.
+                    if (/\.gif(?:[?#]|$)/i.test(img.imagePath))
+                        return Qt.size(-1, -1);
                     if (img.isVideoImage || img.imagePath === "" || img.tiled)
                         return Qt.size(0, 0);
                     const dpr = wallpaperImage.Screen.devicePixelRatio || 1;
                     const edge = Math.ceil(Math.max(wallpaperImage.width, wallpaperImage.height) * dpr * 1.5);
-                    return edge > 0 ? Qt.size(edge, 0) : Qt.size(0, 0);
+                    return edge > 0 ? Qt.size(edge, 0) : Qt.size(-1, -1);
                 }
                 onStatusChanged: {
                     if (status === Image.Ready && !img.isVideoImage)
                         root.current = img;
                 }
             }
-            CachingVideo {
+            // Only for a video: any multimedia object loads Qt's FFmpeg backend, whose hardware
+            // probe opens CUDA and keeps a hybrid laptop's NVIDIA GPU awake.
+            Loader {
                 id: wallpaperVideo
 
+                readonly property bool playing: (item as CachingVideo)?.playing ?? false
+
                 anchors.fill: parent
-                path: img.videoPath
-                screen: root.screen
-                visible: img.isVideoImage && img.videoPath !== ""
-                fillMode: Config.background.wallpaperFillMode
-                onPlayingChanged: {
-                    if (playing && img.isVideoImage)
-                        root.current = img;
+                active: img.isVideoImage && img.videoPath !== ""
+
+                sourceComponent: CachingVideo {
+                    path: img.videoPath
+                    screen: root.screen
+                    fillMode: Config.background.wallpaperFillMode
+                    onPlayingChanged: {
+                        if (playing && img.isVideoImage)
+                            root.current = img;
+                    }
                 }
             }
         }
@@ -353,8 +331,9 @@ Item {
                 property: "maskRadius"
                 from: 0
                 to: img.maxRadius
-                type: Anim.Emphasized
-                duration: 2500
+                easing: Tokens.anim.emphasized
+                duration: Tokens.anim.duration(2500)
+                onFinished: root.releaseHidden()
             }
     }
 }

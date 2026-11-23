@@ -9,6 +9,13 @@ ButtonBase {
 
     property alias icon: label.text
     readonly property alias label: label
+    // Opt-in: a glyph that swaps on an infrequent state change (play to pause) grows in
+    // instead of snapping, the same cross-fade the bar's status icons use.
+    property alias animateIcon: label.animate
+
+    // A Material ligature is a poor label, but it beats an unnamed button. A
+    // caller that knows the action should set accessibleName itself.
+    accessibleName: icon.replace(/_/g, " ")
 
     font: Tokens.font.icon.medium
     padding: type === IconButton.Text ? Tokens.padding.extraSmall / 2 : Tokens.padding.small

@@ -3,13 +3,14 @@ pragma Singleton
 import QtQuick
 import Quickshell
 import Caelestia.Config
-import Caelestia.Services
+import qs.services
 
 Singleton {
     id: root
 
     property var items: []
     property int selectedIndex: 0
+    property bool isSwitching: false
 
     function triggerCycleNext(): void {
         if (items.length === 0) return;
@@ -32,8 +33,14 @@ Singleton {
     }
 
     function refreshHighlight(): void {
-        if (GlobalConfig.tabSwitch?.previewOnDesktop && selectedIndex >= 0 && selectedIndex < items.length) {
-            KWinActiveWindowBridge.highlightWindow(items[selectedIndex].address);
+        if (!root.isSwitching || !GlobalConfig.tabSwitch?.previewOnDesktop) {
+            Kwin.clearHighlight();
+            return;
+        }
+        if (selectedIndex >= 0 && selectedIndex < items.length) {
+            Kwin.highlightWindow(items[selectedIndex].address);
+        } else {
+            Kwin.clearHighlight();
         }
     }
 
@@ -41,9 +48,9 @@ Singleton {
         if (!client || !client.workspace) return "";
         const wsId = client.workspace.id;
         const wsUuid = client.workspace.uuid;
-        if (typeof KWinWorkspaceState !== "undefined" && KWinWorkspaceState.workspaces) {
-            for (let i = 0; i < KWinWorkspaceState.workspaces.length; ++i) {
-                const ws = KWinWorkspaceState.workspaces[i];
+        if (Kwin.workspaces) {
+            for (let i = 0; i < Kwin.workspaces.length; ++i) {
+                const ws = Kwin.workspaces[i];
                 if ((wsUuid && ws.id === wsUuid) || (wsId !== undefined && wsId !== -1 && ws.index === wsId)) {
                     return ws.name || ("Desktop " + ws.index);
                 }
@@ -54,20 +61,18 @@ Singleton {
     }
 
     function updateItems(): void {
-        const activeAddress = KWinActiveWindowBridge.activeWindow ? KWinActiveWindowBridge.activeWindow.address : "";
-        const winList = (KWinActiveWindowBridge.windowList || []).filter(w => !(w.class && w.class.toLowerCase().includes("xwaylandvideobridge")));
-        
+        const activeAddress = Kwin.activeWindow ? Kwin.activeWindow.address : "";
+        const winList = (Kwin.windowList || []).filter(w => !(w.class && w.class.toLowerCase().includes("xwaylandvideobridge")));
+
         let currentItems = root.items.slice();
-        
-        // 1. Remove closed windows
+
         currentItems = currentItems.filter(item => {
             for (let i = 0; i < winList.length; i++) {
                 if (winList[i].address === item.address) return true;
             }
             return false;
         });
-        
-        // Helper to format
+
         const formatClient = (client) => {
             return {
                 address: client.address,
@@ -87,13 +92,12 @@ Singleton {
             };
         };
 
-        // 2. Add new windows & update existing
         for (let i = 0; i < winList.length; ++i) {
             const client = winList[i];
             let found = false;
             for (let j = 0; j < currentItems.length; ++j) {
                 if (currentItems[j].address === client.address) {
-                    currentItems[j] = formatClient(client); // Update properties
+                    currentItems[j] = formatClient(client);
                     found = true;
                     break;
                 }
@@ -102,8 +106,7 @@ Singleton {
                 currentItems.push(formatClient(client));
             }
         }
-        
-        // 3. Move active window to index 0 (MRU ordering)
+
         if (activeAddress) {
             for (let i = 0; i < currentItems.length; i++) {
                 if (currentItems[i].address === activeAddress) {
@@ -114,39 +117,23 @@ Singleton {
             }
         }
 
-        // 4. Filter by current desktop if GlobalConfig.tabSwitch.currentDesktopOnly is active (KDE DesktopMode = 0)
-        if (GlobalConfig.tabSwitch?.currentDesktopOnly && typeof KWinWorkspaceState !== "undefined") {
-            const currentWsId = KWinWorkspaceState.activeId;
-            const currentWsUuid = (KWinWorkspaceState.workspaces && currentWsId > 0 && currentWsId <= KWinWorkspaceState.workspaces.length) 
-                ? KWinWorkspaceState.workspaces[currentWsId - 1].id 
-                : "";
-            currentItems = currentItems.filter(item => {
-                if (!item.workspace && !item.workspaceUuid) return true;
-                if (item.workspace === -1 || item.workspace === 0) return true;
-                if (item.workspace === currentWsId) return true;
-                if (currentWsUuid && item.workspaceUuid === currentWsUuid) return true;
-                return false;
-            });
+        if (GlobalConfig.tabSwitch?.currentDesktopOnly) {
+            currentItems = Kwin.filterWindows(currentItems, Kwin.activeWsId, "", true);
         }
 
-        // 5. Filter by current screen if GlobalConfig.tabSwitch.allScreens is false (KDE MultiScreenMode = 1)
         if (GlobalConfig.tabSwitch && !GlobalConfig.tabSwitch.allScreens) {
-            const activeOut = KWinActiveWindowBridge.activeOutputName || KWinActiveWindowBridge.cursorOutputName();
+            const activeOut = Kwin.activeOutputName || Kwin.cursorOutputName();
             if (activeOut) {
-                currentItems = currentItems.filter(item => !item.monitor || item.monitor === activeOut);
+                currentItems = Kwin.filterWindows(currentItems, null, activeOut, true);
             }
         }
 
-        // 6. Filter minimized windows if GlobalConfig.tabSwitch.showMinimized is false (KDE MinMode = 1)
         if (GlobalConfig.tabSwitch && !GlobalConfig.tabSwitch.showMinimized) {
             currentItems = currentItems.filter(item => !item.minimized);
         }
-        
+
         items = currentItems;
 
-        // A window closing (e.g. from the switcher's own close button) can leave
-        // selectedIndex pointing past the end of the shrunk array — clamp it back
-        // onto the last item rather than leaving ListView.currentIndex invalid.
         if (root.selectedIndex >= currentItems.length)
             root.selectedIndex = Math.max(0, currentItems.length - 1);
     }
@@ -159,16 +146,25 @@ Singleton {
     }
 
     function focusWindow(address: string): void {
-        KWinActiveWindowBridge.clearHighlight();
-        KWinActiveWindowBridge.focusWindow(address);
+        root.isSwitching = false;
+        Kwin.clearHighlight();
+        Kwin.focusWindow(address);
     }
 
     function closeWindow(address: string): void {
-        KWinActiveWindowBridge.closeWindow(address);
+        Kwin.closeWindow(address);
     }
 
     onSelectedIndexChanged: {
-        refreshHighlight();
+        if (root.isSwitching)
+            refreshHighlight();
+    }
+
+    onIsSwitchingChanged: {
+        if (root.isSwitching)
+            refreshHighlight();
+        else
+            Kwin.clearHighlight();
     }
 
     Component.onCompleted: {
@@ -184,7 +180,7 @@ Singleton {
             root.updateItems();
         }
 
-        target: KWinActiveWindowBridge
+        target: Kwin
     }
 
     Connections {
@@ -201,8 +197,8 @@ Singleton {
         }
 
         function onPreviewOnDesktopChanged(): void {
-            if (!GlobalConfig.tabSwitch.previewOnDesktop) {
-                KWinActiveWindowBridge.clearHighlight();
+            if (!GlobalConfig.tabSwitch.previewOnDesktop || !root.isSwitching) {
+                Kwin.clearHighlight();
             } else {
                 root.refreshHighlight();
             }

@@ -14,6 +14,9 @@ LazyListView {
     required property Flickable container
     required property DrawerVisibilities visibilities
 
+    /// What the list is being narrowed to, empty when nothing is.
+    property string filter: ""
+
     anchors.left: parent?.left
     anchors.right: parent?.right
     implicitHeight: contentHeight
@@ -38,84 +41,66 @@ LazyListView {
     model: ScriptModel {
         values: {
             const map = new Map();
-            for (const n of Notifs.list.filter(n => !n.closed))
+            for (const n of Notifs.list.filter(n => !n.closed && Notifs.matchesQuery(n, root.filter)))
                 map.set(n.appName, null);
-            for (const n of Notifs.list)
+            for (const n of Notifs.list.filter(n => Notifs.matchesQuery(n, root.filter)))
                 map.set(n.appName, null);
             return [...map.keys()];
         }
     }
 
     delegate: Component {
-        MouseArea {
+        NotifSwipeDelegate {
             id: notif
 
             required property int index
             required property string modelData
 
-            readonly property bool closed: notifInner.notifCount === 0
-            property int startY
-
-            function closeAll(): void {
-                clearTimer.start();
-            }
+            width: parent?.width ?? root.width
+            implicitWidth: width
 
             LazyListView.trackViewport: !notifInner.expanded && notifInner.nonAnimHeight < notifInner.implicitHeight
-            LazyListView.preferredHeight: closed ? 0 : notifInner.nonAnimHeight
+            LazyListView.preferredHeight: notifInner.notifCount === 0 ? 0 : notifInner.nonAnimHeight
             LazyListView.visibleHeight: notifInner.implicitHeight
             implicitHeight: notifInner.implicitHeight
 
-            opacity: LazyListView.removing || closed || LazyListView.adding ? 0 : 1
-            scale: LazyListView.removing || closed ? 0.6 : LazyListView.adding ? 0 : 1
+            opacity: LazyListView.removing || notifInner.notifCount === 0 || LazyListView.adding ? 0 : 1
+            scale: LazyListView.removing || notifInner.notifCount === 0 ? 0.6 : LazyListView.adding ? 0 : 1
 
-            hoverEnabled: true
-            cursorShape: pressed ? Qt.ClosedHandCursor : undefined
-            acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
-            preventStealing: true
-            enabled: !closed
+            allowExpandGesture: !notifInner.expanded
+            closed: closeAnim.running || notifInner.notifCount === 0
 
-            drag.target: this
-            drag.axis: Drag.XAxis
-
-            onPressed: event => {
-                startY = event.y;
-                if (event.button === Qt.RightButton)
-                    notifInner.toggleExpand(!notifInner.expanded);
-                else if (event.button === Qt.MiddleButton)
-                    closeAll();
-            }
-            onPositionChanged: event => {
-                if (pressed) {
-                    const diffY = event.y - startY;
-                    if (Math.abs(diffY) > Config.notifs.expandThreshold)
-                        notifInner.toggleExpand(diffY > 0);
-                }
-            }
-            onReleased: event => {
-                if (Math.abs(x) < width * Config.notifs.clearThreshold)
-                    x = 0;
-                else
-                    closeAll();
+            onExpandRequested: expanded => notifInner.toggleExpand(expanded)
+            onCloseRequested: closeAnim.restart()
+            // Collapsed group: open the newest notification (expanded groups handle clicks per notification)
+            onActivateRequested: {
+                if (GlobalConfig.notifs.actionOnClick && !notifInner.expanded && notifInner.activeNotifs[0]?.activate() && !Visibilities.sidebarPinned)
+                    root.visibilities.sidebar = false;
             }
 
-            Timer {
-                id: clearTimer
+            ParallelAnimation {
+                id: closeAnim
 
-                // One-shot: detach-first mirrors Notifs.clear() to avoid the
-                // O(n) self-removal inside NotifData.close() firing per item.
-                interval: 15
-                repeat: false
-                triggeredOnStart: true
-                onTriggered: {
-                    // Collect targets, remove from list in one assignment,
-                    // then close each \u2014 NotifData.close() skips its own filter
-                    // path when the item is no longer in Notifs.list.
-                    const toClose = Notifs.list.filter(n => !n.closed && n.appName === notif.modelData);
+                onFinished: {
+                    const appName = notif.modelData;
+                    const toClose = Notifs.list.filter(n => !n.closed && n.appName === appName);
                     if (toClose.length === 0)
                         return;
                     Notifs.list = Notifs.list.filter(n => !toClose.includes(n));
-                    Notifs.openCount = Math.max(0, Notifs.openCount - toClose.length);
                     for (const n of toClose) n.close();
+                }
+
+                Anim {
+                    type: Anim.DefaultEffects
+                    target: notif
+                    property: "opacity"
+                    to: 0
+                }
+
+                Anim {
+                    target: notif
+                    property: "x"
+                    to: notif.x >= 0 ? notif.width : -notif.width
                 }
             }
 
@@ -126,26 +111,7 @@ LazyListView {
                 props: root.props
                 container: root.container
                 visibilities: root.visibilities
-            }
-
-            Behavior on y {
-                enabled: notif.LazyListView.ready
-
-                Anim {}
-            }
-
-            Behavior on opacity {
-                Anim {
-                    type: Anim.DefaultEffects
-                }
-            }
-
-            Behavior on scale {
-                Anim {}
-            }
-
-            Behavior on x {
-                Anim {}
+                filter: root.filter
             }
         }
     }

@@ -1,11 +1,15 @@
 #include "cavaprovider.hpp"
 
+#include <qloggingcategory.h>
+
+#include <cava/cavacore.h>
+
+#include <algorithm>
+#include <cmath>
+#include <cstddef>
+
 #include "audiocollector.hpp"
 #include "audioprovider.hpp"
-#include <cava/cavacore.h>
-#include <cstddef>
-#include <cmath>
-#include <qloggingcategory.h>
 
 Q_LOGGING_CATEGORY(lcCava, "caelestia.services.cava", QtInfoMsg)
 Q_LOGGING_CATEGORY(lcCavaProcessor, "caelestia.services.cava.processor", QtInfoMsg)
@@ -35,11 +39,19 @@ void CavaProcessor::process() {
 
     const int count = static_cast<int>(AudioCollector::instance().readChunk(m_in));
 
-    // Process in data via cava
+    if (isSilent(m_in, static_cast<std::size_t>(count))) {
+        if (std::any_of(m_values.cbegin(), m_values.cend(), [](double value) {
+                return value != 0.0;
+            })) {
+            m_frameValues.fill(0.0);
+            m_values.fill(0.0);
+            emit valuesChanged(m_values);
+        }
+        return;
+    }
+
     cava_execute(m_in, count, m_out, m_plan);
 
-    // Apply monstercat filter
-    // Left to right pass
     const double inv = 1.0 / 1.5;
     double carry = 0.0;
     for (int i = 0; i < m_bars; ++i) {
@@ -47,14 +59,12 @@ void CavaProcessor::process() {
         m_frameValues[i] = carry;
     }
 
-    // Right to left pass and combine
     carry = 0.0;
     for (int i = m_bars - 1; i >= 0; --i) {
         carry = std::max(m_out[i], carry * inv);
         m_frameValues[i] = std::max(m_frameValues[i], carry);
     }
 
-    // Update values
     bool changed = m_values.size() != m_frameValues.size();
     if (!changed) {
         constexpr double epsilon = 0.0005;
@@ -115,7 +125,8 @@ void CavaProcessor::initCava() {
     constexpr int highCutoff = 10000;
 
 #ifdef CAVA_SCALING_LINEAR
-    m_plan = cava_init(m_bars, ac::SAMPLE_RATE, channels, autosens, noiseReduction, lowCutoff, highCutoff, CAVA_SCALING_LINEAR);
+    m_plan = cava_init(
+        m_bars, ac::SAMPLE_RATE, channels, autosens, noiseReduction, lowCutoff, highCutoff, CAVA_SCALING_LINEAR);
 #else
     m_plan = cava_init(m_bars, ac::SAMPLE_RATE, channels, autosens, noiseReduction, lowCutoff, highCutoff);
 #endif
@@ -162,7 +173,16 @@ QVector<double> CavaProvider::values() const {
 void CavaProvider::updateValues(const QVector<double>& values) {
     if (values != m_values) {
         m_values = values;
-        emit valuesChanged();
+        if (!m_emitPending) {
+            m_emitPending = true;
+            QMetaObject::invokeMethod(
+                this,
+                [this] {
+                    m_emitPending = false;
+                    emit valuesChanged();
+                },
+                Qt::QueuedConnection);
+        }
     }
 }
 

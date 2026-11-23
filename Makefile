@@ -22,15 +22,15 @@ BASH   ?= bash
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install update uninstall build-shell installer \
-        test test-bash test-repo validate hygiene \
-        check check-shell check-python check-qml search-coverage \
+.PHONY: help install update uninstall build-shell fetch-dependencies installer \
+        test test-bash test-fast test-isolated test-artifacts test-repo validate hygiene \
+        check check-shell check-python check-qml search-index search-coverage \
         sync-fetch sync-report translations clean
 
 help: ## List the available targets
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
-# ── Install / update ────────────────────────────────────────────────────────
+# Install / update
 # These call the shipped entry points rather than reimplementing them, so the
 # commands here and the published ones cannot drift apart.
 
@@ -43,24 +43,36 @@ update: ## Update an existing install (prompts for main or dev)
 uninstall: ## Remove the shell, its configs and the lockscreen plugin
 	$(BASH) uninstall.sh
 
-# ── Build ───────────────────────────────────────────────────────────────────
+# Build
 
 build-shell: ## Build and install the C++ QML plugin (needs Qt6 + CMake; Linux only)
 	$(BASH) $(STEPS_DIR)/08-build-shell.sh
+
+fetch-dependencies: ## Fetch pinned build dependencies for offline builds
+	$(BASH) $(STEPS_DIR)/fetch-dependencies.sh
 
 installer: ## Compile the TUI installer to installer/build/caelestia-install
 	cmake -B $(BUILD_DIR) -S $(TUI_DIR) -DCMAKE_BUILD_TYPE=Release
 	cmake --build $(BUILD_DIR)
 
-# ── Test ────────────────────────────────────────────────────────────────────
+# Test
 
 test: test-bash test-repo validate ## Run every test CI runs
 
 test-bash: ## Run the bash helper and step-unit tests
 	$(BASH) $(TESTS_DIR)/run-tests.sh
 
-test-repo: ## Check cross-cutting invariants (paths, versions, workflows, submodules)
-	$(PYTHON) $(CI_DIR)/test_repo_integrity.py
+test-fast: ## Run fast Bash tests only
+	$(BASH) $(TESTS_DIR)/run-tests.sh --suite fast
+
+test-isolated: ## Run isolated workflow Bash tests only
+	$(BASH) $(TESTS_DIR)/run-tests.sh --suite isolated
+
+test-artifacts: ## Run the artifact parity and provenance tests on their own (test-repo runs them too)
+	$(PYTHON) -m unittest discover -s $(CI_DIR) -p 'test_artifact_parity.py'
+
+test-repo: ## Check cross-cutting invariants (paths, versions, workflows, submodules, artifact checks)
+	$(PYTHON) -m unittest discover -s $(CI_DIR) -p 'test_*.py'
 
 validate: ## Validate the installer's menu.json and theme.json
 	$(PYTHON) $(CI_DIR)/validate_json_configs.py
@@ -68,7 +80,7 @@ validate: ## Validate the installer's menu.json and theme.json
 hygiene: ## Check file sizes, merge markers, trailing whitespace, line endings
 	$(PYTHON) $(CI_DIR)/check_file_hygiene.py --all
 
-# ── Lint ────────────────────────────────────────────────────────────────────
+# Lint
 
 check: check-python check-shell ## Lint the repo's own Python and shell
 
@@ -89,11 +101,15 @@ check-qml: ## QML conventions, syntax, imports, embedded bash, config references
 	$(PYTHON) $(CI_DIR)/check_embedded_bash.py
 	$(PYTHON) $(CI_DIR)/check_config_references.py
 	$(PYTHON) $(CI_DIR)/check_qml_deployment.py --source-root $(SHELL_DIR)
+	$(PYTHON) $(TOOLS_DIR)/generate_settings_index.py --check
+
+search-index: ## Regenerate the search index of the setting rows the pages render
+	$(PYTHON) $(TOOLS_DIR)/generate_settings_index.py
 
 search-coverage: ## Report settings pages that no search entry can open
 	$(PYTHON) $(CI_DIR)/audit_search_coverage.py
 
-# ── Repo tooling ────────────────────────────────────────────────────────────
+# Repo tooling
 
 sync-fetch: ## Refresh the upstream mirror used by the shell sync report
 	$(PYTHON) $(TOOLS_DIR)/sync-shell.py fetch

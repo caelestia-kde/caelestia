@@ -8,6 +8,44 @@ info() { echo "[INFO]  $*"; }
 ok()   { echo "[OK]    $*"; }
 warn() { echo "[WARN]  $*"; }
 
+# Where the outcome is recorded for the shell to read. The updater runs in a terminal the
+# shell only spawns, so this file is the one account of what happened that outlives the
+# restart an update causes.
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/caelestia"
+record() { # <file> <status> <label> [code] [logout]
+    mkdir -p "$STATE_DIR" 2>/dev/null || return 0
+    printf '%s|%s|%s|%s\n' "$2" "$3" "${4:-0}" "${5:-0}" > "$STATE_DIR/$1" 2>/dev/null || true
+}
+
+# What the run is doing, where the shell can read it. The terminal that starts this may
+# not be watched by anyone, and the shell that started it is restarted by the end, so a
+# file is the only account of progress that both can see.
+stage() { # <index> <total> <text>
+    echo "PROGRESS: ${1}/${2}: ${3}"
+    mkdir -p "$STATE_DIR" 2>/dev/null || return 0
+    printf '%s|%s|%s|%s\n' "$1" "$2" "$3" "$(date +%s)" > "$STATE_DIR/progress" 2>/dev/null || true
+}
+
+clear_progress() {
+    rm -f "$STATE_DIR/progress" 2>/dev/null || true
+}
+
+# Whether a person is watching: a prompt needs a terminal, and a run started by the shell
+# has none, so what a prompt would ask has to be decided instead of asked.
+INTERACTIVE=0
+if (exec </dev/tty >/dev/tty) 2>/dev/null; then
+    INTERACTIVE=1
+fi
+
+STAGE_REQUEST=0
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --stage) STAGE_REQUEST=1; shift ;;
+        --) shift; break ;;
+        *) break ;;
+    esac
+done
+
 run_stage() {
     local timeout_seconds="$1"
     shift
@@ -25,17 +63,16 @@ if [ "$BRANCH" != "main" ] && [ "$BRANCH" != "dev" ]; then
     echo "Warning: Branch '$BRANCH' is not allowed. Falling back to 'main'."
     BRANCH="main"
 fi
-if ! git ls-remote --exit-code --heads https://github.com/ladybug-me/caelestia-kde.git "$BRANCH" >/dev/null 2>&1; then
+if ! git ls-remote --exit-code --heads https://github.com/caelestia-kde/caelestia.git "$BRANCH" >/dev/null 2>&1; then
     echo "Warning: Branch '$BRANCH' does not exist on remote. Falling back to 'main'."
     BRANCH="main"
 fi
 
 if [ -n "$TARGET_REF" ]; then
-    if git ls-remote --exit-code --tags https://github.com/ladybug-me/caelestia-kde.git "$TARGET_REF" >/dev/null 2>&1; then
+    if git ls-remote --exit-code --tags https://github.com/caelestia-kde/caelestia.git "$TARGET_REF" >/dev/null 2>&1; then
         TARGET_KIND="tag"
     elif [ "$BRANCH" = "dev" ] && [[ "$TARGET_REF" =~ ^[0-9a-f]{7,40}$ ]]; then
-        # Dev branch supports installing/reverting to a specific commit from the
-        # timeline, not just tagged releases.
+        # Dev can also install or revert to a specific commit, not just a tag.
         TARGET_KIND="commit"
     else
         echo "Warning: Version tag '$TARGET_REF' not found on remote. Ignoring target and using branch head."
@@ -44,8 +81,15 @@ if [ -n "$TARGET_REF" ]; then
 fi
 UPD_DIR="$HOME/.config/caelestia-update"
 
-# Prevent concurrent update runs from racing on git/CMake/config writes.
-exec 9>"${XDG_RUNTIME_DIR:-/tmp}/caelestia-update.lock"
+# Prevent concurrent update runs from racing on git/CMake/config writes. This helper is
+# installed on its own and cannot source scripts/lib, so it claims the directory itself
+# the way caelestia_runtime_dir() does: a fixed name under a world-writable /tmp would
+# be followed if someone planted a symlink there first.
+LOCK_DIR="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/caelestia-$UID"
+if ! install -d -m 700 "$LOCK_DIR" 2>/dev/null || [ -L "$LOCK_DIR" ] || [ ! -O "$LOCK_DIR" ]; then
+    die "Could not secure the update lock directory at $LOCK_DIR."
+fi
+exec 9>"$LOCK_DIR/update.lock"
 flock -n 9 || { echo "Another Caelestia update is already running."; exit 1; }
 
 echo "---------------------------------------------"
@@ -56,29 +100,47 @@ else
 fi
 echo "---------------------------------------------"
 
-# --- Pre-flight Dependency Checks ---
-for cmd in git cmake make; do
-    if ! command -v "$cmd" &> /dev/null; then
-        die "Required command '$cmd' is missing. Please install it first."
-    fi
-done
+# What this run is for, named the way a reader would: the version when one was asked for,
+# otherwise the channel.
+UPDATE_LABEL="${TARGET_REF:-$BRANCH}"
 
-# --- Robust Privilege Escalation Wrapper ---
-# The wrapper tries cached credentials first (sudo -n), and only falls
-# back to an interactive prompt when the timestamp is truly expired.
+# A run supersedes the last outcome. Clearing it first means a crash part-way cannot leave
+# an older "updated" on the page once the shell comes back up.
+mkdir -p "$STATE_DIR" 2>/dev/null || true
+rm -f "$STATE_DIR/last-update" 2>/dev/null || true
+if [ "$STAGE_REQUEST" -eq 0 ]; then
+    rm -f "$STATE_DIR/staged-update" 2>/dev/null || true
+fi
+
+# Which half owns this install: /usr/bin is a package, anything else a checkout. Nothing
+# is probed on disk, so it stays right whatever the package is called.
+SELF_DIR="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd)"
+PACKAGED=0
+case "$SELF_DIR" in
+    /usr/bin) PACKAGED=1 ;;
+esac
+
+# A package install needs none of these; its branch below hands off to the package manager.
+if [ "$PACKAGED" -eq 0 ]; then
+    for cmd in git cmake make; do
+        if ! command -v "$cmd" &> /dev/null; then
+            die "Required command '$cmd' is missing. Please install it first."
+        fi
+    done
+fi
+
+# sudo wrapper: cached credentials first, interactive prompt only when expired.
 mkdir -p "$UPD_DIR/bin"
 cat << 'EOF' > "$UPD_DIR/bin/sudo"
 #!/usr/bin/env bash
 if [ "$EUID" -eq 0 ]; then
     exec "$@"
 fi
-# Try non-interactive first — if the parent keepalive has kept the
-# timestamp fresh this succeeds without any prompt at all.
+# -n first: if the parent keepalive kept the timestamp fresh, no prompt at all.
 if /usr/bin/sudo -n true 2>/dev/null; then
     exec /usr/bin/sudo -n "$@"
 fi
-# Timestamp expired or never created: fall back to whatever interactive
-# helper is available (terminal, ksshaskpass, pkexec).
+# Expired or never created: whichever interactive helper exists.
 if [ -t 1 ]; then
     exec /usr/bin/sudo "$@"
 elif command -v ksshaskpass &> /dev/null; then
@@ -93,12 +155,81 @@ EOF
 chmod +x "$UPD_DIR/bin/sudo"
 export PATH="$UPD_DIR/bin:$PATH"
 
-# --- Prime privilege escalation once, then keep it alive ---
-# Several steps below need root (system package update, the shell install
-# step). Authenticate once up front and refresh the cached credential in
-# the background so later sudo calls (which can happen well after the
-# initial prompt, e.g. after a long shell build) reuse it instead of
-# prompting again.
+# A staging run downloads what the update needs and changes nothing else, so the slow half
+# can happen while the user keeps working and applying it stays a separate decision. Only a
+# package install can be staged: a checkout's download is its build, which is the install.
+if [ "$STAGE_REQUEST" -eq 1 ]; then
+    if [ "$PACKAGED" -ne 1 ]; then
+        warn "Staging is for a package install; this checkout builds and installs in one run."
+        exit 1
+    fi
+    info "Downloading the packages this update needs..."
+    if sudo pacman -Syuw --noconfirm; then
+        record staged-update staged "$UPDATE_LABEL"
+        clear_progress
+        ok "Downloaded. Run the update again to install it."
+        stage 1 1 "Downloaded"
+        exit 0
+    else
+        STAGE_STATUS=$?
+        record staged-update failed "$UPDATE_LABEL" "$STAGE_STATUS"
+        warn "The download did not finish; nothing was installed."
+        exit "$STAGE_STATUS"
+    fi
+fi
+
+# Package-managed install.
+#
+# A package owns what it installed, so the update is the package manager, not the clone
+# and second build below: two shells with only one known to pacman breaks in ways nobody
+# can explain a year later, and needs a toolchain the package does not.
+if [ "$PACKAGED" -eq 1 ]; then
+    echo "---------------------------------------------"
+    echo "  Caelestia Update (this install came from a package)"
+    echo "---------------------------------------------"
+    echo
+    stage 1 2 "Updating system packages"
+    # $1 is the branch, $2 the version: only the latter means "a version was asked for".
+    if [ -n "${TARGET_REF:-}" ]; then
+        echo "  A single version cannot be selected from here; choose it where the"
+        echo "  package was installed from."
+        echo
+    fi
+    PACKAGE_STATUS=0
+    if command -v pacman &> /dev/null; then
+        info "Updating the system packages..."
+        sudo pacman -Syu --noconfirm || PACKAGE_STATUS=$?
+        if [ "$PACKAGE_STATUS" -ne 0 ]; then
+            warn "The package update failed or was cancelled."
+        fi
+    else
+        warn "No pacman found; update this package with the tool that installed it."
+        PACKAGE_STATUS=1
+    fi
+    info "And the shell itself:"
+    echo "    pacman:  sudo pacman -Syu caelestia-kde"
+    echo "    AUR:     rebuild caelestia-kde with the helper it was installed with"
+    echo
+
+    # All this can do is the user's half: the package's step scripts are its own copies, and
+    # `caelestia install` deploys from them idempotently (parity-6).
+    if [[ -x "$SELF_DIR/caelestia" ]]; then
+        info "Re-applying the user's configuration..."
+        CAELESTIA_FRESH_INSTALL=0 "$SELF_DIR/caelestia" install || warn "Applying the user's configuration failed; see the output above."
+    fi
+
+    echo "    then log out and back in."
+    if [ "$PACKAGE_STATUS" -eq 0 ]; then
+        record last-update ok "$UPDATE_LABEL"
+    else
+        record last-update failed "$UPDATE_LABEL" "$PACKAGE_STATUS"
+    fi
+    clear_progress
+    exit 0
+fi
+
+# Primes escalation once and refreshes it in the background, so the root work below never
+# prompts again, even after a long build.
 if [ "$EUID" -ne 0 ]; then
     # Determine the best interactive helper for the initial prompt.
     if [ -t 1 ]; then
@@ -106,17 +237,11 @@ if [ "$EUID" -ne 0 ]; then
     elif command -v ksshaskpass &> /dev/null; then
         SUDO_ASK_CMD=(env SUDO_ASKPASS="$(command -v ksshaskpass)" /usr/bin/sudo -A -v)
     elif command -v pkexec &> /dev/null; then
-        # pkexec authenticates via PolicyKit, not sudo's timestamp cache.
-        # There is no way to "prime" sudo from pkexec — each subsequent
-        # elevation will go through pkexec individually. PolicyKit has
-        # its own short-lived authorization caching, so the user won't
-        # be prompted for every single command.
-        info "Requesting administrator privileges via pkexec (PolicyKit)…"
+        # pkexec authorizes through PolicyKit, not sudo's timestamp cache, so there is nothing to
+        # prime: each elevation goes through pkexec, which does its own caching.
+        info "Requesting administrator privileges via pkexec (PolicyKit)..."
         pkexec true || die "Failed to obtain administrator privileges."
-        # Skip the sudo keepalive — it's useless without a sudo timestamp.
-        # The sudo wrapper ($UPD_DIR/bin/sudo) will use pkexec for each
-        # elevation via its fallback path.
-        SUDO_ASK_CMD=()  # signal: skip sudo -v below
+        SUDO_ASK_CMD=()  # Skip the keepalive below: no sudo timestamp exists.
     else
         die "Cannot elevate privileges — no terminal, ksshaskpass, or pkexec available."
     fi
@@ -126,20 +251,13 @@ if [ "$EUID" -ne 0 ]; then
         "${SUDO_ASK_CMD[@]}" || die "Failed to obtain administrator privileges."
     fi
 
-    # Export SUDO_ASKPASS so any sub-scripts that use raw /usr/bin/sudo -A
-    # (or the wrapper above) can resolve the askpass helper without needing
-    # to re-discover it in a non-tty child.
+    # So sub-scripts using raw `/usr/bin/sudo -A` do not have to rediscover it.
     if command -v ksshaskpass &> /dev/null; then
         export SUDO_ASKPASS="$(command -v ksshaskpass)"
     fi
 
-    # Background keepalive: refresh the sudo timestamp every 30 seconds
-    # so it never expires, even during long operations like CMake builds.
-    # Using -nv instead of -n true ensures the timestamp is *extended*,
-    # not just checked.
-    # Only started when we actually have a sudo timestamp to keep alive
-    # (tty or ksshaskpass paths above).  The pkexec path skips this
-    # because PolicyKit handles its own authorization caching.
+    # Keeps the sudo timestamp alive through long builds (-nv extends it, not just checks).
+    # Runs only when a timestamp exists; pkexec does its own caching.
     if [[ ${#SUDO_ASK_CMD[@]} -gt 0 ]]; then
         (
             while kill -0 "$$" 2>/dev/null; do
@@ -153,10 +271,9 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 # 1. Fetch from GitHub
-echo "PROGRESS: 1/5: Fetching updates from GitHub..."
+stage 1 5 "Fetching updates from GitHub"
 info "Checking for local repository cache..."
 
-# --- Safe Backup Directory outside of the git repo ---
 export BACKUP_DIR="$UPD_DIR/backups/$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$BACKUP_DIR"
 
@@ -164,14 +281,14 @@ if [[ ! -d "$UPD_DIR/repo/.git" ]]; then
     mkdir -p "$UPD_DIR/repo"
     cd "$UPD_DIR/repo" || die "Failed to enter $UPD_DIR/repo"
     git init -q
-    git remote add origin https://github.com/ladybug-me/caelestia-kde.git
+    git remote add origin https://github.com/caelestia-kde/caelestia.git
 else
     cd "$UPD_DIR/repo" || die "Failed to enter $UPD_DIR/repo"
     if git rev-parse HEAD >/dev/null 2>&1; then
         git reset --hard -q HEAD || die "Failed to reset repository state"
     fi
     git clean -fdx -q
-    git remote set-url origin https://github.com/ladybug-me/caelestia-kde.git
+    git remote set-url origin https://github.com/caelestia-kde/caelestia.git
 fi
 
 # Always enforce sparse-checkout rules
@@ -179,15 +296,20 @@ git config core.sparseCheckout true
 echo "shell/" > .git/info/sparse-checkout
 echo "src/" >> .git/info/sparse-checkout
 echo "scripts/" >> .git/info/sparse-checkout
+echo "installer/" >> .git/info/sparse-checkout
+echo "uninstall.sh" >> .git/info/sparse-checkout
 echo ".github/version.env" >> .git/info/sparse-checkout
 echo ".gitmodules" >> .git/info/sparse-checkout
+echo "assets/" >> .git/info/sparse-checkout
 
 # Safer fetch and reset instead of pull
 if [ -n "$TARGET_REF" ] && [ "${TARGET_KIND:-}" = "commit" ]; then
-    # Arbitrary commit target: the local clone is normally shallow (depth 1), so
-    # pull enough history to cover the commit timeline shown in the UI
-    # (UpdateChecker fetches up to 150 commits) rather than trying to unshallow.
-    git fetch -q --depth=200 origin "$BRANCH" || die "Failed to fetch repository"
+    # The clone is normally depth 1, and the target can be a commit behind the tip, so fetch
+    # a window of history rather than unshallowing; the window is also what bounds how far
+    # back a pinned commit stays reachable. The filter keeps the fetch to commits and trees:
+    # nothing here reads those revisions' blobs, and they include revisions that still
+    # carried the shell's font files, which a plain fetch pulls down again - about 300 MiB.
+    git fetch -q --depth=50 --filter=blob:none origin "$BRANCH" || die "Failed to fetch repository"
     if git cat-file -e "$TARGET_REF^{commit}" 2>/dev/null; then
         git reset --hard -q "$TARGET_REF" || die "Failed to apply commit $TARGET_REF"
     else
@@ -212,10 +334,9 @@ if [[ -f "$UPD_DIR/repo/.gitmodules" ]]; then
     if declare -f prune_removed_submodules >/dev/null 2>&1; then
         prune_removed_submodules "$UPD_DIR/repo"
     else
-        # The helper ships in the same commit as this updater and the sparse
-        # checkout always pulls scripts/, so a lib that is missing here means
-        # the checkout is damaged. Say so instead of keeping a second copy of
-        # the prune that can drift away from the tested one.
+        # The helper ships in the same commit and the sparse checkout always pulls scripts/, so
+        # a missing lib means a damaged checkout - say so rather than keep a second copy of the
+        # prune that can drift from the tested one.
         warn "scripts/lib/submodules.sh is missing; skipping the submodule prune."
     fi
     git -C "$UPD_DIR/repo" submodule sync --recursive >/dev/null 2>&1 || true
@@ -225,7 +346,7 @@ fi
 [[ -f "$UPD_DIR/repo/src/dots/starship.toml" ]] || die "Missing src/dots content after update"
 
 # 2. System update via Polkit
-echo "PROGRESS: 2/5: Running system update..."
+stage 2 5 "Updating system packages"
 echo
 echo "---------------------------------------------"
 echo "  Step 1 - System Updates"
@@ -241,22 +362,20 @@ elif command -v apt-get >/dev/null; then
     sudo apt-get update && sudo apt-get upgrade -y || warn "System update was canceled or failed. Continuing with non-sudo parts..."
 fi
 
-# 3. Build script now handles GUI privilege escalation natively.
+# 3. 08-build-shell.sh handles GUI privilege escalation itself.
 info "Executing build scripts (GUI prompts will appear if required)..."
 
 export BUNDLE_DIR="$UPD_DIR/repo"
 
-# Helpers come from the revision that was just checked out, the same way the
-# step scripts below are run from it. A reverted target predating the helper
-# simply leaves the call unavailable, which is harmless: the recorded revision
-# then stays as it was rather than becoming wrong.
+# Helpers come from the revision just checked out. A reverted target predating the helper
+# leaves the call unavailable, which is harmless: the recorded revision stays as it was.
 if [[ -f "$BUNDLE_DIR/scripts/lib/update-state.sh" ]]; then
     # shellcheck source=/dev/null
     source "$BUNDLE_DIR/scripts/lib/update-state.sh"
 fi
 
 # 4. Deploy Configs
-echo "PROGRESS: 3/5: Deploying configuration files..."
+stage 3 5 "Deploying configuration files"
 echo
 echo "---------------------------------------------"
 echo "  Step 2 - Deploy Configs"
@@ -266,10 +385,10 @@ if [[ "${CAELESTIA_SKIP_DEPLOY:-0}" == "1" ]]; then
 else
     run_stage 900 bash "$UPD_DIR/repo/scripts/03-deploy-configs.sh" || die "Config deployment failed or timed out."
 fi
-echo "PROGRESS: 3/5: Configuration files deployed."
+stage 3 5 "Configuration files deployed"
 
 # 5. Build Shell
-echo "PROGRESS: 4/5: Building the Caelestia shell UI..."
+stage 4 5 "Building the shell"
 echo
 echo "---------------------------------------------"
 echo "  Step 3 - Build Caelestia Shell UI"
@@ -279,8 +398,8 @@ if [[ "${CAELESTIA_SKIP_BUILD:-0}" == "1" ]]; then
 else
     run_stage 3600 bash "$UPD_DIR/repo/scripts/08-build-shell.sh" || die "Shell build failed or timed out."
 
-    # Fail fast if QML module install is incomplete, otherwise shell startup fails
-    # with 'module "Caelestia.Config" is not installed'.
+    # Fail fast on an incomplete QML install, or the shell dies at startup with 'module
+    # "Caelestia.Config" is not installed'.
     QML_BASE="$HOME/.local/lib/qt6/qml"
     CONFIG_MODULE_DIR="$QML_BASE/Caelestia/Config"
     if [[ ! -f "$CONFIG_MODULE_DIR/qmldir" ]]; then
@@ -297,18 +416,118 @@ fi
 
 # 6. Record which revision is actually installed.
 #
-# record_installed_revision() refuses while CAELESTIA_SKIP_BUILD=1: the
-# checkout below moved to the target ref, but the shell in front of the user
-# was deliberately not rebuilt, so claiming the new revision would make every
-# version readout describe a state nobody can see (#651). When that happens the
-# previous value is left in place - it still names the shell that is running.
-if record_installed_revision "$BUNDLE_DIR" "$HOME/.config/quickshell/caelestia"; then
-    info "Saved commit hash: $(cat "$HOME/.config/quickshell/caelestia/.current_commit" 2>/dev/null || true)"
+# The previous value is kept first: comparing the two afterwards is how step 7 knows
+# whether the update touched the shell or only the rest of the config.
+QUICKSHELL_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/quickshell/caelestia"
+PREV_REV="$(cat "$QUICKSHELL_DIR/.current_commit" 2>/dev/null || true)"
+#
+# record_installed_revision() refuses under CAELESTIA_SKIP_BUILD=1: the checkout moved
+# but the shell was deliberately not rebuilt, so the new revision would describe a state
+# nobody can see (#651). The previous value stays, still naming the running shell.
+if record_installed_revision "$BUNDLE_DIR" "$QUICKSHELL_DIR" "$BRANCH"; then
+    info "Saved commit hash: $(cat "$QUICKSHELL_DIR/.current_commit" 2>/dev/null || true)"
 elif [[ "${CAELESTIA_SKIP_BUILD:-0}" == "1" ]]; then
     info "Shell build skipped; the recorded revision still describes the running shell."
 fi
 
-echo "PROGRESS: done: Update completed successfully"
+# 7. Offer to apply the update (#1238).
+#
+# Nothing is restarted silently: a shell restart is not always the right answer.
+# When the update touched shell/, the compiled plugin (.so) cannot be swapped under
+# the running process, so the shell would come back mixing the new QML with the old
+# plugin - logging out is the only safe way. When only the rest of the config changed,
+# restarting the shell is enough. The choice is the user's, so we ask, and we also
+# leave a notification: the prompt is easy to miss in a terminal that scrolls.
+ask_yes_no() {
+    local prompt="${1:-}" answer=""
+    [[ "${CAELESTIA_ASSUME_NO:-0}" == "1" ]] && return 1
+    # Check if a controlling terminal exists and can be opened for bidirectional I/O
+    if ! (exec < /dev/tty > /dev/tty) 2>/dev/null; then
+        return 1
+    fi
+    printf '%s' "$prompt" > /dev/tty 2>/dev/null || return 1
+    read -r answer < /dev/tty 2>/dev/null || return 1
+    [[ "$answer" =~ ^[Yy]([Ee][Ss])?$ ]]
+}
+
+notify_update() {
+    command -v notify-send >/dev/null 2>&1 || return 0
+    notify-send -a "Caelestia Update" -i system-software-update -u normal "Caelestia updated" "${1:-}" 2>/dev/null || true
+}
+
+log_out_now() {
+    if [[ -n "${CAELESTIA_LOGOUT_CMD:-}" ]]; then
+        eval "$CAELESTIA_LOGOUT_CMD"
+    elif command -v qdbus6 >/dev/null 2>&1; then
+        qdbus6 org.kde.Shutdown /Shutdown org.kde.Shutdown.logout
+    elif command -v qdbus >/dev/null 2>&1; then
+        qdbus org.kde.Shutdown /Shutdown org.kde.Shutdown.logout
+    else
+        return 1
+    fi
+}
+
+restart_shell_now() {
+    local restart_script="${QUICKSHELL_DIR}/scripts/restart_shell.sh"
+    if [[ -x "$restart_script" ]]; then
+        bash "$restart_script"
+    elif [[ -f "$BUNDLE_DIR/shell/scripts/restart_shell.sh" ]]; then
+        bash "$BUNDLE_DIR/shell/scripts/restart_shell.sh"
+    elif command -v systemctl >/dev/null 2>&1; then
+        systemctl --user restart caelestia-shell.service
+    else
+        return 1
+    fi
+}
+
+NEW_REV="$(cat "$QUICKSHELL_DIR/.current_commit" 2>/dev/null || true)"
+SHELL_CHANGED=0
+if [[ -z "$PREV_REV" || -z "$NEW_REV" ]]; then
+    # Cannot compare revisions (missing state files or fresh install): assume the shell moved
+    # to avoid running new QML on an old plugin.
+    SHELL_CHANGED=1
+elif [[ "$PREV_REV" != "$NEW_REV" ]]; then
+    # Validate commit hashes to prevent git option injection
+    if [[ "$PREV_REV" =~ ^[0-9a-fA-F]{7,40}$ && "$NEW_REV" =~ ^[0-9a-fA-F]{7,40}$ ]] && \
+       CHANGED_FILES="$(git -C "$BUNDLE_DIR" diff --name-only "$PREV_REV" "$NEW_REV" 2>/dev/null)"; then
+        if grep -q '^shell/' <<< "$CHANGED_FILES"; then
+            SHELL_CHANGED=1
+        fi
+    else
+        # Cannot compare the two revisions (missing objects, shallow checkout, or invalid hash):
+        # assume the shell moved. Offering a logout is noisy, leaving a mixed shell is worse.
+        SHELL_CHANGED=1
+    fi
+fi
+
+if [[ "${CAELESTIA_SKIP_BUILD:-0}" == "1" ]]; then
+    info "Build skipped; the running shell is already what is installed."
+elif [[ "$SHELL_CHANGED" -eq 1 ]]; then
+    notify_update "Log out to load the new shell: it was rebuilt and a restart alone leaves it on the old plugin."
+    # A logout closes everything the user has open, so it is never taken on their behalf; it
+    # is reported instead, and the page says so after the restart.
+    if ask_yes_no "The shell itself was rebuilt. Restarting it is not enough, so log out to load it. Log out now? [y/N] "; then
+        info "Logging out..."
+        log_out_now || warn "Could not log out automatically; log out manually to load the new shell."
+    else
+        NEEDS_LOGOUT=1
+        info "Log out when convenient to load the new shell."
+    fi
+else
+    notify_update "Restarting the shell to load it."
+    # Nothing is lost by restarting the shell, and a run the shell started has nobody to
+    # answer a prompt: it restarts, which is what asking for the update meant.
+    if [ "$INTERACTIVE" -eq 0 ] || ask_yes_no "Restart the Caelestia shell to load the update? [y/N] "; then
+        info "Restarting the shell..."
+        restart_shell_now || warn "Could not restart the shell automatically; restart it manually."
+    else
+        info "The update will apply the next time the shell starts."
+    fi
+fi
+
+stage 5 5 "Finishing up"
+record last-update ok "$UPDATE_LABEL" 0 "${NEEDS_LOGOUT:-0}"
+clear_progress
 echo
 echo "---------------------------------------------"
 echo "  Update Completed Successfully!"

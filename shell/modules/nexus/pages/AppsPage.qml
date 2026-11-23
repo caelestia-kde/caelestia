@@ -8,6 +8,7 @@ import Caelestia
 import Caelestia.Config
 import qs.components
 import qs.components.containers
+import qs.components.controls
 import qs.services
 import qs.utils
 import qs.modules.launcher.services
@@ -15,6 +16,18 @@ import qs.modules.nexus.common
 
 PageBase {
     id: root
+
+    // Not an Item, so it cannot be a child of the ColumnLayout that PageBase is.
+    readonly property Variants webSearchOptions: Variants {
+        model: WebSearch.providers
+
+        MenuItem {
+            required property var modelData
+
+            text: modelData.name
+            value: modelData.id
+        }
+    }
 
     title: qsTr("Apps")
 
@@ -24,7 +37,6 @@ PageBase {
         width: root.cappedWidth
         spacing: Tokens.spacing.extraSmall / 2
 
-        // Default applications
         SectionHeader {
             first: true
             text: qsTr("Default applications")
@@ -36,7 +48,7 @@ PageBase {
             first: true
             text: qsTr("Force System Defaults (xdg-open)")
             subtext: qsTr("Override applications to use KDE system defaults")
-            
+
             checked: GlobalConfig.general.apps.audio.join(" ") === "xdg-open" &&
                      GlobalConfig.general.apps.playback.join(" ") === "xdg-open" &&
                      GlobalConfig.general.apps.explorer.join(" ") === "xdg-open"
@@ -81,6 +93,22 @@ PageBase {
 
         DefaultRow {
             enabled: !systemDefaultsToggle.checked
+            icon: "web"
+            label: qsTr("Browser")
+            status: GlobalConfig.general.apps.browser.join(" ")
+            onSelected: app => GlobalConfig.general.apps.browser = app.command
+        }
+
+        DefaultRow {
+            enabled: !systemDefaultsToggle.checked
+            icon: "code"
+            label: qsTr("Editor")
+            status: GlobalConfig.general.apps.editor.join(" ")
+            onSelected: app => GlobalConfig.general.apps.editor = app.command
+        }
+
+        DefaultRow {
+            enabled: !systemDefaultsToggle.checked
             last: true
             icon: "folder"
             label: qsTr("File manager")
@@ -88,7 +116,6 @@ PageBase {
             onSelected: app => GlobalConfig.general.apps.explorer = app.command
         }
 
-        // Library
         SectionHeader {
             text: qsTr("Library")
         }
@@ -99,7 +126,30 @@ PageBase {
             icon: "apps"
             label: qsTr("All apps")
             status: qsTr("Browse installed apps, set favorites and hidden")
-            onClicked: root.nState.openSubPage(1)
+            onClicked: root.nState.openSubPage("allApps")
+        }
+
+        SectionHeader {
+            text: qsTr("Search")
+        }
+
+        SelectRow {
+            first: true
+            last: true
+            Layout.fillWidth: true
+            label: qsTr("Web search engine")
+            subtext: qsTr("Engine behind the launcher's web search row")
+            fallbackIcon: "travel_explore"
+            fallbackText: WebSearch.currentName
+            active: {
+                const options = webSearchOptions.instances;
+                for (let i = 0; i < options.length; i++)
+                    if (options[i].value === WebSearch.currentId)
+                        return options[i];
+                return null;
+            }
+            menuItems: webSearchOptions.instances
+            onSelected: item => WebSearch.setProvider(item.value)
         }
     }
 
@@ -157,7 +207,7 @@ PageBase {
                         IconImage {
                             asynchronous: true
                             implicitSize: Math.round(Tokens.font.icon.large.pointSize * 1.8)
-                            source: Quickshell.iconPath("system-run", "image-missing")
+                            source: Quickshell.iconPath("system-run", "application-x-executable")
                         }
 
                         ColumnLayout {
@@ -175,7 +225,7 @@ PageBase {
                                 Layout.fillWidth: true
                                 text: qsTr("Uses xdg-open (KDE Default)")
                                 color: Colours.palette.m3onSurfaceVariant
-                                font: Tokens.font.label.small
+                                font: NexusStyle.secondaryFont
                                 elide: Text.ElideRight
                             }
                         }
@@ -209,7 +259,7 @@ PageBase {
                         IconImage {
                             asynchronous: true
                             implicitSize: Math.round(Tokens.font.icon.large.pointSize * 1.8)
-                            source: Quickshell.iconPath(appItem.modelData.entry.icon, "image-missing")
+                            source: WinIcons.sourceFor(appItem.modelData.entry, "", appItem.modelData.entry?.id ?? "", 0)
                         }
 
                         ColumnLayout {
@@ -228,7 +278,7 @@ PageBase {
                                 visible: text !== ""
                                 text: (appItem.modelData.comment || appItem.modelData.genericName) ?? ""
                                 color: Colours.palette.m3onSurfaceVariant
-                                font: Tokens.font.label.small
+                                font: NexusStyle.secondaryFont
                                 elide: Text.ElideRight
                             }
                         }

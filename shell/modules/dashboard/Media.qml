@@ -1,9 +1,12 @@
+pragma ComponentBehavior: Bound
+
 import "media"
 import QtQuick
 import QtQuick.Layouts
 import M3Shapes
 import Caelestia.Config
 import qs.components
+import qs.components.effects
 import qs.services
 
 Item {
@@ -11,8 +14,23 @@ Item {
 
     required property DrawerVisibilities visibilities
 
+    property bool initiated: false
+
     implicitWidth: Tokens.sizes.dashboard.mediaTabWidth
     implicitHeight: Tokens.sizes.dashboard.mediaTabHeight
+
+    Component.onCompleted: Qt.callLater(() => root.initiated = true)
+
+    AmbientGlow {
+        anchors.fill: parent
+        source: Players.active ? Players.getArtUrl(Players.active) : ""
+        active: Config.dashboard.ambientColor && !Colours.light
+        glowOpacity: Config.dashboard.ambientOpacity
+        useFallback: false
+        radius: Tokens.rounding.large
+        clip: true
+        z: -1
+    }
 
     BackgroundShapes {
         anchors.fill: parent
@@ -32,18 +50,44 @@ Item {
             Layout.fillWidth: true
             Layout.fillHeight: true
 
-            state: Players.active ? "" : "noMedia"
-
-            states: State {
-                name: "noMedia"
-
-                PropertyChanges {
-                    noMedia.opacity: 1
-                    content.opacity: 0
-                }
+            state: {
+                if (!Players.active)
+                    return "noMedia";
+                if (!root.initiated)
+                    return "init";
+                return "";
             }
 
+            states: [
+                State {
+                    name: "init"
+
+                    PropertyChanges {
+                        noMedia.opacity: 0
+                        content.opacity: 0
+                    }
+                },
+                State {
+                    name: "noMedia"
+
+                    PropertyChanges {
+                        noMedia.opacity: 1
+                        content.opacity: 0
+                    }
+                }
+            ]
+
             transitions: [
+                Transition {
+                    from: "init"
+                    to: ""
+
+                    Anim {
+                        target: content
+                        property: "opacity"
+                        type: Anim.SlowEffects
+                    }
+                },
                 Transition {
                     from: ""
 
@@ -130,8 +174,7 @@ Item {
                 id: content
 
                 anchors.fill: parent
-                asynchronous: true
-                active: opacity > 0
+                active: Players.active || opacity > 0
 
                 sourceComponent: RowLayout {
                     spacing: Tokens.spacing.extraLarge

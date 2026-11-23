@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# 06-services.sh  Enable systemd user services and reload KWin.
 
 set -euo pipefail
 
+source "$(dirname "${BASH_SOURCE[0]}")/lib/install-kind.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/lib/log.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/lib/privileges.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/lib/install-fs.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/lib/virtual-desktops.sh"
 
 echo
 echo ""
@@ -26,41 +28,39 @@ done
 echo "  Disabling legacy quickshell-kde-bridge KWin script..."
 kwriteconfig6 --file kwinrc --group "Plugins" --key "quickshell-kde-bridgeEnabled" "false"
 
-echo "  Setting default KWin virtual desktops to 5 (only if not already configured)..."
-EXISTING_DESKTOPS="$(kreadconfig6 --file kwinrc --group "Desktops" --key "Number" 2>/dev/null || true)"
-if [ -z "$EXISTING_DESKTOPS" ]; then
-    kwriteconfig6 --file kwinrc --group "Desktops" --key "Number" "5"
-    kwriteconfig6 --file kwinrc --group "Desktops" --key "Rows" "1"
-    for i in $(seq 1 5); do
-        kwriteconfig6 --file kwinrc --group "Desktops" --key "Name_$i" "Desktop $i"
-    done
-else
-    echo "  Existing virtual desktop configuration found - leaving it untouched."
-fi
+ensure_five_virtual_desktops
 
-#  ydotoold (on-screen keyboard key injection)
-# ydotoold needs access to /dev/uinput. Add a udev rule to allow the 'input'
-# group to access it, then add the user to that group.
-# Everything below needs root, and all of it is one-time setup. Check the
-# end state first so a routine update never asks for a password.
+UINPUT_RULE="/etc/udev/rules.d/70-uinput.rules"
+LEGACY_UINPUT_RULE="/etc/udev/rules.d/80-uinput.rules"
+UINPUT_RULE_LINE='KERNEL=="uinput", MODE="0600", OPTIONS+="static_node=uinput", TAG+="uaccess"'
+
+uinput_rule_current() {
+    [[ -f "$UINPUT_RULE" ]] && grep -q 'TAG+="uaccess"' "$UINPUT_RULE"
+}
+
 system_setup_needed() {
+    install_is_packaged && return 1
     systemctl is-enabled --quiet keyd.service 2>/dev/null && return 0
     systemctl is-active --quiet keyd.service 2>/dev/null && return 0
-    [[ -f /etc/udev/rules.d/80-uinput.rules ]] || return 0
-    groups "$USER" | grep -q '\binput\b' || return 0
-    if [[ -e /dev/uinput ]]; then
-        [[ "$(stat -c '%a' /dev/uinput 2>/dev/null)" == *660 ]] || return 0
-        [[ "$(stat -c '%G' /dev/uinput 2>/dev/null)" == "input" ]] || return 0
-    fi
+    uinput_rule_current || return 0
+    [[ ! -f "$LEGACY_UINPUT_RULE" ]] || return 0
     return 1
 }
 
 if ! system_setup_needed; then
-    skip "System-level configuration already in place."
+    if install_is_packaged; then
+        skip "System-level configuration belongs to the package."
+    else
+        skip "System-level configuration already in place."
+    fi
 else
 echo "  Applying system-level configurations (requires root)..."
-caelestia_sudo bash -s -- "$USER" << 'EOF'
+caelestia_sudo bash -s -- "$USER" "$UINPUT_RULE" "$LEGACY_UINPUT_RULE" "$UINPUT_RULE_LINE" << 'EOF'
 TARGET_USER="$1"
+UINPUT_RULE="$2"
+LEGACY_UINPUT_RULE="$3"
+UINPUT_RULE_LINE="$4"
+RULE_CHANGED=""
 
 if systemctl is-enabled --quiet keyd.service 2>/dev/null || \
    systemctl is-active --quiet keyd.service 2>/dev/null; then
@@ -70,36 +70,39 @@ fi
 
 echo "  Setting up ydotoold (OSK key injection daemon)..."
 
-if [[ ! -f /etc/udev/rules.d/80-uinput.rules ]]; then
-    echo 'KERNEL=="uinput", GROUP="input", MODE="0660"' > /etc/udev/rules.d/80-uinput.rules
-    udevadm control --reload-rules 2>/dev/null || true
-    udevadm trigger 2>/dev/null || true
-    ok "udev rule for uinput created."
-fi
-
-if ! groups "$TARGET_USER" | grep -q '\binput\b'; then
-    usermod -aG input "$TARGET_USER"
-    ok "Added $TARGET_USER to 'input' group (takes effect on next login)."
-else
-    ok "$TARGET_USER already in 'input' group."
-fi
-
-if [[ -e /dev/uinput ]]; then
-    UINPUT_PERMS=$(stat -c "%a" /dev/uinput 2>/dev/null)
-    UINPUT_GROUP=$(stat -c "%G" /dev/uinput 2>/dev/null)
-    if [[ "$UINPUT_PERMS" != *"660" ]] || [[ "$UINPUT_GROUP" != "input" ]]; then
-        chmod 660 /dev/uinput 2>/dev/null || true
-        chgrp input /dev/uinput 2>/dev/null || true
+if [ -f "$LEGACY_UINPUT_RULE" ]; then
+    rm -f "$LEGACY_UINPUT_RULE"
+    RULE_CHANGED=1
+    if id -nG "$TARGET_USER" | grep -qw input; then
+        if gpasswd -d "$TARGET_USER" input >/dev/null 2>&1; then
+            echo "  Removed $TARGET_USER from the 'input' group (takes effect on next login)."
+        else
+            echo "  Could not remove $TARGET_USER from the 'input' group; run: sudo gpasswd -d $TARGET_USER input"
+        fi
     fi
+fi
+
+if [ ! -f "$UINPUT_RULE" ]; then
+    printf '%s\n' "$UINPUT_RULE_LINE" > "$UINPUT_RULE"
+    RULE_CHANGED=1
+    echo "  udev rule for uinput created (active session only, no group membership)."
+fi
+
+if [ -n "$RULE_CHANGED" ]; then
+    udevadm control --reload-rules 2>/dev/null || true
+    udevadm trigger --sysname-match=uinput 2>/dev/null || true
+fi
+
+if [ ! -e /dev/uinput ]; then
+    echo "  /dev/uinput is not present yet; the on-screen keyboard needs it. Load it with: modprobe uinput"
 fi
 EOF
 fi
 
-# Deploy ydotoold-wrapper script to ~/.local/bin
 mkdir -p "$HOME/.local/bin"
 cat > "$HOME/.local/bin/ydotoold-wrapper" << 'WRAPPER'
 #!/bin/bash
-# ydotoold-wrapper  starts ydotoold with uinput access (user is in 'input' group)
+# ydotoold-wrapper  starts ydotoold with uinput access (the active session gets it from the udev rule)
 SOCKET="${YDOTOOL_SOCKET:-/run/user/$(id -u)/.ydotool_socket}"
 if [ -S "$SOCKET" ] && pidof ydotoold > /dev/null 2>&1; then
     exit 0
@@ -111,7 +114,6 @@ WRAPPER
 chmod +x "$HOME/.local/bin/ydotoold-wrapper"
 ok "ydotoold-wrapper deployed to ~/.local/bin."
 
-# Deploy and enable ydotoold systemd user service
 mkdir -p "$HOME/.config/systemd/user"
 cat > "$HOME/.config/systemd/user/ydotoold.service" << 'UNIT'
 [Unit]
@@ -130,14 +132,64 @@ WantedBy=graphical-session.target
 UNIT
 systemctl --user daemon-reload
 systemctl --user enable ydotoold.service 2>/dev/null || true
-# The 'input' group only applies to new logins; starting the daemon in the
-# same session that just got the group would silently fail to open /dev/uinput.
-if id -nG | grep -q '\binput\b'; then
-    systemctl --user start ydotoold.service 2>/dev/null || \
-        info "ydotoold will start on next login."
+if systemctl --user start ydotoold.service 2>/dev/null; then
+    ok "ydotoold started."
 else
-    info "ydotoold starts on next login (input group takes effect then)."
+    info "ydotoold will start on next login."
 fi
 ok "ydotoold service configured."
+
+configure_quick_share() {
+    local bundle="${BUNDLE_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+    local setup="$bundle/shell/scripts/quickshare_setup.sh"
+    local port_file="$bundle/shell/scripts/quickshare-port"
+    local port status
+
+    if install_is_packaged; then
+        skip "Quick Share's setup is the shell's own prompt on a packaged install."
+        return 0
+    fi
+
+    if [[ ! -f "$setup" ]]; then
+        warn "Quick Share's setup helper is missing from $setup; it may not be able to receive."
+        return 0
+    fi
+
+    if [[ ! -f "$port_file" ]]; then
+        warn "Quick Share's transfer port is missing from $port_file; it may not be able to receive."
+        return 0
+    fi
+
+    # The port the service listens on, read from the file the plugin build bakes it in
+    # from: the rule below has to open the port the listener actually binds, and a second
+    # copy of the number here is what would let the two drift apart.
+    port="$(<"$port_file")"
+    if ! [[ "$port" =~ ^[0-9]+$ ]]; then
+        warn "Quick Share's transfer port in $port_file is not a port number; it may not be able to receive."
+        return 0
+    fi
+
+    status="$(bash "$setup" --status --port "$port" 2>/dev/null || true)"
+    if [[ "$status" != *"SETUP=needed"* ]]; then
+        skip "Quick Share already has the access it needs."
+        return 0
+    fi
+
+    # The run is elevated, so it happens against the root-owned copy rather than the one
+    # in this checkout: sudo given a script this user can rewrite would run the rewrite.
+    local privileged=""
+    if ! privileged="$(install_privileged_helper "$setup")"; then
+        warn "Quick Share setup did not finish; retry from Settings -> Services -> Quick Share."
+        return 0
+    fi
+
+    if caelestia_sudo bash "$privileged" --port "$port"; then
+        ok "Quick Share can receive: Avahi is running and port $port is open."
+    else
+        warn "Quick Share setup did not finish; retry from Settings -> Services -> Quick Share."
+    fi
+}
+
+configure_quick_share
 
 ok "Services configured."

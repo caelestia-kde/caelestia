@@ -4,6 +4,7 @@ import Quickshell
 import Caelestia.Config
 import Caelestia.Services
 import qs.components
+import qs.components.containers
 import qs.components.controls
 import qs.services
 import qs.utils
@@ -12,13 +13,12 @@ import qs.modules.nexus.common
 PageBase {
     id: root
 
-    // Lyrics backends, ordered to match LyricsBackend::Backend (Auto, Local, LRCLIB, NetEase)
     readonly property list<MenuItem> lyricsItems: [
         MenuItem {
             text: qsTr("Auto")
         },
         MenuItem {
-            text: "Local"
+            text: qsTr("Local")
         },
         MenuItem {
             text: "LRCLIB"
@@ -28,7 +28,6 @@ PageBase {
         }
     ]
 
-    // GPU options + the config string each maps to (see Gpu::parseType)
     readonly property list<MenuItem> gpuItems: [
         MenuItem {
             text: qsTr("Auto")
@@ -46,18 +45,39 @@ PageBase {
 
     readonly property list<string> gpuValues: ["", "NVIDIA", "GENERIC", "None"]
 
+    // Visualiser capture source (there must be one for each value of the VisualiserInput enum)
+    readonly property list<MenuItem> visualiserInputItems: [
+        MenuItem {
+            text: qsTr("Output")
+            value: VisualiserInput.Output
+        },
+        MenuItem {
+            text: qsTr("Input")
+            value: VisualiserInput.Input
+        }
+    ]
+
+    function alarmSoundName(name: string): string {
+        if (!name)
+            return qsTr("Shell chime");
+
+        const parts = String(name).split("/");
+        const file = parts[parts.length - 1].replace(/\.[^/.]+$/, "").replace(/-/g, " ");
+        return parts.length > 1 ? qsTr("%1 · %2").arg(file).arg(parts[0]) : file;
+    }
+
     function gpuKeyToIndex(key: string): int {
         const u = (key ?? "").trim().toUpperCase();
         if (u === "")
-            return 0; // Auto
+            return 0;
         if (u === "NVIDIA")
             return 1;
         if (u === "GENERIC")
             return 2;
-        return 3; // None
+        return 3;
     }
 
-    title: qsTr("Services")
+    title: qsTr("System Services")
 
     ColumnLayout {
         anchors.horizontalCenter: parent.horizontalCenter
@@ -65,7 +85,6 @@ PageBase {
         width: root.cappedWidth
         spacing: Tokens.spacing.extraSmall / 2
 
-        // Detected running players, used as default-player options
         Variants {
             id: playerVariants
 
@@ -80,7 +99,6 @@ PageBase {
             }
         }
 
-        // Polling
         SectionHeader {
             first: true
             text: qsTr("Polling")
@@ -90,6 +108,7 @@ PageBase {
             first: true
             label: qsTr("Media refresh")
             subtext: qsTr("How often the media position updates (ms)")
+            reset: ({ node: GlobalConfig.dashboard, setting: "mediaUpdateInterval" })
             value: GlobalConfig.dashboard.mediaUpdateInterval
             from: 100
             to: 2000
@@ -100,6 +119,7 @@ PageBase {
         StepperRow {
             label: qsTr("System stats refresh")
             subtext: qsTr("CPU, memory and GPU update interval (seconds)")
+            reset: ({ node: GlobalConfig.dashboard, setting: "resourceUpdateInterval" })
             value: GlobalConfig.dashboard.resourceUpdateInterval / 1000
             from: 0.5
             to: 10
@@ -111,6 +131,7 @@ PageBase {
             last: true
             label: qsTr("Wi-Fi rescan")
             subtext: qsTr("How often available networks are rescanned (seconds)")
+            reset: ({ node: GlobalConfig.nexus, setting: "networkRescanInterval" })
             value: GlobalConfig.nexus.networkRescanInterval / 1000
             from: 5
             to: 120
@@ -118,7 +139,6 @@ PageBase {
             onMoved: v => GlobalConfig.nexus.networkRescanInterval = Math.round(v * 1000)
         }
 
-        // Media & lyrics
         SectionHeader {
             text: qsTr("Media & lyrics")
         }
@@ -132,6 +152,28 @@ PageBase {
             onSelected: item => Lyrics.preferredBackend = root.lyricsItems.indexOf(item)
         }
 
+        ToggleRow {
+            text: qsTr("Romanize lyrics")
+            subtext: qsTr("Use Latin letters for Hindi lyrics (approximate; requires ICU)")
+            reset: ({ node: GlobalConfig.services, setting: "romanizeIndicLyrics" })
+            checked: GlobalConfig.services.romanizeIndicLyrics
+            enabled: Lyrics.romanizationAvailable
+            onToggled: GlobalConfig.services.romanizeIndicLyrics = checked
+        }
+
+        FontPickerRow {
+            id: lyricsFontPicker
+
+            rootParent: root.flickable
+            icon: "font_download"
+            label: GlobalConfig.services.lyricsArabicFont ? qsTr("Urdu lyrics font: %1").arg(GlobalConfig.services.lyricsArabicFont) : qsTr("Urdu lyrics font: Automatic")
+            header: qsTr("Choose an installed font")
+            selectedFamily: GlobalConfig.services.lyricsArabicFont
+            allowAutomatic: true
+            onOpenChanged: if (open) selectedFamily = GlobalConfig.services.lyricsArabicFont
+            onFontSelected: family => GlobalConfig.services.lyricsArabicFont = family
+        }
+
         SelectRow {
             last: true
             label: qsTr("Default player")
@@ -143,7 +185,6 @@ PageBase {
             onSelected: item => GlobalConfig.services.defaultPlayer = item.text
         }
 
-        // Input increments
         SectionHeader {
             text: qsTr("Input increments")
         }
@@ -152,6 +193,7 @@ PageBase {
             first: true
             label: qsTr("Volume step")
             subtext: qsTr("Amount the volume changes per scroll (%)")
+            reset: ({ node: GlobalConfig.services, setting: "audioIncrement" })
             value: Math.round(GlobalConfig.services.audioIncrement * 100)
             from: 1
             to: 50
@@ -162,6 +204,7 @@ PageBase {
         StepperRow {
             label: qsTr("Brightness step")
             subtext: qsTr("Amount the brightness changes per scroll (%)")
+            reset: ({ node: GlobalConfig.services, setting: "brightnessIncrement" })
             value: Math.round(GlobalConfig.services.brightnessIncrement * 100)
             from: 1
             to: 50
@@ -173,6 +216,7 @@ PageBase {
             last: true
             label: qsTr("Max volume")
             subtext: qsTr("Upper limit for output volume (%)")
+            reset: ({ node: GlobalConfig.services, setting: "maxVolume" })
             value: Math.round(GlobalConfig.services.maxVolume * 100)
             from: 50
             to: 200
@@ -180,22 +224,74 @@ PageBase {
             onMoved: v => GlobalConfig.services.maxVolume = v / 100
         }
 
-        // Service tuning
+        SectionHeader {
+            text: qsTr("Timers")
+        }
+
+        ToggleRow {
+            first: true
+            text: qsTr("Alarm until dismissed")
+            subtext: qsTr("Repeat the chime until the finished timer is reset")
+            reset: ({ node: GlobalConfig.services, setting: "timerAlarmUntilDismissed" })
+            checked: GlobalConfig.services.timerAlarmUntilDismissed
+            onToggled: GlobalConfig.services.timerAlarmUntilDismissed = checked
+        }
+
+        StepperRow {
+            visible: !GlobalConfig.services.timerAlarmUntilDismissed
+            label: qsTr("Alarm length")
+            subtext: qsTr("Seconds the chime repeats at zero; 0 silences it")
+            reset: ({ node: GlobalConfig.services, setting: "timerAlarmDuration" })
+            value: GlobalConfig.services.timerAlarmDuration
+            from: 0
+            to: 60
+            stepSize: 5
+            onMoved: v => GlobalConfig.services.timerAlarmDuration = v
+        }
+
+        Variants {
+            id: alarmSoundVariants
+
+            model: Audio.systemSounds
+
+            MenuItem {
+                required property string modelData
+
+                text: root.alarmSoundName(modelData)
+                value: modelData
+            }
+        }
+
+        SelectRow {
+            last: true
+            label: qsTr("Alarm sound")
+            subtext: qsTr("Played while a finished timer waits to be dismissed")
+            menuItems: alarmSoundVariants.instances
+            active: menuItems.find(i => i.value === GlobalConfig.services.timerAlarmSound) ?? null
+            fallbackText: root.alarmSoundName(GlobalConfig.services.timerAlarmSound)
+            onSelected: item => {
+                GlobalConfig.services.timerAlarmSound = item.value;
+                if (!Audio.playSystemSound(item.value, GlobalConfig.audio.sounds.notificationVolume))
+                    Audio.playNotification();
+            }
+        }
+
         SectionHeader {
             text: qsTr("Service tuning")
         }
 
         NavRow {
             first: true
-            icon: "chat" // Using chat since discord icon might not be available in Material icons
+            icon: "chat"
             label: qsTr("Discord Rich Presence")
             status: qsTr("Broadcast your status to Vesktop")
-            onClicked: root.nState.openSubPage(1)
+            onClicked: root.nState.openSubPage("arpc")
         }
 
         StepperRow {
             label: qsTr("Visualiser bars")
             subtext: qsTr("Number of bars in the audio visualisers")
+            reset: ({ node: GlobalConfig.services, setting: "visualiserBars" })
             value: GlobalConfig.services.visualiserBars
             from: 10
             to: 120
@@ -204,14 +300,61 @@ PageBase {
         }
 
         SelectRow {
+            label: qsTr("Visualiser input")
+            subtext: qsTr("Audio the visualisers react to")
+            menuItems: root.visualiserInputItems
+            active: root.visualiserInputItems.find(i => i.value === GlobalConfig.services.visualiserInput)
+            onSelected: item => GlobalConfig.services.visualiserInput = item.value
+        }
+
+        SelectRow {
             Layout.fillWidth: true
-            last: true
             label: qsTr("GPU")
             subtext: Gpu.name ? qsTr("Monitoring: %1").arg(Gpu.name) : qsTr("Override for GPU type")
             menuOnTop: true
             menuItems: root.gpuItems
             active: root.gpuItems[root.gpuKeyToIndex(GlobalConfig.services.gpuType)]
             onSelected: item => GlobalConfig.services.gpuType = root.gpuValues[root.gpuItems.indexOf(item)]
+        }
+
+        SectionHeader {
+            text: qsTr("Calendar")
+        }
+
+        NavRow {
+            first: true
+            last: true
+            icon: "calendar_month"
+            label: qsTr("Calendars & agenda")
+            status: CalendarEvents.configured ? qsTr("%1 calendar(s)").arg(CalendarEvents.sources.length) : qsTr("No calendar added")
+            onClicked: root.nState.openSubPage("calendar")
+        }
+
+        SectionHeader {
+            text: qsTr("System")
+        }
+
+        NavRow {
+            first: true
+            icon: "print"
+            label: qsTr("Printers")
+            status: Launch.kcmAvailable("kcm_printer_manager") ? qsTr("Add and manage printers") : qsTr("Install print-manager to enable printing")
+            onClicked: Launch.kcm("kcm_printer_manager")
+        }
+
+        NavRow {
+            icon: "keyboard_alt"
+            label: qsTr("On-screen keyboard")
+            status: Launch.kcmAvailable("kcm_virtualkeyboard") ? qsTr("Touch keyboard, activation and layout") : qsTr("Install plasma-desktop to configure it")
+            onClicked: Launch.kcm("kcm_virtualkeyboard")
+        }
+
+        NavRow {
+            last: true
+            icon: "accessibility_new"
+            label: qsTr("System accessibility")
+            status: qsTr("Screen reader, sticky keys, bounce keys")
+            onClicked: Launch.kcm("kcm_access")
         }
     }
 }

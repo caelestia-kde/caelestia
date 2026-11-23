@@ -1,8 +1,12 @@
 #pragma once
 
+#include <qhash.h>
 #include <qjsonvalue.h>
+#include <qlist.h>
 #include <qmetaobject.h>
 #include <qvariant.h>
+
+#include <optional>
 
 #include "common.hpp"
 
@@ -11,41 +15,47 @@ namespace caelestia::settings {
 struct DecodeResult {
     QVariant value;
     std::optional<Diagnostic> error;
+    QList<qsizetype> indexPath;
 };
 
 class ValueCodec {
 public:
-    explicit ValueCodec(const QMetaType& type)
-        : m_type(type) {}
-
+    explicit ValueCodec(const QMetaType& type, ExpectedType expected);
     virtual ~ValueCodec() = default;
 
-    // Returns the shared codec for a type, or nullptr if the type is unsupported
     static ValueCodec* codecFor(const QMetaType& type);
+
+    static ValueCodec* unionFor(const QList<QMetaType>& types);
+
+    [[nodiscard]] QMetaType type() const;
+    [[nodiscard]] ExpectedType expected() const;
 
     [[nodiscard]] virtual QJsonValue encode(const QVariant& value) const = 0;
     [[nodiscard]] virtual DecodeResult decode(const QJsonValue& value) const = 0;
 
 protected:
     const QMetaType m_type;
+    const ExpectedType m_expected;
 
     Q_DISABLE_COPY_MOVE(ValueCodec)
 };
 
-#define CODEC(Type)                                                                                                    \
+#define CODEC(Type, Expected)                                                                                          \
     class Type##Codec : public ValueCodec {                                                                            \
     public:                                                                                                            \
-        using ValueCodec::ValueCodec;                                                                                  \
+        explicit Type##Codec(const QMetaType& type)                                                                    \
+            : ValueCodec(type, ExpectedType::Expected) {}                                                              \
+                                                                                                                       \
         [[nodiscard]] QJsonValue encode(const QVariant& value) const override;                                         \
         [[nodiscard]] DecodeResult decode(const QJsonValue& value) const override;                                     \
     };
 
-CODEC(Bool)
-CODEC(Int)
-CODEC(Real)
-CODEC(String)
-CODEC(VariantList)
-CODEC(VariantMap)
+CODEC(Bool, Bool)
+CODEC(Int, Int)
+CODEC(Real, Real)
+CODEC(String, String)
+CODEC(VariantList, Array)
+CODEC(VariantMap, Object)
 
 #undef CODEC
 
@@ -71,6 +81,20 @@ public:
 
 private:
     const ValueCodec* m_elementCodec;
+};
+
+// Decodes any one of several types, for options that accept more than one shape
+class UnionCodec : public ValueCodec {
+public:
+    explicit UnionCodec(const QList<const ValueCodec*>& alternatives);
+
+    [[nodiscard]] QJsonValue encode(const QVariant& value) const override;
+    [[nodiscard]] DecodeResult decode(const QJsonValue& value) const override;
+
+private:
+    const QList<const ValueCodec*> m_alternatives;
+    const QList<ExpectedType> m_expectedTypes;
+    QHash<int, const ValueCodec*> m_byType;
 };
 
 } // namespace caelestia::settings

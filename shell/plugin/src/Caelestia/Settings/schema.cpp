@@ -1,5 +1,6 @@
 #include "schema.hpp"
 
+#include "codecs.hpp"
 #include "node.hpp"
 
 namespace caelestia::settings {
@@ -8,8 +9,6 @@ Q_LOGGING_CATEGORY(lcSchema, "caelestia.settings.schema", QtInfoMsg)
 
 namespace {
 
-// Descriptor annotations are stored here by Schema::annotate, which is called in the CONFIG_XXX macros.
-// Schema::build then takes them from here.
 QHash<const QMetaObject*, QHash<QString, Annotation>>& annotationCache() {
     static QHash<const QMetaObject*, QHash<QString, Annotation>> cache;
     return cache;
@@ -22,27 +21,68 @@ bool isNodeType(const QMetaType& type) {
     return meta && meta->inherits(&Node::staticMetaObject);
 }
 
+const ValueCodec* resolveCodec(Descriptor& desc) {
+    auto& allowed = desc.annotation.allowedTypes;
+
+    if (allowed.isEmpty())
+        return ValueCodec::codecFor(desc.type);
+
+    if (desc.type.id() != QMetaType::QVariant) {
+        qCCritical(lcSchema, "Allowed types are only valid for QVariant properties, ignoring them for %s",
+            qUtf8Printable(desc.key));
+        allowed.clear();
+        return ValueCodec::codecFor(desc.type);
+    }
+
+    if (const auto* codec = ValueCodec::unionFor(allowed))
+        return codec;
+
+    allowed.clear();
+    return nullptr;
+}
+
 } // namespace
 
-QVariant DefaultSpec::resolve(const Node* self) const {
-    if (func)
-        return func(self);
-    return value;
-}
-
 QString Descriptor::typeString() const {
-    return type.name();
+    if (annotation.allowedTypes.isEmpty())
+        return QString::fromUtf8(type.name());
+
+    QStringList names;
+    names.reserve(annotation.allowedTypes.size());
+    for (const auto& allowed : annotation.allowedTypes)
+        names << QString::fromUtf8(allowed.name());
+
+    return names.join(QStringLiteral(" | "));
 }
 
-QVariant Descriptor::defaultValue(const Node* self) const {
-    return annotation.defaultValue.resolve(self);
+bool Descriptor::accepts(const QMetaType& valueType) const {
+    if (type.id() == QMetaType::QVariant && !valueType.isValid())
+        return true;
+
+    if (annotation.allowedTypes.isEmpty())
+        return type == valueType;
+
+    return annotation.allowedTypes.contains(valueType);
+}
+
+QMetaType Descriptor::coercionTarget(const QMetaType& valueType) const {
+    if (valueType.id() != QMetaType::QVariantList)
+        return {};
+
+    if (annotation.allowedTypes.isEmpty())
+        return type != valueType && QMetaType::canConvert(valueType, type) ? type : QMetaType();
+
+    for (const auto& allowed : annotation.allowedTypes)
+        if (allowed != valueType && QMetaType::canConvert(valueType, allowed))
+            return allowed;
+
+    return {};
 }
 
 Schema Schema::build(const QMetaObject* meta, int baseOffset, bool includeReadOnly) {
     Schema schema;
     schema.m_descriptors.reserve(meta->propertyCount() - baseOffset);
 
-    // Descriptors are taken from cache since this should be called exactly once per class
     const auto annotations = annotationCache().take(meta);
 
     qCDebug(lcSchema) << "Building schema for" << meta->className();
@@ -52,7 +92,6 @@ Schema Schema::build(const QMetaObject* meta, int baseOffset, bool includeReadOn
         const auto key = QString::fromUtf8(prop.name());
         const auto isNode = isNodeType(prop.metaType());
 
-        // Skip read only properties (unless includeReadOnly)
         if (!isNode && !includeReadOnly && !prop.isWritable()) {
             qCDebug(lcSchema) << "  Skipping computed property" << key;
             continue;
@@ -67,6 +106,13 @@ Schema Schema::build(const QMetaObject* meta, int baseOffset, bool includeReadOn
             .isNode = isNode,
             .annotation = annotations.value(key),
         };
+
+        if (!isNode) {
+            desc.codec = resolveCodec(desc);
+            if (!desc.codec)
+                qCCritical(lcSchema, "No codec for %s of type %s, it will not be loaded or saved", qUtf8Printable(key),
+                    desc.type.name());
+        }
 
         schema.m_descriptors.append(std::move(desc));
         schema.m_keyToIndex.insert(key, schema.m_descriptors.size() - 1);

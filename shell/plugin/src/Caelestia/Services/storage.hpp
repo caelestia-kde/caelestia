@@ -1,6 +1,8 @@
 #pragma once
 
+#include <qbytearray.h>
 #include <qbytearrayview.h>
+#include <qhash.h>
 #include <qpointer.h>
 #include <qqmlintegration.h>
 #include <qqmllist.h>
@@ -41,6 +43,28 @@ protected:
     void tick() override;
 
 private:
+    // One physical disk (or zfs pool), accumulated across the filesystems on it
+    struct Accum {
+        quint64 usedBytes = 0;
+        quint64 totalBytes = 0;
+        bool hasRoot = false;
+    };
+
+    struct DeviceEntry {
+        quint64 totalBytes = 0;
+        quint64 usedBytes = 0;
+        bool hasRoot = false;
+        QByteArray device;
+        QByteArray fsType;
+    };
+
+    using AccumHash = QHash<QString, Accum>;
+
+    [[nodiscard]] static QHash<QByteArray, DeviceEntry> collectDevices();
+    [[nodiscard]] static AccumHash foldToDisks(const QHash<QByteArray, DeviceEntry>& byDevice);
+
+    void applyDisks(const AccumHash& byDisk);
+
     [[nodiscard]] static QStringList resolveToPhysicalDisks(const QString& devicePath);
     [[nodiscard]] static bool isPseudoFs(QByteArrayView fsType);
     [[nodiscard]] static bool sameOrder(const QList<DiskInfo*>& a, const QList<DiskInfo*>& b);

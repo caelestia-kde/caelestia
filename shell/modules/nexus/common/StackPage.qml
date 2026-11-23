@@ -1,3 +1,5 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Controls
 import Caelestia.Config
@@ -8,35 +10,67 @@ StackView {
     id: root
 
     required property NexusState nState
-    default property list<Component> pages
+    property var pages: []
     readonly property int animMovement: Tokens.padding.extraExtraLarge * 2
+    readonly property var pageMap: ({})
+    // set by Pages so the outgoing page ignores the nav signals of the page that replaces it
+    property int pageIdx: -1
 
-    function openSubPage(idx: int, immediate: bool): void {
-        const page = pages[idx];
+    function buildPageMap(): void {
+        for (let i = 0; i < pages.length; i++) {
+            const item = pages[i];
+            if (!item || !item.key)
+                continue;
+            pageMap[item.key] = item.component ?? item;
+        }
+    }
+
+    function openSubPage(target: string, immediate: bool): void {
+        const page = pageMap[target];
         if (page) {
             push(page, {
                 nState
             }, immediate ? StackView.Immediate : StackView.PushTransition);
         } else {
-            console.warn(logCat, "Attempted to open invalid sub-page index", idx);
+            console.warn(logCat, "Attempted to open invalid sub-page key:", target);
             nState.closeSubPage();
+        }
+    }
+
+    function switchToPage(target: string): void {
+        const page = pageMap[target];
+        if (page) {
+            root.popToIndex(0, StackView.Immediate);
+            root.replace(page, {
+                nState
+            }, StackView.Immediate);
         }
     }
 
     clip: busy
 
     Component.onCompleted: {
-        openSubPage(0, true);
-        // A request from before this page existed, from a search result or a
-        // reused detached window. Queued on the stack so closing walks back
-        // through it like any other sub-page.
-        if (nState.pendingSubPageIdx >= 0) {
-            const pending = nState.pendingSubPageIdx;
-            nState.pendingSubPageIdx = -1;
-            nState.subPageIdxStack.push(pending);
+        if (!pages || pages.length === 0) {
+            pages = root.pageIdx >= 0 ? PageCompRegistry.collectAllPagesForCategory(root.pageIdx) : [];
         }
-        for (const page of nState.subPageIdxStack)
-            openSubPage(page, true);
+        root.buildPageMap();
+        const baseKey = nState.activeSubPageKey !== ""
+            ? nState.activeSubPageKey
+            : nState.defaultPageForCategory(root.pageIdx);
+        root.openSubPage(baseKey, true);
+        if (nState.pendingSubPageKey !== "") {
+            const pending = nState.pendingSubPageKey;
+            nState.pendingSubPageKey = "";
+            if (pending !== baseKey && nState.subPageKeyStack.indexOf(pending) < 0) {
+                nState.subPageKeyStack.push(pending);
+            }
+        }
+        for (let i = 0; i < nState.subPageKeyStack.length; i++) {
+            const pageKey = nState.subPageKeyStack[i];
+            if (pageKey !== baseKey) {
+                root.openSubPage(pageKey, true);
+            }
+        }
     }
 
     pushEnter: Transition {
@@ -113,16 +147,27 @@ StackView {
     }
 
     Connections {
-        function onSubPageOpened(idx: int): void {
-            root.openSubPage(idx, false);
+        function onSubCategorySelected(target: string): void {
+            // read the live value: a cached binding is stale while currentPageIdx is still notifying
+            if (root.pageIdx >= 0 && root.pageIdx !== root.nState.currentPageIdx)
+                return;
+            root.switchToPage(target);
+        }
+
+        function onSubPageOpened(target: string): void {
+            root.openSubPage(target, false);
         }
 
         function onSubPageClosed(): void {
-            if (root.depth < root.nState.subPageIdxStack.length) {
+            if (root.depth < root.nState.subPageKeyStack.length) {
                 console.log(logCat, "Attempted to close page while depth < stack depth. Ignoring.");
                 return;
             }
             root.pop();
+        }
+
+        function onSubPagesCleared(): void {
+            root.popToIndex(0, StackView.Immediate);
         }
 
         target: root.nState

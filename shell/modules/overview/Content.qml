@@ -31,7 +31,6 @@ Item {
         screen: root.screen
         anchors.fill: parent
         opacity: root.visibilities.overview ? 1 : 0
-        // activeInfoClient is managed manually to ensure synchronous release before WindowInfo requests it
         onRequestWindowInfo: client => {
             windowGrid.activeInfoClient = client
             windowInfoOverlay.clientAddress = client.address
@@ -66,14 +65,14 @@ Item {
         }
 
         Behavior on opacity {
-            NumberAnimation { duration: 250; easing.type: Easing.OutCubic }
+            Anim { type: Anim.DefaultEffects }
         }
         Rectangle {
             anchors.fill: parent
-            color: Qt.rgba(0, 0, 0, 0.5)
+            color: Qt.alpha(Colours.palette.m3scrim, 0.5)
 
-            HoverHandler { } // block hover
-            WheelHandler { } // block scroll
+            HoverHandler { }
+            WheelHandler { }
             TapHandler {
                 onTapped: {
                     windowInfoOverlay.isOpen = false
@@ -85,18 +84,21 @@ Item {
             width: Math.min(parent.width * 0.8, 900)
             height: Math.min(parent.height * 0.8, 600)
 
-            Behavior on width { NumberAnimation { duration: 250; easing.type: Easing.OutCubic } }
-            Behavior on height { NumberAnimation { duration: 250; easing.type: Easing.OutCubic } }
+            Behavior on width { Anim { type: Anim.FastSpatial } }
+            Behavior on height { Anim { type: Anim.FastSpatial } }
             TapHandler { }
-            WInfo.WindowInfo {
-                id: winInfoItem
-
+            // Built only while shown: closed, it followed the active window and re-ran
+            // every details binding on each window list change.
+            Loader {
                 anchors.fill: parent
-                clientAddress: windowInfoOverlay.clientAddress
-                border.width: 2
-                border.color: Colours.palette.m3primary
-                onCloseRequested: {
-                    windowInfoOverlay.isOpen = false
+                active: windowInfoOverlay.visible
+                sourceComponent: WInfo.WindowInfo {
+                    clientAddress: windowInfoOverlay.clientAddress
+                    border.width: 2
+                    border.color: Colours.palette.m3primary
+                    onCloseRequested: {
+                        windowInfoOverlay.isOpen = false
+                    }
                 }
             }
         }

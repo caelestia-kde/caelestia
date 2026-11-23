@@ -1,47 +1,77 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
-import Quickshell
 import Caelestia.Config
-import Caelestia.Services
 import qs.components
 import qs.services
 import qs.utils
+import qs.modules.nexus
 
+// A strip that needs no aiming, in place of the chevron the tray used to carry:
+// it lights up when the pointer reaches the end of the bar.
 Item {
     id: root
 
-    implicitWidth: icon.implicitHeight + Tokens.padding.small
-    implicitHeight: icon.implicitHeight
+    property bool isHorizontal: true
+    property int thickness: Tokens.sizes.bar.innerWidth
 
-    StateLayer {
-        // Cursed workaround to make the height larger than the parent
-        anchors.fill: undefined
+    readonly property int desktopPageIdx: PageRegistry.indexForKey("desktop")
+    readonly property bool showing: Kwin.showingDesktop
+
+    property bool hovered: false
+
+    // The strip is thin on purpose; the item around it is wider so it is still easy
+    // to hit once the pointer is anywhere near the end of the bar.
+    implicitWidth: root.isHorizontal ? Tokens.padding.medium : root.thickness
+    implicitHeight: root.isHorizontal ? root.thickness : Tokens.padding.medium
+
+    StyledRect {
+        id: strip
+
+        readonly property real across: root.hovered || area.pressed ? Tokens.padding.small : Tokens.padding.extraSmall
+
         anchors.centerIn: parent
-        implicitWidth: implicitHeight
-        implicitHeight: icon.implicitHeight + Tokens.padding.small
+        implicitWidth: root.isHorizontal ? strip.across : root.thickness - Tokens.spacing.large
+        implicitHeight: root.isHorizontal ? root.thickness - Tokens.spacing.large : strip.across
         radius: Tokens.rounding.full
-        Accessible.name: qsTr("Show desktop")
-        Accessible.role: Accessible.Button
-        Accessible.description: qsTr("Minimize all windows to show the desktop")
-        onClicked: Quickshell.execDetached(["qdbus6", "org.kde.kglobalaccel", "/component/kwin", "org.kde.kglobalaccel.Component.invokeShortcut", "Show Desktop"])
+        color: Qt.alpha(Colours.palette.m3onSurface, root.showing ? 0.32 : root.hovered ? 0.22 : 0.1)
+
+        Behavior on implicitWidth {
+            Anim {
+                type: Anim.FastSpatial
+            }
+        }
+
+        Behavior on implicitHeight {
+            Anim {
+                type: Anim.FastSpatial
+            }
+        }
     }
 
-    MaterialIcon {
-        id: icon
+    MouseArea {
+        id: area
 
-        anchors.centerIn: parent
-        anchors.horizontalCenterOffset: Centering.pixelAlign(parent.width, width)
+        anchors.fill: parent
+        hoverEnabled: true
+        cursorShape: Qt.PointingHandCursor
+        acceptedButtons: Qt.LeftButton | Qt.RightButton
 
-        text: "keyboard_double_arrow_down"
-        color: Colours.palette.m3onSurfaceVariant
-        fontStyle: Tokens.font.icon.builders.small.weight(Font.Bold).build()
+        Accessible.role: Accessible.Button
+        Accessible.name: qsTr("Show desktop")
+        Accessible.description: qsTr("Minimize every window to show the desktop")
 
-        // Derived from KWin so the arrow stays in sync with the real "show
-        // desktop" state: toggling it any other way still flips the arrow, and
-        // a failed invocation never leaves it pointing the wrong way.
-        rotation: (typeof KWinWorkspaceState !== "undefined" && KWinWorkspaceState.showingDesktop) ? 180 : 0
+        onEntered: root.hovered = true
+        onExited: root.hovered = false
 
-        Behavior on rotation {
-            Anim { type: Anim.FastSpatial }
+        onClicked: mouse => {
+            if (mouse.button === Qt.RightButton) {
+                WindowFactory.create(null, {
+                    initialPageIdx: root.desktopPageIdx
+                });
+                return;
+            }
+            Kwin.setShowingDesktop(!Kwin.showingDesktop);
         }
     }
 }

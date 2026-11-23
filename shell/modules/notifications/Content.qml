@@ -7,19 +7,37 @@ import Caelestia
 import Caelestia.Config
 import qs.components
 import qs.components.containers
+import qs.components.effects
 import qs.components.widgets
 import qs.services
-import qs.modules.utilities as Utilities
 
 Item {
     id: root
 
-    required property DrawerVisibilities visibilities
-    required property Item osdPanel
-    required property Item sessionPanel
-    required property Item utilitiesPanel
+    /// How much room the panels open beside the stack leave it, measured by the window
+    /// that owns all of them.
+    property real room: Number.POSITIVE_INFINITY
     readonly property int padding: Tokens.padding.large
     readonly property int clampedPadding: CUtils.clamp(padding - Config.border.thickness, 0, padding)
+
+    /// Nothing to show: the stack is not there at all, rather than a strip of padding.
+    readonly property bool empty: list.count === 0
+    /// The width the screen leaves us. A stack wider than the display is a stack off the
+    /// display, so the cards give way on a narrow screen instead of hanging over the edge.
+    readonly property real availableWidth: (QsWindow.window as QsWindow)?.screen.width ?? 0
+
+    /// How tall the notifications themselves want to be.
+    readonly property real contentHeight: {
+        if (root.empty)
+            return 0;
+
+        const count = list.count;
+        let height = (count - 1) * Tokens.spacing.medium;
+        for (let i = 0; i < count; i++)
+            height += (list.itemAtIndex(i) as NotifWrapper)?.nonAnimHeight ?? 0;
+
+        return height;
+    }
 
     anchors.top: parent.top
     anchors.bottom: parent.bottom
@@ -38,36 +56,10 @@ Item {
         return h === "right" ? parent.right : undefined;
     }
 
-    implicitWidth: Tokens.sizes.notifs.width
-    implicitHeight: {
-        const count = list.count;
-        if (count === 0)
-            return 0;
-
-        let height = (count - 1) * Tokens.spacing.medium;
-        for (let i = 0; i < count; i++)
-            height += (list.itemAtIndex(i) as NotifWrapper)?.nonAnimHeight ?? 0;
-
-        if (visibilities.osd) {
-            const h = osdPanel.y - clampedPadding;
-            if (height > h)
-                height = h;
-        }
-
-        if (visibilities.session) {
-            const h = sessionPanel.y - clampedPadding;
-            if (height > h)
-                height = h;
-        }
-
-        if (visibilities.utilities) {
-            const h = ((QsWindow.window as QsWindow)?.screen.height ?? 0) - (utilitiesPanel as Utilities.Wrapper).nonAnimHeight - Config.border.thickness * 2 - padding * 2 - Tokens.spacing.extraLarge;
-            if (height > h)
-                height = h;
-        }
-
-        return Math.min(((QsWindow.window as QsWindow)?.screen?.height ?? 0) + padding - clampedPadding * 2 - Config.border.thickness, height + padding + clampedPadding);
-    }
+    implicitWidth: root.availableWidth > 0 ? Math.min(Tokens.sizes.notifs.width, root.availableWidth - Tokens.padding.extraLarge * 2) : Tokens.sizes.notifs.width
+    /// And how tall it may be: the panels beside it only leave so much, and a stack that
+    /// does not fit waits rather than drawing half a notification.
+    implicitHeight: root.empty ? 0 : Math.min(root.contentHeight + root.padding + root.clampedPadding, root.room)
 
     ClippingWrapperRectangle {
         anchors.fill: parent
@@ -194,12 +186,20 @@ Item {
                 property: "z"
                 value: 1
             }
-            Anim {
-                target: notif
-                property: "x"
-                to: (notif.x >= 0 ? root.implicitWidth : -root.implicitWidth) * 2
-                duration: Tokens.anim.durations.normal
-                easing: Tokens.anim.emphasized
+            ParallelAnimation {
+                Anim {
+                    target: notif
+                    property: "x"
+                    to: (notif.x >= 0 ? root.implicitWidth : -root.implicitWidth) * 2
+                    duration: Tokens.anim.durations.normal
+                    easing: Tokens.anim.emphasized
+                }
+                Anim {
+                    target: notif
+                    property: "opacity"
+                    to: 0
+                    duration: Tokens.anim.durations.normal
+                }
             }
             PropertyAction {
                 target: wrapper
@@ -208,14 +208,19 @@ Item {
             }
         }
 
-        ClippingRectangle {
+        // No cast shadow: the shell's other floating surfaces are flat against the wallpaper, and
+        // a RectangularShadow here read as a black border around the card.
+        // A plain clip, not a ClippingRectangle: the latter renders its child through a shader
+        // to cut a rounded region, and the card already draws its own corners. That extra
+        // surface was resampling the whole card, which is what softened every edge.
+        Item {
+            id: clip
+
             anchors.top: parent.top
             anchors.topMargin: wrapper.idx === 0 ? 0 : Tokens.spacing.medium
-
-            color: "transparent"
-            radius: notif.radius
             implicitWidth: notif.implicitWidth
             implicitHeight: notif.implicitHeight
+            clip: true
 
             Notification {
                 id: notif

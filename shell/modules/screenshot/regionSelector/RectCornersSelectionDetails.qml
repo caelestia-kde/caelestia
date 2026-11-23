@@ -1,5 +1,6 @@
 import ".."
 import QtQuick
+import Caelestia.Config
 import qs.components
 
 Item {
@@ -55,11 +56,10 @@ Item {
 
         property int borderWidth: 1
 
-        // Breathing
         opacity: 0.9
 
         SequentialAnimation on opacity {
-            running: root.breathingBorderOnly
+            running: root.breathingBorderOnly && Tokens.anim.enabled
             loops: Animation.Infinite
 
             NumberAnimation { from: 0.9; to: 0.3; duration: 1200; easing.type: Easing.InOutQuad }
@@ -79,8 +79,7 @@ Item {
         text: `${Math.round(root.regionWidth)} x ${Math.round(root.regionHeight)}`
     }
 
-    // Coord lines
-    Rectangle { // Vertical
+    Rectangle {
         visible: root.showAimLines && !root.breathingBorderOnly
         opacity: 0.2
         z: 2
@@ -92,7 +91,7 @@ Item {
         width: 1
         color: root.color
     }
-    Rectangle { // Horizontal
+    Rectangle {
         visible: root.showAimLines && !root.breathingBorderOnly
         opacity: 0.2
         z: 2

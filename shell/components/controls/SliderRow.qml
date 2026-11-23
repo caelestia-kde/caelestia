@@ -6,12 +6,8 @@ import Caelestia.Config
 import qs.components
 import qs.components.controls
 import qs.services
+import qs.modules.nexus.common
 
-// Label + value + slider row, shared by the bar popouts and the Nexus pages.
-// `spacious` selects the roomier Nexus layout; `first`/`last` round the card
-// corners for connected lists. Previously two near-identical modules were
-// kept in sync by hand (this one and modules/nexus/common/SliderRow.qml, now
-// a one-line preset).
 StyledRect {
     id: root
 
@@ -20,23 +16,61 @@ StyledRect {
     property alias valueLabel: valueLabel.text
     property string subtext
     property real value
+    property var reset
     property bool first
     property bool last
+    property bool isSelected: false
     property bool iconClickable: false
     property bool spacious: false
+    property bool roomyHeader: false
 
     signal moved(value: real)
     signal interaction(value: real)
     signal released(value: real)
     signal iconClicked
 
+    function stepLeft(): void {
+        const step = 0.05;
+        const next = Math.max(0, Math.round((root.value - step) * 100) / 100);
+        root.moved(next);
+        root.interaction(next);
+        root.released(next);
+    }
+
+    function stepRight(): void {
+        const step = 0.05;
+        const next = Math.min(1, Math.round((root.value + step) * 100) / 100);
+        root.moved(next);
+        root.interaction(next);
+        root.released(next);
+    }
+
     Layout.fillWidth: true
     implicitHeight: rowLayout.implicitHeight + rowLayout.anchors.margins + rowLayout.anchors.topMargin
-    color: Colours.tPalette.m3surfaceContainer
-    topLeftRadius: first ? (spacious ? Tokens.rounding.extraLarge : Tokens.rounding.large) : Tokens.rounding.extraSmall
-    topRightRadius: first ? (spacious ? Tokens.rounding.extraLarge : Tokens.rounding.large) : Tokens.rounding.extraSmall
-    bottomLeftRadius: last ? (spacious ? Tokens.rounding.extraLarge : Tokens.rounding.large) : Tokens.rounding.extraSmall
-    bottomRightRadius: last ? (spacious ? Tokens.rounding.extraLarge : Tokens.rounding.large) : Tokens.rounding.extraSmall
+    color: isSelected ? Colours.layer(Colours.palette.m3surfaceContainerHigh, 4) : Colours.tPalette.m3surfaceContainer
+    border.width: isSelected ? 2 : 0
+    border.color: Colours.palette.m3primary
+    topLeftRadius: isSelected ? Tokens.rounding.extraLargeIncreased : first ? (spacious ? Tokens.rounding.extraLarge : Tokens.rounding.large) : Tokens.rounding.extraSmall
+    topRightRadius: isSelected ? Tokens.rounding.extraLargeIncreased : first ? (spacious ? Tokens.rounding.extraLarge : Tokens.rounding.large) : Tokens.rounding.extraSmall
+    bottomLeftRadius: isSelected ? Tokens.rounding.extraLargeIncreased : last ? (spacious ? Tokens.rounding.extraLarge : Tokens.rounding.large) : Tokens.rounding.extraSmall
+    bottomRightRadius: isSelected ? Tokens.rounding.extraLargeIncreased : last ? (spacious ? Tokens.rounding.extraLarge : Tokens.rounding.large) : Tokens.rounding.extraSmall
+
+    Behavior on topLeftRadius {
+        Anim {}
+    }
+    Behavior on topRightRadius {
+        Anim {}
+    }
+    Behavior on bottomLeftRadius {
+        Anim {}
+    }
+    Behavior on bottomRightRadius {
+        Anim {}
+    }
+
+    Behavior on color {
+        CAnim {}
+    }
 
     RowLayout {
         id: rowLayout
@@ -44,13 +78,16 @@ StyledRect {
         anchors.fill: parent
         anchors.margins: spacious ? Tokens.padding.largeIncreased : Tokens.padding.medium
         anchors.topMargin: spacious ? Tokens.padding.large : Tokens.padding.small
+        // Keep the same right inset as ToggleRow/StepperRow (12px) even when
+        // spacious, so reset icons line up in one column across every row type.
+        anchors.rightMargin: Tokens.padding.medium
         spacing: spacious ? Tokens.spacing.medium : Tokens.spacing.small
 
         MaterialIcon {
             id: icon
 
             visible: text !== ""
-            color: Colours.palette.m3onSurfaceVariant
+            color: root.enabled ? Colours.palette.m3onSurfaceVariant : Colours.disabledContent
             fontStyle: spacious ? Tokens.font.icon.medium : Tokens.font.icon.small
 
             MouseArea {
@@ -68,6 +105,7 @@ StyledRect {
 
             RowLayout {
                 Layout.fillWidth: true
+                Layout.minimumHeight: root.roomyHeader ? 40 : 0
                 spacing: Tokens.spacing.small
 
                 ColumnLayout {
@@ -79,6 +117,7 @@ StyledRect {
 
                         Layout.fillWidth: true
                         font: Tokens.font.body.small
+                        color: root.enabled ? Colours.palette.m3onSurface : Colours.disabledContent
                         elide: Text.ElideRight
                     }
 
@@ -86,17 +125,22 @@ StyledRect {
                         Layout.fillWidth: true
                         visible: root.subtext !== ""
                         text: root.subtext
-                        color: Colours.palette.m3onSurfaceVariant
-                        font: Tokens.font.label.small
-                        elide: Text.ElideRight
+                        color: root.enabled ? Colours.palette.m3onSurfaceVariant : Colours.disabledContent
+                        font: NexusStyle.secondaryFont
+                        wrapMode: Text.Wrap
                     }
                 }
 
                 StyledText {
                     id: valueLabel
 
-                    color: Colours.palette.m3onSurfaceVariant
+                    color: root.enabled ? Colours.palette.m3onSurfaceVariant : Colours.disabledContent
                     font: Tokens.font.body.small
+                }
+
+                SettingResetButton {
+                    Layout.alignment: Qt.AlignVCenter
+                    options: root.reset
                 }
             }
 

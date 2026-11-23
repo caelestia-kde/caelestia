@@ -14,18 +14,37 @@ Item {
     property bool flag
     required property DrawerVisibilities visibilities
 
+    /// Which edges the stack hangs from, and which way it grows. The corner itself is the
+    /// selector's business: a stack only needs to know its two sides.
+    required property bool fromTop
+    required property bool fromLeft
+
+    /// How far down (or up) the toast at `index` sits, from the toasts that are already
+    /// in front of it.
+    function offsetFor(index: int): real {
+        root.flag;
+        let offset = 0;
+        for (let i = 0; i < index; i++) {
+            const item = repeater.itemAt(i) as ToastWrapper;
+            if (item && !item.modelData.closed && !item.previewHidden)
+                offset += item.implicitHeight + root.spacing;
+        }
+        return offset;
+    }
+
     function shouldShowToast(toast: Toast): bool {
         if (!Notifs.hasFullscreen())
             return true;
-        if (Config.utilities.toasts.fullscreen === "all")
+        if (GlobalConfig.utilities.toasts.fullscreen === "all")
             return true;
-        if (Config.utilities.toasts.fullscreen === "important")
+        if (GlobalConfig.utilities.toasts.fullscreen === "important")
             return toast.type === Toast.Warning || toast.type === Toast.Error;
         return false;
     }
 
     visible: !visibilities.overview
     implicitWidth: Tokens.sizes.utilities.toastWidth - Tokens.padding.medium * 2
+    width: implicitWidth
     implicitHeight: {
         let h = -spacing;
         for (let i = 0; i < repeater.count; i++) {
@@ -35,6 +54,56 @@ Item {
         }
         return h;
     }
+    states: [
+        State {
+            name: "bottom-left"
+            when: !root.fromTop && root.fromLeft
+
+            AnchorChanges {
+                target: root
+                anchors.top: undefined
+                anchors.bottom: parent.bottom
+                anchors.left: parent.left
+                anchors.right: undefined
+            }
+        },
+        State {
+            name: "bottom-right"
+            when: !root.fromTop && !root.fromLeft
+
+            AnchorChanges {
+                target: root
+                anchors.top: undefined
+                anchors.bottom: parent.bottom
+                anchors.left: undefined
+                anchors.right: parent.right
+            }
+        },
+        State {
+            name: "top-left"
+            when: root.fromTop && root.fromLeft
+
+            AnchorChanges {
+                target: root
+                anchors.top: parent.top
+                anchors.bottom: undefined
+                anchors.left: parent.left
+                anchors.right: undefined
+            }
+        },
+        State {
+            name: "top-right"
+            when: root.fromTop && !root.fromLeft
+
+            AnchorChanges {
+                target: root
+                anchors.top: parent.top
+                anchors.bottom: undefined
+                anchors.left: undefined
+                anchors.right: parent.right
+            }
+        }
+    ]
 
     Repeater {
         id: repeater
@@ -80,19 +149,12 @@ Item {
         }
         opacity: modelData.closed || previewHidden ? 0 : 1
         scale: modelData.closed || previewHidden ? 0.7 : 1
-        anchors.bottomMargin: {
-            root.flag; // Force update
-            let y = 0;
-            for (let i = 0; i < index; i++) {
-                const item = repeater.itemAt(i) as ToastWrapper;
-                if (item && !item.modelData.closed && !item.previewHidden)
-                    y += item.implicitHeight + root.spacing;
-            }
-            return y;
-        }
+        anchors.topMargin: root.fromTop ? root.offsetFor(index) : 0
+        anchors.bottomMargin: root.fromTop ? 0 : root.offsetFor(index)
         anchors.left: parent.left
         anchors.right: parent.right
-        anchors.bottom: parent.bottom
+        anchors.top: root.fromTop ? parent.top : undefined
+        anchors.bottom: root.fromTop ? undefined : parent.bottom
         implicitHeight: toastInner.implicitHeight
         acceptedButtons: Qt.LeftButton | Qt.MiddleButton | Qt.RightButton
         onClicked: modelData.close()
@@ -109,7 +171,12 @@ Item {
         }
         ParallelAnimation {
             running: toast.modelData.closed
-            onStarted: toast.anchors.bottomMargin = toast.anchors.bottomMargin
+            onStarted: {
+                if (root.fromTop)
+                    toast.anchors.topMargin = toast.anchors.topMargin;
+                else
+                    toast.anchors.bottomMargin = toast.anchors.bottomMargin;
+            }
             onFinished: toast.modelData.unlock(toast)
 
             Anim {
@@ -134,9 +201,15 @@ Item {
                 type: Anim.DefaultEffects
             }
         }
+
         Behavior on scale {
             Anim {}
         }
+
+        Behavior on anchors.topMargin {
+            Anim {}
+        }
+
         Behavior on anchors.bottomMargin {
             Anim {}
         }

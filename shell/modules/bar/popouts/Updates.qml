@@ -5,6 +5,7 @@ import QtQuick.Layouts
 import Caelestia.Config
 import qs.components
 import qs.services
+import qs.modules.bar
 import qs.modules.nexus
 
 ColumnLayout {
@@ -12,63 +13,37 @@ ColumnLayout {
 
     required property PopoutState popouts
 
-    // Injected by Content.qml's Popout.
     property real scaleOffset: 1.0
     property real fontScale: 1.0
     property bool _isSidebarOpen: false
 
-    // Index of the Nexus "Updates" page, resolved by page key so this menu
-    // can't drift out of sync if the page registry is reordered.
-    readonly property int updatesPageIdx: {
-        const idx = PageRegistry.indexForKey("updates");
-        return idx >= 0 ? idx : 0;
-    }
-
-    readonly property bool hasUpdate: UpdateChecker.hasUpdate
+    readonly property var status: UpdateStatus.describe(null, false)
 
     readonly property bool checking: UpdateChecker.checkingUpdates
 
-    readonly property bool updateRunning: UpdateChecker.updateRunning
+    readonly property string statusText: root.status.title
 
-    readonly property string statusText: {
-        if (root.updateRunning)
-            return UpdateChecker.updateStatus !== "" ? UpdateChecker.updateStatus : qsTr("Updating…");
+    readonly property string statusDetail: root.status.detail
+
+    readonly property string statusIcon: root.status.icon
+
+    readonly property string checkActionText: {
         if (root.checking)
-            return qsTr("Checking for updates…");
-        if (root.hasUpdate)
-            return UpdateChecker.versionSummaryMode
-                ? qsTr("New version available on %1").arg(UpdateChecker.currentBranch)
-                : qsTr("%1 new commits on %2 branch").arg(UpdateChecker.pendingCount).arg(UpdateChecker.currentBranch);
-        return qsTr("System is up to date");
-    }
-
-    readonly property string statusIcon: root.updateRunning ? "progress_activity" : root.checking ? "sync" : root.hasUpdate ? "update" : "check_circle"
-
-    property double nowMs: Date.now()
-
-    function formatDuration(ms: double): string {
-        const total = Math.max(0, Math.floor(ms / 1000));
-        const minutes = Math.floor(total / 60);
-        const seconds = total % 60;
-        return minutes > 0 ? qsTr("%1m %2s").arg(minutes).arg(seconds) : qsTr("%1s").arg(seconds);
+            return qsTr("Checking…");
+        if (UpdateChecker.checkFailed)
+            return qsTr("Try again");
+        return qsTr("Check for updates");
     }
 
     function hideIndicator(): void {
-        const entries = GlobalConfig.bar.entries ? [...GlobalConfig.bar.entries] : [];
-        const idx = entries.findIndex(e => e.id === "updateIndicator");
-        if (idx >= 0)
-            entries[idx] = { id: "updateIndicator", enabled: false, zone: entries[idx].zone || "right" };
-        else
-            entries.push({ id: "updateIndicator", enabled: false, zone: "right" });
-        GlobalConfig.bar.entries = entries;
+        BarPlacements.setShown("updateIndicator", false);
         root.popouts.hasCurrent = false;
     }
 
-    width: 300 * scaleOffset
-    implicitWidth: 300 * scaleOffset
+    width: Math.max(300 * scaleOffset, _isSidebarOpen ? (Visibilities.sidebarWidthFor(Tokens.sizes.sidebar.width) * scaleOffset) - Tokens.padding.extraLargeIncreased : 0)
+    implicitWidth: width
     spacing: Tokens.spacing.small * scaleOffset
 
-    // Status card: state icon + summary + last/next check timings.
     StyledRect {
         Layout.fillWidth: true
         implicitHeight: statusLayout.implicitHeight + Tokens.padding.medium * 2 * root.scaleOffset
@@ -91,7 +66,7 @@ ColumnLayout {
 
                 MaterialIcon {
                     text: root.statusIcon
-                    color: (root.hasUpdate || root.updateRunning) ? Colours.palette.m3primary : Colours.palette.m3onSurfaceVariant
+                    color: root.status.highlight ? Colours.palette.m3primary : Colours.palette.m3onSurfaceVariant
                     fontStyle.pointSize: Tokens.font.icon.medium.pointSize * root.fontScale
                 }
 
@@ -105,52 +80,18 @@ ColumnLayout {
                 }
             }
 
-            RowLayout {
+            StyledText {
                 Layout.fillWidth: true
-                spacing: Tokens.spacing.small * root.scaleOffset
-
-                MaterialIcon {
-                    text: "history"
-                    color: Colours.palette.m3onSurfaceVariant
-                    fontStyle.pointSize: Tokens.font.icon.medium.pointSize * root.fontScale
-                }
-
-                StyledText {
-                    Layout.fillWidth: true
-                    text: {
-                        if (root.checking)
-                            return qsTr("Checking…");
-                        if (UpdateChecker.lastCheckMs <= 0)
-                            return qsTr("Last check: not yet");
-                        return qsTr("Last check %1 ago").arg(root.formatDuration(root.nowMs - UpdateChecker.lastCheckMs));
-                    }
-                    color: Colours.palette.m3onSurfaceVariant
-                    font.pointSize: Tokens.font.body.medium.pointSize * root.fontScale
-                }
-            }
-
-            RowLayout {
-                Layout.fillWidth: true
-                visible: UpdateChecker.lastCheckMs > 0
-                spacing: Tokens.spacing.small * root.scaleOffset
-
-                MaterialIcon {
-                    text: "schedule"
-                    color: Colours.palette.m3onSurfaceVariant
-                    fontStyle.pointSize: Tokens.font.icon.medium.pointSize * root.fontScale
-                }
-
-                StyledText {
-                    Layout.fillWidth: true
-                    text: qsTr("Next check in %1").arg(root.formatDuration(UpdateChecker.lastCheckMs + UpdateChecker.checkIntervalMs - root.nowMs))
-                    color: Colours.palette.m3onSurfaceVariant
-                    font.pointSize: Tokens.font.body.medium.pointSize * root.fontScale
-                }
+                Layout.leftMargin: Tokens.spacing.small * root.scaleOffset + Tokens.font.icon.medium.pointSize * root.fontScale
+                visible: text !== ""
+                text: root.statusDetail
+                color: Colours.palette.m3onSurfaceVariant
+                wrapMode: Text.Wrap
+                font.pointSize: Tokens.font.body.small.pointSize * root.fontScale
             }
         }
     }
 
-    // Actions card, mirroring the CachyOS updater menu.
     StyledRect {
         Layout.fillWidth: true
         implicitHeight: actionsLayout.implicitHeight + Tokens.padding.medium * 2 * root.scaleOffset
@@ -167,7 +108,6 @@ ColumnLayout {
             anchors.margins: Tokens.padding.medium * root.scaleOffset
             spacing: Tokens.spacing.small * root.scaleOffset
 
-            // Check for updates
             StyledRect {
                 Layout.fillWidth: true
                 implicitHeight: checkRow.implicitHeight
@@ -180,8 +120,8 @@ ColumnLayout {
                     anchors.rightMargin: -Tokens.padding.medium * root.scaleOffset
 
                     radius: parent.radius
-                    enabled: !root.checking && !root.updateRunning
-                    onClicked: UpdateChecker.checkUpdates()
+                    enabled: !root.checking
+                    onClicked: UpdateChecker.checkNow()
                 }
 
                 RowLayout {
@@ -199,14 +139,13 @@ ColumnLayout {
 
                     StyledText {
                         Layout.fillWidth: true
-                        text: root.checking ? qsTr("Checking…") : qsTr("Check for updates")
+                        text: root.checkActionText
                         color: Colours.palette.m3onSurface
                         font.pointSize: Tokens.font.body.medium.pointSize * root.fontScale
                     }
                 }
             }
 
-            // Open the updates page
             StyledRect {
                 Layout.fillWidth: true
                 implicitHeight: openRow.implicitHeight
@@ -221,7 +160,7 @@ ColumnLayout {
                     radius: parent.radius
                     onClicked: {
                         root.popouts.hasCurrent = false;
-                        WindowFactory.create(null, { initialPageIdx: root.updatesPageIdx });
+                        WindowFactory.create(null, { initialPageIdx: "updates", initialSubPage: "updates" });
                     }
                 }
 
@@ -247,7 +186,6 @@ ColumnLayout {
                 }
             }
 
-            // CachyOS "Exit" equivalent: hide the indicator from the bar
             StyledRect {
                 Layout.fillWidth: true
                 implicitHeight: hideRow.implicitHeight
@@ -285,12 +223,5 @@ ColumnLayout {
                 }
             }
         }
-    }
-
-    Timer {
-        interval: 1000
-        repeat: true
-        running: true
-        onTriggered: root.nowMs = Date.now()
     }
 }

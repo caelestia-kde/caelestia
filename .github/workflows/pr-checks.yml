@@ -10,39 +10,56 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Job 1: PR template validation - catch empty/placeholder PRs
   pr-template:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.x'
 
       - name: Validate PR template
         run: python3 .github/scripts/check_pr_template.py
 
-  # Job 2: Branch naming - gentle suggestion, not a hard rule
   branch-name:
     runs-on: ubuntu-latest
     steps:
-      - name: Check branch name
+      - name: Check the base branch
         env:
-          BRANCH_NAME: ${{ github.head_ref }}
+          BASE_BRANCH: ${{ github.base_ref }}
+          HEAD_BRANCH: ${{ github.head_ref }}
         run: |
-          if [[ "$BRANCH_NAME" == "main" || "$BRANCH_NAME" == "dev" ]]; then
-            echo "::warning::Branch '$BRANCH_NAME' as source - consider using a feature branch instead."
+          set -euo pipefail
+
+          # Feature work targets dev. main moves only through a release promotion,
+          # and the protection ruleset there requires a pull request to do it, so
+          # that one case has to stay open.
+          is_release_branch=false
+          case "$HEAD_BRANCH" in
+            [Rr]elease/*) is_release_branch=true ;;
+          esac
+
+          if [[ "$BASE_BRANCH" == "dev" ]]; then
+            echo "Pull request targets dev."
+            exit 0
           fi
 
-  # Job 3: Changed files check - catch common mistakes by scope
+          if [[ "$BASE_BRANCH" == "main" && "$is_release_branch" == "true" ]]; then
+            echo "Release promotion '$HEAD_BRANCH' targets main."
+            exit 0
+          fi
+
+          echo "::error::Pull requests must target dev, except a Release/* branch promoting a release to main (this one is '${HEAD_BRANCH:-<none>}' onto '${BASE_BRANCH:-<none>}')."
+          exit 1
+
   changed-files:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
 
@@ -51,19 +68,16 @@ jobs:
           echo "### Changed Files Analysis" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
-          # Get list of changed files in this PR
           git diff --name-only origin/${{ github.base_ref }}...HEAD > /tmp/changed_files.txt
 
           CHANGED_COUNT=$(wc -l < /tmp/changed_files.txt)
           echo "Total files changed: $CHANGED_COUNT" >> $GITHUB_STEP_SUMMARY
 
-          # Check for too many files changed (possible accidental commit)
           if [[ "$CHANGED_COUNT" -gt 75 ]]; then
             echo "::warning::Large PR detected: $CHANGED_COUNT files changed. Consider breaking into smaller PRs."
             echo "**$CHANGED_COUNT files changed** - consider breaking into smaller, focused PRs." >> $GITHUB_STEP_SUMMARY
           fi
 
-          # Detect QML changes that don't touch shell/
           QML_CHANGES=$(grep '\.qml$' /tmp/changed_files.txt || true)
           NON_SHELL_QML=$(echo "$QML_CHANGES" | grep -v '^shell/' || true)
           if [[ -n "$NON_SHELL_QML" ]]; then
@@ -71,27 +85,23 @@ jobs:
             echo "QML files outside shell/: $NON_SHELL_QML" >> $GITHUB_STEP_SUMMARY
           fi
 
-          # Detect installer C++ changes - these affect the TUI installer
-          if grep -q '^installer/tui/.*\.(cpp|hpp|h)$' /tmp/changed_files.txt; then
+          if grep -qE '^installer/tui/.*\.(cpp|hpp|h)$' /tmp/changed_files.txt; then
             echo "Installer C++ changes - compilation will be verified by validate workflow." >> $GITHUB_STEP_SUMMARY
           fi
 
-          # Detect shell CMakeLists.txt changes - build system changes
           if grep -q 'CMakeLists.txt' /tmp/changed_files.txt; then
             echo "Build system changes - verify with a clean build." >> $GITHUB_STEP_SUMMARY
           fi
 
-          # Detect version.env changes - version bumps need extra care
           if grep -q 'version.env' /tmp/changed_files.txt; then
             echo "Version bump - ensure version-release workflow will fire correctly." >> $GITHUB_STEP_SUMMARY
           fi
 
-  # Job 4: Commit message - gentle reminders, never blocks
   commit-messages:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
 
@@ -109,7 +119,6 @@ jobs:
             HASH="${line%% *}"
             MSG="${line#* }"
 
-            # Skip merge commits
             [[ "$MSG" == "Merge "* ]] && continue
 
             FIRST_LINE="${MSG%%$'\n'*}"
@@ -120,17 +129,14 @@ jobs:
 
           echo "Commit message review complete."
 
-  # Job 5: QML source compatibility
-  # This is intentionally independent of the native dependency build. It
-  # catches unsupported QML root types even when package installation fails.
   qml-compatibility:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.x'
 
@@ -140,7 +146,6 @@ jobs:
       - name: Check QML import completeness
         run: python3 .github/scripts/check_qml_imports.py --shell-root shell
 
-  # Final PR gate
   pr-gate:
     needs:
       - pr-template
@@ -169,7 +174,8 @@ jobs:
             if [[ "$result" == "success" ]]; then
               echo "- [PASS] **${job}**" >> $GITHUB_STEP_SUMMARY
             elif [[ "$result" == "skipped" ]]; then
-              echo "- [SKIP] **${job}**" >> $GITHUB_STEP_SUMMARY
+              echo "- [FAIL] **${job}** - required PR job was skipped" >> $GITHUB_STEP_SUMMARY
+              all_passed=false
             else
               echo "- [FAIL] **${job}** - ${result}" >> $GITHUB_STEP_SUMMARY
               all_passed=false

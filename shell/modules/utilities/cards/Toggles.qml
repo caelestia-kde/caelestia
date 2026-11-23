@@ -7,18 +7,20 @@ import Quickshell
 import Quickshell.Bluetooth
 import Caelestia.Components
 import Caelestia.Config
+import Caelestia.Services.QuickShare
 import qs.components
 import qs.components.controls
 import qs.services
 import qs.utils
 import qs.modules.nexus
-import qs.modules.bar.popouts as BarPopouts
 
 StyledRect {
     id: root
 
     required property DrawerVisibilities visibilities
-    required property BarPopouts.Wrapper popouts
+    required property var popouts
+
+    readonly property real nonAnimHeight: implicitHeight
 
     readonly property var quickToggles: {
         const configToggles = Config.utilities.quickToggles || [];
@@ -26,23 +28,36 @@ StyledRect {
 
         const builtIn = [
             {
+                id: "hotspot"
+            },
+            {
                 id: "restartShell"
             },
             {
-                id: "badapple"
+                id: "pauseWallpaper"
             },
             {
-                id: "pauseWallpaper"
+                id: "visualiser"
             },
             {
                 id: "nightlight"
             },
             {
                 id: "easyeffects"
+            },
+            {
+                id: "keepAwake"
             }
         ].filter(t => !disabledIds.has(t.id));
 
         const allToggles = [...configToggles.filter(t => !disabledIds.has(t.id)), ...builtIn];
+        if (Config.utilities.quickTogglesCustomOrder ?? false) {
+            const order = {};
+            configToggles.forEach((t, i) => {
+                order[t.id] = i;
+            });
+            allToggles.sort((a, b) => (order[a.id] ?? 9999) - (order[b.id] ?? 9999));
+        }
         const seenIds = new Set();
 
         return allToggles.filter(item => {
@@ -54,8 +69,10 @@ StyledRect {
                 return GlobalConfig.utilities.vpn.selectedProvider.length > 0;
             }
 
-            // Nothing to toggle if it is not installed, and a dead button is
-            // worse than no button.
+            if (item.id === "hotspot") {
+                return Nmcli.hotspot.supported;
+            }
+
             if (item.id === "easyeffects") {
                 return EasyEffects.available;
             }
@@ -64,8 +81,237 @@ StyledRect {
         });
     }
 
-    readonly property int splitIndex: Math.ceil(quickToggles.length / 2)
-    readonly property bool needExtraRow: quickToggles.length > 6
+    readonly property int perPage: Math.max(2, Math.min(12, Config.utilities.quickTogglesPerPage ?? 6))
+    // Every tile is a peer, so all of them take one cell of the same width. The
+    // rows are balanced against how many toggles this page holds, rather than
+    // split in half: an odd page pads its shorter row instead of stretching the
+    // few tiles on it, and a page of three or fewer sits on one row rather than
+    // becoming two rows of very wide pills.
+    readonly property int pageRows: root.pageSlice().length > 3 ? 2 : 1
+    readonly property int pageColumns: Math.max(1, Math.ceil(root.pageSlice().length / root.pageRows))
+    readonly property bool secondRow: root.pageRows > 1
+    readonly property int pageCount: Math.max(1, Math.ceil(quickToggles.length / perPage))
+    property int currentPage: 0
+    property bool dragging: false
+    property var dragOrder: []
+    property string dragId: ""
+    // The toggles are icon only and several glyphs are not obvious on their own,
+    // so hovering one names it after a moment. The label is drawn inside the card
+    // on purpose: a popup tooltip would sit outside the drawer and close it.
+    property string hoverLabel: ""
+    property bool hoverLabelShown: false
+    property real hoverX: 0
+    property real hoverY: 0
+    property real ghostX: 0
+    property real ghostY: 0
+    property double lastEdgeSwitch: 0
+    property double lastWheelSwitch: 0
+
+    function pageSlice(): var {
+        const src = root.dragging && root.dragOrder.length > 0 ? root.dragOrder : root.quickToggles;
+        return src.slice(root.currentPage * root.perPage, (root.currentPage + 1) * root.perPage);
+    }
+
+    function iconFor(id: string): string {
+        switch (id) {
+        case "wifi": return "wifi";
+        case "bluetooth": return "bluetooth";
+        case "mic": return "mic";
+        case "settings": return "settings";
+        case "gameMode": return "gamepad";
+        case "colorpicker": return "colorize";
+        case "wallpaper": return "wallpaper";
+        case "restartShell": return "restart_alt";
+        case "pauseWallpaper": return "pause";
+        case "visualiser": return "equalizer";
+        case "easyeffects": return "graphic_eq";
+        case "nightlight": return "bedtime";
+        case "keepAwake": return "coffee";
+        case "hotspot": return "wifi_tethering";
+        case "dnd": return "notifications_off";
+        case "vpn": return "vpn_key";
+        case "quickShare": return "near_me";
+        default: return "toggle_on";
+        }
+    }
+
+    function labelFor(id: string): string {
+        switch (id) {
+        case "wifi": return qsTr("Wi-Fi");
+        case "hotspot": return qsTr("Hotspot");
+        case "bluetooth": return qsTr("Bluetooth");
+        case "mic": return qsTr("Microphone");
+        case "settings": return qsTr("Settings");
+        case "colorpicker": return qsTr("Colour picker");
+        case "launcher": return qsTr("Launcher");
+        case "overview": return qsTr("Overview");
+        case "dashboard": return qsTr("Dashboard");
+        case "wallpaper": return qsTr("Wallpaper");
+        case "gameMode": return qsTr("Game mode");
+        case "pauseWallpaper": return qsTr("Pause wallpaper");
+        case "visualiser": return qsTr("Audio visualiser");
+        case "nightlight": return qsTr("Night light");
+        case "easyeffects": return qsTr("EasyEffects");
+        case "keepAwake": return qsTr("Keep awake");
+        case "restartShell": return qsTr("Restart shell");
+        case "dnd": return qsTr("Do not disturb");
+        case "vpn": return qsTr("VPN");
+        case "quickShare": return qsTr("Quick share");
+        default: return "";
+        }
+    }
+
+    function toggleAt(row, px: real, py: real): var {
+        const kids = row.children;
+        for (let i = 0; i < kids.length; i++) {
+            const c = kids[i];
+            if (!c.visible || c.width <= 0 || c.isSpacer === true || c.modelData === undefined)
+                continue;
+            const lp = c.mapFromItem(root, px, py);
+            if (lp.x >= 0 && lp.y >= 0 && lp.x <= c.width && lp.y <= c.height)
+                return c;
+        }
+        return null;
+    }
+
+    // Each row is padded to the page's column count with empty cells. They take a
+    // cell and the spacing around it but draw nothing, which is what keeps the
+    // tiles above and below the same width when a row is not full. The empty
+    // cells are also why the second row is never shown just because it exists.
+    function rowModels(top: bool): var {
+        const columns = root.pageColumns;
+        const slice = root.pageSlice();
+        const start = top ? 0 : columns;
+        const row = slice.slice(start, start + columns);
+        while (row.length < columns)
+            row.push({
+                id: ""
+            });
+        return row;
+    }
+
+    function requestPage(page: int): void {
+        const clamped = Math.max(0, Math.min(root.pageCount - 1, page));
+        if (clamped !== root.currentPage)
+            root.currentPage = clamped;
+    }
+
+    // These guards also run during component init, when pageCount can still hold
+    // its default 0; without the lower clamp currentPage ends up -1, every page
+    // slice comes out empty and the card renders collapsed until a wheel event
+    // happens to call requestPage.
+    function clampPage(): void {
+        const clamped = Math.max(0, Math.min(root.pageCount - 1, root.currentPage));
+        if (clamped !== root.currentPage)
+            root.currentPage = clamped;
+    }
+
+    function startDrag(item, px: real, py: real): void {
+        root.dragOrder = root.quickToggles.map(t => ({
+                    id: t.id
+                }));
+        root.dragId = item.modelData.id;
+        root.dragging = true;
+        root.ghostX = px;
+        root.ghostY = py;
+        const hit = root.toggleAt(rowTop, px, py) || root.toggleAt(rowBottom, px, py);
+        if (hit)
+            hit.opacity = 0.35;
+    }
+
+    function moveDrag(px: real, py: real): void {
+        root.ghostX = px;
+        root.ghostY = py;
+        // Drag to edge switches page (with cooldown so it doesn't flip rapidly).
+        const now = Date.now();
+        if (now - root.lastEdgeSwitch > 450) {
+            if (px < 24 && root.currentPage > 0) {
+                root.lastEdgeSwitch = now;
+                root.requestPage(root.currentPage - 1);
+                return;
+            }
+            if (px > root.width - 24 && root.currentPage < root.pageCount - 1) {
+                root.lastEdgeSwitch = now;
+                root.requestPage(root.currentPage + 1);
+                return;
+            }
+        }
+        const rows = [rowTop, rowBottom];
+        const slice = root.pageSlice();
+        const pageStart = root.currentPage * root.perPage;
+        const pageEnd = pageStart + slice.length - 1;
+        for (let r = 0; r < rows.length; r++) {
+            const row = rows[r];
+            if (!row.visible || row.model.length <= 0)
+                continue;
+            const origin = row.mapToItem(root, 0, 0);
+            if (px >= origin.x - 20 && px <= origin.x + row.width + 20 && py >= origin.y - row.height / 2 && py <= origin.y + row.height * 1.5) {
+                const base = pageStart + (row === rowBottom ? root.pageColumns : 0);
+                // Cell pitch includes the gap after each cell, so the last cell
+                // starts where the row's width says it should, not short of it.
+                const pitch = (row.width + row.spacing) / row.model.length;
+                let slot = Math.floor((px - origin.x) / pitch);
+                if (slot < 0)
+                    slot = 0;
+                if (slot > row.model.length - 1)
+                    slot = row.model.length - 1;
+                const ids = root.dragOrder.slice();
+                let from = -1;
+                for (let i = 0; i < ids.length; i++)
+                    if (ids[i].id === root.dragId)
+                        from = i;
+                // A padded cell after the last toggle in a short row is still a
+                // slot on screen, but the toggle dropped on it belongs at the end
+                // of this page, not past it.
+                const to = Math.min(base + slot, pageEnd);
+                if (from >= 0 && to >= 0 && from !== to) {
+                    const moved = ids.splice(from, 1)[0];
+                    ids.splice(to > ids.length ? ids.length : to, 0, moved);
+                    root.dragOrder = ids;
+                }
+                return;
+            }
+        }
+    }
+
+    function finishDrag(save: bool): void {
+        if (save && root.dragId) {
+            const stored = Config.utilities.quickToggles || [];
+            const flags = {};
+            stored.forEach(t => {
+                flags[t.id] = t.enabled !== false;
+            });
+            const ids = root.dragOrder.slice();
+            Object.keys(flags).forEach(id => {
+                let found = false;
+                for (let i = 0; i < ids.length; i++)
+                    if (ids[i].id === id)
+                        found = true;
+                if (!found)
+                    ids.push({
+                        id: id
+                    });
+            });
+            GlobalConfig.utilities.quickToggles = ids.map(item => ({
+                        id: item.id,
+                        enabled: flags[item.id] !== false
+                    }));
+            GlobalConfig.utilities.quickTogglesCustomOrder = true;
+        }
+        const rows = [rowTop, rowBottom];
+        for (let r = 0; r < rows.length; r++) {
+            const kids = rows[r].children;
+            for (let i = 0; i < kids.length; i++)
+                if (kids[i].modelData !== undefined)
+                    kids[i].opacity = 1;
+        }
+        root.dragging = false;
+        root.dragId = "";
+        root.dragOrder = [];
+    }
+
+    onPageCountChanged: root.clampPage()
+    onPerPageChanged: root.clampPage()
 
     Layout.fillWidth: true
     implicitHeight: layout.implicitHeight + Tokens.padding.extraLargeIncreased
@@ -76,10 +322,10 @@ StyledRect {
     Timer {
         id: execTimer
 
+        property var pendingAction: null
+
         interval: 250
         repeat: false
-
-        property var pendingAction: null
         onTriggered: {
             if (pendingAction) pendingAction();
             pendingAction = null;
@@ -93,18 +339,210 @@ StyledRect {
         anchors.margins: Tokens.padding.large
         spacing: Tokens.spacing.medium
 
+        RowLayout {
+            StyledText {
+                Layout.fillWidth: true
+                text: qsTr("Quick Toggles")
+                font: Tokens.font.body.medium
+            }
+
+            IconButton {
+                icon: "tune"
+                type: IconButton.Text
+                onClicked: {
+                    const pageIdx = PageCompRegistry.categoryIdxForKey("utilities");
+                    root.visibilities.utilities = false;
+                    execTimer.pendingAction = () => WindowFactory.create(null, {
+                        initialPageIdx: pageIdx,
+                        initialSubPage: "quickToggles"
+                    });
+                    execTimer.restart();
+                }
+            }
+        }
+
+        // The rows are one grid, so they share the tile gap rather than the
+        // section rhythm: 8 between cells in both directions, 12 between the
+        // grid and the header or the page dots.
+        ColumnLayout {
+            id: grid
+
+            Layout.fillWidth: true
+            spacing: Tokens.spacing.small
+
+            QuickToggleRow {
+                id: rowTop
+
+                model: root.rowModels(true)
+            }
+
+            QuickToggleRow {
+                id: rowBottom
+
+                visible: root.secondRow
+                model: root.rowModels(false)
+            }
+        }
+
+        Row {
+            id: pageDots
+
+            visible: root.pageCount > 1
+            Layout.alignment: Qt.AlignHCenter
+            spacing: Tokens.spacing.extraSmall
+
+            Repeater {
+                model: root.pageCount
+
+                delegate: StyledRect {
+                    required property int index
+
+                    implicitWidth: index === root.currentPage ? 16 : 6
+                    implicitHeight: 6
+                    radius: Tokens.rounding.full
+                    color: index === root.currentPage ? Colours.palette.m3primary : Colours.palette.m3outlineVariant
+
+                    Behavior on implicitWidth {
+                        Anim {
+                            type: Anim.Spatial
+                        }
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.requestPage(parent.index)
+                    }
+                }
+            }
+        }
+    }
+
+    Timer {
+        id: hoverTimer
+
+        interval: 600
+        onTriggered: {
+            if (root.hoverLabel !== "")
+                root.hoverLabelShown = true;
+        }
+    }
+
+    StyledRect {
+        id: hoverTip
+
+        z: 10
+        visible: opacity > 0
+        opacity: root.hoverLabelShown ? 1 : 0
+        x: Math.max(Tokens.padding.extraSmall, Math.min(root.width - width - Tokens.padding.extraSmall, root.hoverX - width / 2))
+        y: Math.min(root.height - height - Tokens.padding.extraSmall, root.hoverY + Tokens.spacing.medium)
+        implicitWidth: hoverTipLabel.implicitWidth + Tokens.padding.medium * 2
+        implicitHeight: hoverTipLabel.implicitHeight + Tokens.padding.small * 2
+        radius: Tokens.rounding.full
+        color: Qt.rgba(0, 0, 0, 0.85)
+
+        Behavior on opacity {
+            Anim {
+                type: Anim.FastEffects
+            }
+        }
+
         StyledText {
-            text: qsTr("Quick Toggles")
-            font: Tokens.font.body.medium
-        }
+            id: hoverTipLabel
 
-        QuickToggleRow {
-            model: root.needExtraRow ? root.quickToggles.slice(0, root.splitIndex) : root.quickToggles
+            anchors.centerIn: parent
+            text: root.hoverLabel
+            color: "white"
+            font: Tokens.font.label.small
         }
+    }
 
-        QuickToggleRow {
-            visible: root.needExtraRow
-            model: root.needExtraRow ? root.quickToggles.slice(root.splitIndex) : []
+    WheelHandler {
+        acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+        onWheel: event => {
+            if (root.pageCount <= 1 || root.dragging)
+                return;
+            const d = event.angleDelta.y !== 0 ? event.angleDelta.y : event.angleDelta.x;
+            // One gesture sends many events; without a cooldown it skips the middle page.
+            const now = Date.now();
+            if (d === 0 || now - root.lastWheelSwitch < 400)
+                return;
+            root.lastWheelSwitch = now;
+            if (d < 0)
+                root.requestPage(root.currentPage + 1);
+            else if (d > 0)
+                root.requestPage(root.currentPage - 1);
+        }
+    }
+
+
+    MouseArea {
+        id: rowOverlay
+
+        property bool pressed: false
+        property real pressX: 0
+        property real pressY: 0
+        property var pressHit: null
+
+        // The overlay lives on the card, while the grid lives inside the card's
+        // ColumnLayout, so this cannot be an anchor across parents: map the
+        // grid's origin instead.
+        readonly property point gridOrigin: grid.mapToItem(root, 0, 0)
+
+        x: gridOrigin.x
+        y: gridOrigin.y
+        width: grid.width
+        height: grid.height
+        onPressed: mouse => {
+            const p = rowOverlay.mapToItem(root, mouse.x, mouse.y);
+            pressX = p.x;
+            pressY = p.y;
+            pressed = true;
+            pressHit = root.toggleAt(rowTop, p.x, p.y) || root.toggleAt(rowBottom, p.x, p.y);
+        }
+        onPositionChanged: mouse => {
+            if (!pressed)
+                return;
+            const p = rowOverlay.mapToItem(root, mouse.x, mouse.y);
+            if (!root.dragging) {
+                if (Math.hypot(p.x - pressX, p.y - pressY) > 10 && pressHit)
+                    root.startDrag(pressHit, p.x, p.y);
+            } else {
+                root.moveDrag(p.x, p.y);
+            }
+        }
+        onReleased: {
+            if (root.dragging) {
+                root.finishDrag(true);
+            } else if (pressHit) {
+                pressHit.clicked();
+            }
+            pressed = false;
+            pressHit = null;
+        }
+        onCanceled: {
+            if (root.dragging)
+                root.finishDrag(false);
+            pressed = false;
+            pressHit = null;
+        }
+    }
+
+    StyledRect {
+        visible: root.dragging
+        x: root.ghostX - 26
+        y: root.ghostY - 26
+        implicitWidth: 52
+        implicitHeight: 52
+        radius: Tokens.rounding.large
+        color: Colours.palette.m3secondaryContainer
+        opacity: 0.9
+
+        MaterialIcon {
+            anchors.centerIn: parent
+            text: root.iconFor(root.dragId)
+            color: Colours.palette.m3onSecondaryContainer
+            fontStyle: Tokens.font.icon.large
         }
     }
 
@@ -126,6 +564,14 @@ StyledRect {
                         icon: "wifi"
                         checked: Nmcli.wifiEnabled
                         onClicked: Nmcli.toggleWifi()
+                    }
+                }
+                DelegateChoice {
+                    roleValue: "hotspot"
+                    delegate: Toggle {
+                        icon: "wifi_tethering"
+                        checked: Nmcli.hotspot.enabled
+                        onClicked: HotspotSwitch.toggle()
                     }
                 }
                 DelegateChoice {
@@ -179,10 +625,45 @@ StyledRect {
                     }
                 }
                 DelegateChoice {
+                    roleValue: "launcher"
+                    delegate: Toggle {
+                        icon: "apps"
+                        inactiveOnColour: Colours.palette.m3onSurfaceVariant
+                        isToggle: false
+                        onClicked: Quickshell.execDetached(["qs", "-c", "caelestia", "ipc", "call", "drawers", "toggle", "launcher"])
+                    }
+                }
+                DelegateChoice {
+                    roleValue: "overview"
+                    delegate: Toggle {
+                        icon: "view_array"
+                        inactiveOnColour: Colours.palette.m3onSurfaceVariant
+                        isToggle: false
+                        onClicked: Quickshell.execDetached(["qs", "-c", "caelestia", "ipc", "call", "drawers", "toggle", "overview"])
+                    }
+                }
+                DelegateChoice {
+                    roleValue: "dashboard"
+                    delegate: Toggle {
+                        icon: "dashboard"
+                        inactiveOnColour: Colours.palette.m3onSurfaceVariant
+                        isToggle: false
+                        onClicked: Quickshell.execDetached(["qs", "-c", "caelestia", "ipc", "call", "drawers", "toggle", "dashboard"])
+                    }
+                }
+                DelegateChoice {
+                    roleValue: "gameMode"
+                    delegate: Toggle {
+                        icon: "gamepad"
+                        checked: GameMode.enabled
+                        onClicked: GameMode.enabled = !GameMode.enabled
+                    }
+                }
+                DelegateChoice {
                     roleValue: "dnd"
                     delegate: Toggle {
                         icon: "notifications_off"
-                        checked: Notifs.dnd
+                        checked: Notifs.quiet
                         onClicked: Notifs.dnd = !Notifs.dnd
                     }
                 }
@@ -198,17 +679,11 @@ StyledRect {
                     }
                 }
                 DelegateChoice {
-                    roleValue: "badapple"
+                    roleValue: "quickShare"
                     delegate: Toggle {
-                        icon: "nutrition"
-                        isToggle: false
-                        inactiveOnColour: Colours.palette.m3onSurfaceVariant
-                        onClicked: {
-                            if (BadApplePlayer.shouldPlay)
-                                BadApplePlayer.stop();
-                            else
-                                BadApplePlayer.play();
-                        }
+                        icon: "near_me"
+                        checked: QuickShare.enabled
+                        onClicked: QuickShare.setEnabled(!QuickShare.enabled)
                     }
                 }
                 DelegateChoice {
@@ -217,11 +692,7 @@ StyledRect {
                         icon: "wallpaper"
                         isToggle: false
                         inactiveOnColour: Colours.palette.m3onSurfaceVariant
-                        onClicked: {
-                            Visibilities.launcherInitialSearch = `${GlobalConfig.launcher.actionPrefix}wallpaper `;
-                            const visibilities = Visibilities.getForActive();
-                            visibilities.launcher = true;
-                        }
+                        onClicked: Visibilities.openLauncher("wallpaper")
                     }
                 }
                 DelegateChoice {
@@ -231,7 +702,7 @@ StyledRect {
                         isToggle: false
                         inactiveOnColour: Colours.palette.m3onSurfaceVariant
                         onClicked: {
-                            Launch.exec(["bash", "-c", "bash \"${XDG_CONFIG_HOME:-$HOME/.config}/quickshell/caelestia/scripts/restart_shell.sh\""]);
+                            Launch.exec(["bash", "-c", `bash "${Quickshell.shellPath("scripts/restart_shell.sh")}"`]);
                         }
                     }
                 }
@@ -247,6 +718,17 @@ StyledRect {
                         onClicked: {
                             const newVal = !GlobalConfig.background.videoWallpaperPaused;
                             GlobalConfig.background.videoWallpaperPaused = newVal;
+                        }
+                    }
+                }
+                DelegateChoice {
+                    roleValue: "visualiser"
+                    delegate: Toggle {
+                        icon: "equalizer"
+                        checked: GlobalConfig.background.visualiser.enabled
+                        onClicked: {
+                            const next = !GlobalConfig.background.visualiser.enabled;
+                            PlasmaWidgets.setWidgetEnabled("visualizer", next);
                         }
                     }
                 }
@@ -287,15 +769,85 @@ StyledRect {
                         }
                     }
                 }
+                DelegateChoice {
+                    roleValue: "keepAwake"
+                    delegate: Toggle {
+                        icon: "coffee"
+                        checked: IdleInhibitor.enabled
+                        onClicked: IdleInhibitor.setEnabled(!IdleInhibitor.enabled)
+                    }
+                }
+                // An empty cell, used to pad a short row to the page's column
+                // count. It takes the cell's width and the spacing after it so
+                // the row keeps the grid, but it draws nothing and never takes a
+                // press of its own.
+                DelegateChoice {
+                    roleValue: ""
+                    delegate: Item {
+                        property bool fillWidth: true
+                        property bool isSpacer: true
+                        property real shapeMorphExpansion: 0
+                    }
+                }
             }
         }
     }
 
     component Toggle: IconButton {
+        id: toggle
+
+        required property var modelData
+
+        // The toggles are icon only, and several glyphs are not obvious on their
+        // own, so hovering one names it after a short delay. The same name is
+        // what a screen reader announces, rather than the glyph's ligature.
+        readonly property string tooltip: root.labelFor(modelData.id)
+
+        Accessible.name: toggle.tooltip !== "" ? toggle.tooltip : toggle.icon
         inactiveColour: Colours.layer(Colours.palette.m3surfaceContainerHighest, 2)
         fillWidth: true
         isToggle: true
         isRound: true
         shapeMorph: true
+
+        Behavior on x {
+            Anim {
+                type: Anim.SlowSpatial
+            }
+        }
+
+        Behavior on y {
+            Anim {
+                type: Anim.SlowSpatial
+            }
+        }
+
+        HoverHandler {
+            id: toggleHover
+
+            onPointChanged: {
+                if (!hovered)
+                    return;
+                const p = toggle.mapToItem(root, point.position.x, point.position.y);
+                root.hoverX = p.x;
+                root.hoverY = p.y;
+            }
+
+            onHoveredChanged: {
+                if (hovered) {
+                    if (root.dragging)
+                        return;
+                    const p = toggle.mapToItem(root, point.position.x, point.position.y);
+                    root.hoverX = p.x;
+                    root.hoverY = p.y;
+                    root.hoverLabel = toggle.tooltip;
+                    hoverTimer.restart();
+                } else if (root.hoverLabel === toggle.tooltip) {
+                    hoverTimer.stop();
+                    root.hoverLabelShown = false;
+                    root.hoverLabel = "";
+                }
+            }
+        }
     }
 }

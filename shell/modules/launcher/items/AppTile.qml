@@ -1,7 +1,10 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Controls
 import Quickshell
 import Quickshell.Widgets
+import Caelestia
 import Caelestia.Config
 import qs.components
 import qs.services
@@ -17,11 +20,36 @@ Item {
 
     readonly property bool isFavourite: root.modelData && Strings.testRegexList(GlobalConfig.launcher.favouriteApps, root.modelData.id)
     readonly property bool favouriteByRegex: root.modelData && !((GlobalConfig.launcher.favouriteApps ?? []).includes(root.modelData.id)) && root.isFavourite
+    readonly property bool simple: Config.launcher.browseLayout === LauncherBrowseLayout.Simple
+    readonly property int nameMode: Config.launcher.nameOverflow
+
+    // Measured rather than read back off the label: the label's own truncation depends on the
+    // line count these drive, so reading it would be circular.
+    readonly property bool nameOverflows: nameMetrics.advanceWidth > name.width
+    readonly property bool hovered: tileArea.containsMouse && !favArea.containsMouse && root.nameOverflows
+    readonly property bool flipped: root.hovered && root.nameMode === LauncherNameOverflow.Flip
+    readonly property bool shrunk: root.hovered && root.nameMode === LauncherNameOverflow.Shrink
+    readonly property bool labelTruncated: root.flipped ? (flipFace.item?.truncated ?? false) : name.truncated
+    readonly property int maxNameLines: nameMetrics.height > 0 ? Math.max(1, Math.floor((root.implicitHeight - Tokens.spacing.small) / nameMetrics.height)) : 1
+    // A long name reads in full rather than as an ellipsis; hovering with the shrink
+    // overflow mode halves the icon and buys it a line more.
+    readonly property int labelLines: root.shrunk ? 3 : 2
+    // The icon takes whatever height is left once the label has its lines, so
+    // a large font or a long name can no longer push the block past the tile.
+    readonly property int lineHeight: Math.max(1, Math.round(nameMetrics.height))
+    readonly property int labelHeight: root.lineHeight * root.labelLines
+    readonly property int baseIconSize: Math.min(Math.round(root.implicitWidth * 0.5), Math.max(16, root.implicitHeight - root.labelHeight - Tokens.spacing.extraSmall * 2))
 
     implicitWidth: Tokens.sizes.launcher.browseTileWidth
     implicitHeight: Tokens.sizes.launcher.browseTileHeight
 
-    // Selected highlight
+    TextMetrics {
+        id: nameMetrics
+
+        font: name.font
+        text: name.text
+    }
+
     StyledRect {
         anchors.fill: parent
         anchors.margins: Tokens.spacing.extraSmall
@@ -36,49 +64,116 @@ Item {
         }
     }
 
-    // Hover ripple + click to launch
     StateLayer {
+        id: tileArea
+
         anchors.fill: parent
         radius: Tokens.rounding.large
-        acceptedButtons: Qt.LeftButton
+        acceptedButtons: Qt.LeftButton | Qt.RightButton
         onContainsMouseChanged: {
             if (containsMouse)
                 root.browser.selectTile(root.index);
         }
-        onClicked: root.browser.launch(root.modelData)
-    }
-
-    // Icon + label
-    Column {
-        id: content
-
-        anchors.centerIn: parent
-        spacing: Tokens.spacing.extraSmall
-
-        IconImage {
-            id: icon
-
-            anchors.horizontalCenter: parent.horizontalCenter
-            asynchronous: true
-            source: Quickshell.iconPath(root.modelData?.icon, "image-missing")
-            implicitSize: Math.round(root.implicitWidth * 0.42)
+        onClicked: mouse => {
+            if (mouse.button === Qt.RightButton) {
+                root.browser.openContextMenu(root.modelData, root);
+            } else {
+                root.browser.launch(root.modelData);
+            }
         }
 
-        StyledText {
-            id: name
+        ToolTip.visible: tileArea.containsMouse && !favArea.containsMouse && root.labelTruncated
+        ToolTip.text: root.modelData?.name ?? ""
+    }
 
-            anchors.horizontalCenter: parent.horizontalCenter
-            text: root.modelData?.name ?? ""
-            color: root.selected ? Colours.palette.m3onSurface : Colours.palette.m3onSurfaceVariant
-            font: Tokens.font.label.large
-            elide: Text.ElideRight
-            maximumLineCount: 1
-            width: root.implicitWidth - Tokens.padding.medium * 2
-            horizontalAlignment: Text.AlignHCenter
+    Item {
+        id: page
+
+        anchors.fill: parent
+        clip: true
+
+        // Two stacked pages: the icon with its one-line label, then the full name a flip reveals.
+        Item {
+            id: track
+
+            width: page.width
+            height: page.height * 2
+            y: root.flipped ? -page.height : 0
+
+            Behavior on y {
+                Anim {
+                    type: Anim.FastSpatial
+                }
+            }
+
+            Column {
+                id: content
+
+                anchors.horizontalCenter: parent.horizontalCenter
+                y: Tokens.spacing.extraSmall
+                spacing: Tokens.spacing.extraSmall
+
+                Item {
+                    id: iconBox
+
+                    anchors.horizontalCenter: parent.horizontalCenter
+
+                    implicitWidth: root.baseIconSize
+                    implicitHeight: root.shrunk ? Math.round(root.baseIconSize / 2) : root.baseIconSize
+
+                    Behavior on implicitHeight {
+                        Anim {
+                            type: Anim.FastSpatial
+                        }
+                    }
+
+                    IconImage {
+                        id: icon
+
+                        anchors.centerIn: parent
+                        asynchronous: true
+                        source: WinIcons.sourceFor(root.modelData, "", root.modelData?.id ?? "", 0)
+                        implicitSize: root.baseIconSize
+                        scale: iconBox.height / root.baseIconSize
+                    }
+                }
+
+                Item {
+                    id: nameBox
+
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    clip: true
+                    implicitWidth: root.implicitWidth
+
+                    // Fixed room for both lines, so every tile keeps its icon at the
+                    // same height whether the name needs one line or two.
+                    implicitHeight: root.labelHeight
+
+                    NameLabel {
+                        id: name
+
+                        anchors.top: parent.top
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        maxLines: root.labelLines
+                    }
+                }
+            }
+
+            Loader {
+                id: flipFace
+
+                active: root.nameMode === LauncherNameOverflow.Flip
+                anchors.horizontalCenter: parent.horizontalCenter
+                y: page.height + (page.height - height) / 2
+                sourceComponent: Component {
+                    NameLabel {
+                        maxLines: root.maxNameLines
+                    }
+                }
+            }
         }
     }
 
-    // Favourite toggle (shown on hover, or persistently when favourited)
     MaterialIcon {
         id: favIcon
 
@@ -91,10 +186,14 @@ Item {
         height: 22
         fontStyle: Tokens.font.icon.small
 
-        opacity: (root.isFavourite || favArea.containsMouse) ? 1 : 0
+        opacity: ((root.simple ? tileArea.containsMouse : root.isFavourite) || favArea.containsMouse) ? 1 : 0
         text: root.isFavourite ? "favorite" : "favorite_border"
         fill: root.isFavourite ? 1 : 0
-        color: root.favouriteByRegex ? Colours.palette.m3outline : (root.isFavourite ? Colours.palette.m3primary : Colours.palette.m3onSurfaceVariant)
+        color: root.favouriteByRegex ? Colours.palette.m3outline : (root.isFavourite ? Colours.palette.m3primary : (favArea.containsMouse ? Colours.palette.m3primary : Colours.palette.m3onSurfaceVariant))
+
+        Behavior on color {
+            CAnim {}
+        }
 
         Behavior on opacity {
             Anim {
@@ -102,12 +201,16 @@ Item {
             }
         }
 
-        MouseArea {
+        StateLayer {
             id: favArea
 
-            anchors.fill: parent
-            hoverEnabled: true
+            anchors.fill: undefined
+            anchors.centerIn: parent
+            implicitWidth: 26
+            implicitHeight: 26
+            radius: Tokens.rounding.full
             cursorShape: root.favouriteByRegex ? Qt.ArrowCursor : Qt.PointingHandCursor
+
             onClicked: {
                 if (root.favouriteByRegex)
                     return;
@@ -129,5 +232,20 @@ Item {
             ToolTip.visible: favArea.containsMouse && root.favouriteByRegex
             ToolTip.text: qsTr("Matched by a regex in favouriteApps - edit the config file to change")
         }
+    }
+
+    component NameLabel: StyledText {
+        required property int maxLines
+
+        text: root.modelData?.name ?? ""
+        color: root.selected ? Colours.palette.m3onSurface : Colours.palette.m3onSurfaceVariant
+        font: root.simple ? Tokens.font.label.builders.medium.size(9).build() : Tokens.font.label.medium
+        elide: Text.ElideRight
+        wrapMode: Text.Wrap
+        maximumLineCount: maxLines
+        // The label is clipped by the tile anyway, so it gets the tile's full width: the
+        // 24px inset it used to keep left a quarter of a 96px tile showing an ellipsis.
+        width: Math.max(0, root.width - Tokens.padding.extraSmall * 2)
+        horizontalAlignment: Text.AlignHCenter
     }
 }

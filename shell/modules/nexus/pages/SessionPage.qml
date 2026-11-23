@@ -27,7 +27,6 @@ PageBase {
         width: root.cappedWidth
         spacing: Tokens.spacing.extraSmall / 2
 
-        // General
         SectionHeader {
             first: true
             text: qsTr("General")
@@ -38,6 +37,7 @@ PageBase {
             Layout.fillWidth: true
             text: qsTr("Enabled")
             subtext: qsTr("Show the session (power) menu")
+            reset: ({ node: GlobalConfig.session, setting: "enabled" })
             checked: Config.session.enabled
             onToggled: GlobalConfig.session.enabled = checked
         }
@@ -46,6 +46,7 @@ PageBase {
             Layout.fillWidth: true
             text: qsTr("Vim keybinds")
             subtext: qsTr("Navigate the session menu with hjkl")
+            reset: ({ node: GlobalConfig.session, setting: "vimKeybinds" })
             checked: Config.session.vimKeybinds
             onToggled: GlobalConfig.session.vimKeybinds = checked
         }
@@ -54,6 +55,7 @@ PageBase {
             last: true
             label: qsTr("Drag threshold")
             subtext: qsTr("Pixels to drag before the menu moves")
+            reset: ({ node: GlobalConfig.session, setting: "dragThreshold" })
             value: Config.session.dragThreshold
             from: 10
             to: 200
@@ -61,25 +63,37 @@ PageBase {
             onMoved: v => GlobalConfig.session.dragThreshold = v
         }
 
-        // Icons
         SectionHeader {
             text: qsTr("Icons")
         }
 
+        StyledText {
+            Layout.fillWidth: true
+            Layout.leftMargin: Tokens.padding.largeIncreased
+            Layout.rightMargin: Tokens.padding.largeIncreased
+            text: qsTr("Material icon names used by the session menu")
+            color: Colours.palette.m3onSurfaceVariant
+            font: NexusStyle.secondaryFont
+            wrapMode: Text.Wrap
+        }
+
         LabeledField {
             first: true
+            iconField: true
             label: qsTr("Logout")
             value: Config.session.icons.logout
             onCommitted: v => GlobalConfig.session.icons.logout = v
         }
 
         LabeledField {
+            iconField: true
             label: qsTr("Shutdown")
             value: Config.session.icons.shutdown
             onCommitted: v => GlobalConfig.session.icons.shutdown = v
         }
 
         LabeledField {
+            iconField: true
             label: qsTr("Hibernate")
             value: Config.session.icons.hibernate
             onCommitted: v => GlobalConfig.session.icons.hibernate = v
@@ -87,12 +101,12 @@ PageBase {
 
         LabeledField {
             last: true
+            iconField: true
             label: qsTr("Reboot")
             value: Config.session.icons.reboot
             onCommitted: v => GlobalConfig.session.icons.reboot = v
         }
 
-        // Commands
         SectionHeader {
             text: qsTr("Commands")
         }
@@ -124,12 +138,12 @@ PageBase {
         }
     }
 
-    // Labelled text row for an icon name or command string.
     component LabeledField: ConnectedRect {
         id: field
 
         property string label
         property string value
+        property bool iconField
 
         signal committed(string v)
 
@@ -151,7 +165,18 @@ PageBase {
                 color: Colours.palette.m3onSurface
                 Layout.preferredWidth: 128
             }
-            StyledInputField {
+
+            MaterialIcon {
+                visible: field.iconField
+                text: input.text.length > 0 ? input.text : "help"
+                color: Colours.palette.m3onSurfaceVariant
+                fontStyle: Tokens.font.icon.medium
+            }
+
+            StyledTextField {
+                id: input
+
+                type: StyledTextField.Boxed
                 Layout.fillWidth: true
                 horizontalAlignment: TextInput.AlignLeft
                 text: field.value

@@ -1,10 +1,10 @@
-#include <functional>
 #include "UI.hpp"
 #include "Globals.hpp"
 #include "Term.hpp"
 #include "Input.hpp"
 #include "Draw.hpp"
 #include "Runner.hpp"
+#include "Sudo.hpp"
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -28,153 +28,6 @@ std::map<std::string, std::string> g_answers;
 
 namespace {
 
-// Writes password to a file with secure permissions (0600) atomically at
-// creation time — avoids the TOCTOU race of creating with default umask then
-// chmod'ing afterwards.
-bool write_password_file_secure(const string& path, const string& password) {
-    // Mode 0600 ensures only the owner can read, from the moment of creation.
-    // This avoids the TOCTOU window of creating with default umask then chmod.
-    int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-    if (fd == -1) {
-        return false;
-    }
-    string data = password + "\n";
-    ssize_t written = write(fd, data.c_str(), data.size());
-    close(fd);
-    return written == static_cast<ssize_t>(data.size());
-}
-
-// Writes @p content to @p path with O_EXCL, so a file (or symlink) already at
-// that path is never followed or overwritten.
-bool write_file_excl(const string& path, const string& content, int mode) {
-    int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, mode);
-    if (fd == -1) {
-        return false;
-    }
-    ssize_t written = write(fd, content.c_str(), content.size());
-    close(fd);
-    return written == static_cast<ssize_t>(content.size());
-}
-
-bool is_systemd_inhibit(pid_t pid) {
-    ifstream cmdline("/proc/" + to_string(pid) + "/cmdline", ios::binary);
-    string command((istreambuf_iterator<char>(cmdline)), istreambuf_iterator<char>());
-    return command.find("systemd-inhibit") != string::npos;
-}
-
-void release_kde_inhibit(const string& cookie_file) {
-    ifstream cookie(cookie_file);
-    string value;
-    getline(cookie, value);
-    if (value.empty())
-        return;
-    pid_t child = fork();
-    if (child == 0) {
-        execlp("qdbus6", "qdbus6", "org.freedesktop.ScreenSaver",
-               "/ScreenSaver", "org.freedesktop.ScreenSaver.UnInhibit",
-               value.c_str(), static_cast<char*>(nullptr));
-        _exit(127);
-    }
-    if (child > 0)
-        waitpid(child, nullptr, 0);
-}
-
-// Sets up the sudo askpass environment after a successful password
-// verification. Creates the password file, askpass helper, sudo wrapper,
-// screen inhibitor, and exports SUDO_PASS.
-bool setup_sudo_environment(const string& pw) {
-    // Per-run, user-owned temp dir instead of a fixed, predictable /tmp path.
-    // mkdtemp creates it 0700, and the O_EXCL writes below can't follow a
-    // symlink someone else planted at a known name.
-    char tmpl[] = "/tmp/caelestia-bin.XXXXXX";
-    char* dir = mkdtemp(tmpl);
-    if (!dir) {
-        return false;
-    }
-    g_sudo_bin_dir = dir;
-
-    if (!write_password_file_secure(g_sudo_bin_dir + "/pass.txt", pw)) {
-        std::filesystem::remove_all(g_sudo_bin_dir);
-        g_sudo_bin_dir.clear();
-        return false;
-    }
-
-    string askpass = "#!/bin/bash\ncat " + g_sudo_bin_dir + "/pass.txt\n";
-    if (!write_file_excl(g_sudo_bin_dir + "/askpass.sh", askpass, 0700)) {
-        std::filesystem::remove_all(g_sudo_bin_dir);
-        g_sudo_bin_dir.clear();
-        return false;
-    }
-
-    string wrapper = "#!/bin/bash\nexport SUDO_ASKPASS=" + g_sudo_bin_dir +
-                     "/askpass.sh\nexec /usr/bin/sudo -A \"$@\"\n";
-    if (!write_file_excl(g_sudo_bin_dir + "/sudo", wrapper, 0700)) {
-        std::filesystem::remove_all(g_sudo_bin_dir);
-        g_sudo_bin_dir.clear();
-        return false;
-    }
-
-    // Also export SUDO_PASS for some scripts (like 09-system-tweaks.sh) that might rely on it
-    setenv("SUDO_PASS", pw.c_str(), 1);
-
-    const char* runtime = getenv("XDG_RUNTIME_DIR");
-    const char* home = getenv("HOME");
-    string state_dir = string(runtime ? runtime : (getenv("XDG_STATE_HOME")
-        ? getenv("XDG_STATE_HOME")
-        : (home ? string(home) + "/.local/state" : "/tmp"))) + "/caelestia";
-    std::error_code state_error;
-    std::filesystem::create_directories(state_dir, state_error);
-    if (state_error || chmod(state_dir.c_str(), 0700) != 0) {
-        std::filesystem::remove_all(g_sudo_bin_dir);
-        g_sudo_bin_dir.clear();
-        return false;
-    }
-    const string pid_file = state_dir + "/inhibit.pid";
-    const string cookie_file = state_dir + "/kde_inhibit.cookie";
-
-    // Reap an inhibitor left by a killed earlier run before starting a fresh
-    // one; the shell EXIT trap can't run on SIGKILL or a hard crash. Only kill
-    // a process whose command line identifies it as our systemd inhibitor.
-    ifstream old_pid(pid_file);
-    pid_t pid = 0;
-    old_pid >> pid;
-    if (pid > 0 && is_systemd_inhibit(pid))
-        kill(pid, SIGKILL);
-    release_kde_inhibit(cookie_file);
-
-    // Start background keep-awake for display (sleep inhibitor)
-    pid = fork();
-    if (pid == 0) {
-        execlp("systemd-inhibit", "systemd-inhibit", "--what=idle:sleep",
-               "--who=Caelestia installer", "--why=Installation in progress",
-               "bash", "-c", "while :; do sleep 600; done",
-               static_cast<char*>(nullptr));
-        _exit(127);
-    }
-    if (pid > 0) {
-        ofstream pid_out(pid_file);
-        pid_out << pid << '\n';
-    }
-
-    int cookie_fd = open(cookie_file.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-    pid = fork();
-    if (pid == 0) {
-        if (cookie_fd >= 0)
-            dup2(cookie_fd, STDOUT_FILENO);
-        execlp("qdbus6", "qdbus6", "org.freedesktop.ScreenSaver",
-               "/ScreenSaver", "org.freedesktop.ScreenSaver.Inhibit",
-               "Caelestia installer", "Installation in progress",
-               static_cast<char*>(nullptr));
-        _exit(127);
-    }
-    if (cookie_fd >= 0)
-        close(cookie_fd);
-    if (pid > 0)
-        waitpid(pid, nullptr, 0);
-    return true;
-}
-
-// Human-readable distro label shown on the welcome screen.
 string distro_label(const string& id) {
     if (id == "arch") return "Arch-based Linux";
     if (id == "fedora") return "Fedora";
@@ -186,18 +39,6 @@ const char* navigate_hint() {
     return "Up/Down navigate  Enter select  Left/Esc back";
 }
 
-// True when the given step name appears in the failed-steps file.
-bool check_failed(const string& file, const string& target) {
-    ifstream f(file);
-    string line;
-    while (getline(f, line)) {
-        if (line.find(target) != string::npos) return true;
-    }
-    return false;
-}
-
-// True when the caelestia command (the shell wrapper installed by the
-// installer) exists. Update and Uninstall are only offered once it does.
 bool is_caelestia_installed() {
     auto executable = [](const string& p) {
         return access(p.c_str(), X_OK) == 0;
@@ -211,7 +52,6 @@ bool is_caelestia_installed() {
     if (executable("/usr/bin/caelestia"))
         return true;
 
-    // Fall back to a PATH search for installs in other prefixes.
     const char* path = getenv("PATH");
     if (path) {
         string paths(path);
@@ -229,12 +69,71 @@ bool is_caelestia_installed() {
     return false;
 }
 
+// Runs `<sudo> -S true` with the candidate on its stdin. No shell, and an absolute
+// binary when there is one: `sh -c "sudo ..."` would run whichever `sudo` the PATH
+// offers first, and the PATH is the one thing the caller decides.
+bool sudo_accepts_password(const string& password) {
+    string sudo_path;
+    for (const char* candidate : {"/usr/bin/sudo", "/bin/sudo"}) {
+        if (access(candidate, X_OK) == 0) {
+            sudo_path = candidate;
+            break;
+        }
+    }
+    if (sudo_path.empty())
+        return false;
+
+    int pipe_fds[2];
+    if (pipe(pipe_fds) != 0)
+        return false;
+
+    pid_t child = fork();
+    if (child < 0) {
+        close(pipe_fds[0]);
+        close(pipe_fds[1]);
+        return false;
+    }
+    if (child == 0) {
+        close(pipe_fds[1]);
+        if (dup2(pipe_fds[0], STDIN_FILENO) < 0)
+            _exit(127);
+        close(pipe_fds[0]);
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDOUT_FILENO);
+            dup2(devnull, STDERR_FILENO);
+            close(devnull);
+        }
+        execl(sudo_path.c_str(), "sudo", "-S", "true", static_cast<char*>(nullptr));
+        _exit(127);
+    }
+
+    close(pipe_fds[0]);
+    // A sudo that has already given up closes the read end, and the write below would
+    // take the installer down with SIGPIPE.
+    struct sigaction previous {};
+    struct sigaction ignore {};
+    ignore.sa_handler = SIG_IGN;
+    sigaction(SIGPIPE, &ignore, &previous);
+
+    const string line = password + "\n";
+    ssize_t written = write(pipe_fds[1], line.data(), line.size());
+    close(pipe_fds[1]);
+    sigaction(SIGPIPE, &previous, nullptr);
+
+    int status = 0;
+    if (waitpid(child, &status, 0) < 0)
+        return false;
+    // A short write leaves sudo waiting for the rest of the line, so only a complete
+    // one plus a zero exit counts as "this password works".
+    return written == static_cast<ssize_t>(line.size()) && WIFEXITED(status) &&
+           WEXITSTATUS(status) == 0;
+}
+
 } // anonymous namespace
 
 namespace UI {
     void welcome_screen() {
-        // Drain buffered input left over from terminal setup, so stale
-        // escape sequences cannot skip the screen instantly.
         for (int drain = 0; drain < 10 && !Input::get().empty(); ++drain) { }
 
         vector<string> art;
@@ -301,8 +200,6 @@ namespace UI {
             Draw::text_center(ty + 3, "Caelestia installer", "primary");
             Draw::text_center(ty + 6, "Detected distribution: " + distro_label(g_base_distro), "secondary");
 
-            // Startup problems sit under the distribution line, but only when
-            // there is room for them above the continue hint.
             if (ty + 7 < y + h - 3)
                 Draw::problems(x + 2, ty + 7, w - 4, 2);
 
@@ -356,7 +253,6 @@ namespace UI {
             if (help_y < y + h - 2)
                 Draw::text(x + 4, help_y, Draw::fit(actions[selected].help, (size_t)(w - 8)), "secondary");
 
-            // Startup problems go above the footer, where nothing else is drawn.
             if (y + h - 4 > help_y + 1)
                 Draw::problems(x + 2, y + h - 4, w - 4, 2);
 
@@ -376,24 +272,6 @@ namespace UI {
             }
         }
         return "exit";
-    }
-
-    void init_menu_defaults(const json& items) {
-        std::function<void(const json&)> walk = [&](const json& arr) {
-            for (size_t i = 0; i < arr.size(); ++i) {
-                auto& item = arr[i];
-                if (item.contains("type") && item["type"] == "submenu" && item.contains("items")) {
-                    walk(item["items"]);
-                } else if (item.contains("id") && item.contains("default") &&
-                           g_answers.find(item["id"].get<string>()) == g_answers.end()) {
-                    if (item["default"].is_boolean())
-                        g_answers[item["id"].get<string>()] = item["default"].get<bool>() ? "true" : "false";
-                    else if (item["default"].is_string())
-                        g_answers[item["id"].get<string>()] = item["default"].get<string>();
-                }
-            }
-        };
-        walk(items);
     }
 
     bool sudo_prompt() {
@@ -416,7 +294,6 @@ namespace UI {
             Draw::text(left + 2, top + 2, "Root privileges are required to install packages.", "on_surface");
             Draw::text(left + 2, top + 3, "Password: ", Draw::bold + Draw::color("primary"));
 
-            // Draw masked password
             string masked(pw.length(), '*');
             masked.resize(30, ' ');
             Draw::text(left + 12, top + 3, masked, Draw::reset);
@@ -436,18 +313,12 @@ namespace UI {
                 Draw::text(left + 2, top + 5, "Verifying...                                 ", "warning");
                 cout << Draw::sync_end() << flush;
 
-                FILE* pipe = popen("sudo -S true 2>/dev/null", "w");
-                if (pipe) {
-                    fprintf(pipe, "%s\n", candidate.c_str());
-                    fflush(pipe);
-                    int status = pclose(pipe);
-                    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
-                        if (setup_sudo_environment(candidate))
-                            return true;
-                        error_msg = "Could not prepare secure sudo helpers.";
-                        pw.clear();
-                        return false;
-                    }
+                if (sudo_accepts_password(candidate)) {
+                    if (Sudo::prepare(candidate))
+                        return true;
+                    error_msg = "Could not prepare secure sudo helpers.";
+                    pw.clear();
+                    return false;
                 }
                 attempts++;
                 if (attempts >= 3) {
@@ -463,7 +334,7 @@ namespace UI {
             if (key == "enter") {
                 if (pw.empty()) continue;
                 if (submit(pw)) return true;
-            } else if (key == "backspace" || (key.length() == 1 && (key[0] == '\x7f' || key[0] == '\x08'))) { // Backspace
+            } else if (key == "backspace" || (key.length() == 1 && (key[0] == '\x7f' || key[0] == '\x08'))) {
                 if (!pw.empty()) pw.pop_back();
                 error_msg.clear();
             } else if (key == "escape") {
@@ -510,7 +381,6 @@ namespace UI {
 
             Draw::box(x, y, w, h, "REVIEW INSTALLATION", "primary", "on_surface");
 
-            // Build lines grouped by phase.
             struct Line { string text; string color; };
             vector<Line> lines;
             for (const auto& ph : Runner::phases) {
@@ -559,10 +429,8 @@ namespace UI {
         return false;
     }
 
-    // Parse + redraw one frame of the full-screen log view. Non-blocking:
-    // call repeatedly while the view is on screen (it handles resize itself).
-    // A cheap size check skips re-reading when the log has not grown, so an
-    // idle frame costs a stat() rather than a full file read.
+    // Parses and redraws one frame of the log view. Non-blocking: call it repeatedly while
+    // up; a size check skips re-reading an unchanged log.
     void log_view_tick(const std::string& log_path, LogViewState& s) {
         if (g_resized) { Term::get_size(); g_resized = false; s.redraw = true; }
 
@@ -582,7 +450,7 @@ namespace UI {
             if (in) {
                 in.seekg(0, ios::end);
                 streamoff len = in.tellg();
-                const streamoff kMax = 1024 * 1024; // tail at most 1 MiB
+                const streamoff kMax = 1024 * 1024;
                 if (len > kMax)
                     in.seekg(len - kMax, ios::beg);
                 else
@@ -612,8 +480,7 @@ namespace UI {
             push_line();
         s.redraw = true;
 
-        // Clamp the viewport from the current size; follow keeps the newest
-        // line on screen, otherwise keep the user's paused position.
+        // Follow keeps the newest line on screen; otherwise hold the paused position.
         int show = g_term_height - 6;
         if (show < 1) show = 1;
         long max_scroll = (long)s.lines.size() - show;
@@ -651,10 +518,8 @@ namespace UI {
         cout << Draw::sync_end() << flush;
     }
 
-    // Applies one key to the log view state (scroll/pause/next-issue).
-    // Returns true when the key asks to leave the view (L/Tab/Esc/Ctrl+C).
-    // Paging is recomputed from the current terminal height so scroll amounts
-    // survive a resize.
+    // Applies one key to the log view; true when it leaves the view (L/Tab/Esc/Ctrl+C).
+    // Paging is recomputed per frame, so it survives a resize.
     bool log_view_key(const std::string& key, LogViewState& s) {
         if (key == "l" || key == "L" || key == "KEY_shift_tab" ||
             key == "escape" || key == "signal_interrupt")
@@ -721,12 +586,9 @@ namespace UI {
         return false;
     }
 
-    // Blocking full-screen tail of the install log. Only safe where no step is
-    // still running (Complete screen): it reads keys until the user leaves, so
-    // the install loop must NOT call it mid-step - that stalls the install
-    // until the user returns to the progress screen. The runner instead keeps
-    // log_open state and calls log_view_tick/log_view_key so steps advance
-    // underneath an open log view.
+    // Blocking full-screen tail of the log. Only safe on the Complete screen: it reads keys
+    // until the user leaves, so the install loop must not call it mid-step. The runner keeps
+    // log_open instead and drives log_view_tick/log_view_key, so steps advance underneath.
     void log_view(const std::string& log_path) {
         LogViewState s;
         while (!g_quit) {
@@ -737,10 +599,9 @@ namespace UI {
     }
 
     void complete_screen() {
-        string cache_dir = string(getenv("XDG_CACHE_HOME") ? getenv("XDG_CACHE_HOME") : (string(getenv("HOME")) + "/.cache")) + "/caelestia-kde";
+        string cache_dir = xdg_cache_dir() + "/caelestia-kde";
         string steps_file = cache_dir + "/failed_steps.txt";
         string pkgs_file = cache_dir + "/failed_packages.txt";
-        string patches_file = cache_dir + "/failed_patches.txt";
         string log_path = cache_dir + "/install.log";
 
         while (true) {
@@ -754,15 +615,19 @@ namespace UI {
             int top = 1;
             const size_t content_width = w > 4 ? static_cast<size_t>(w - 4) : 0;
 
-            // Gather error status
             vector<string> failed_pkgs;
             ifstream pf(pkgs_file);
             string pkg;
             while (getline(pf, pkg)) {
                 if (!pkg.empty()) failed_pkgs.push_back(pkg);
             }
-            bool shell_failed = check_failed(steps_file, "Build Caelestia Shell");
-            bool has_errors = !failed_pkgs.empty() || shell_failed;
+            vector<string> failed_steps;
+            ifstream sf(steps_file);
+            string step;
+            while (getline(sf, step)) {
+                if (!step.empty()) failed_steps.push_back(step);
+            }
+            bool has_errors = !failed_pkgs.empty() || !failed_steps.empty();
 
             Draw::box(left, top, w, h, has_errors ? "INSTALLATION COMPLETED WITH WARNINGS" : "INSTALLATION COMPLETE", has_errors ? "warning" : "success", "on_surface");
 
@@ -784,8 +649,13 @@ namespace UI {
                 if (y < top + h - 4) {
                     Draw::text(left + 2, y++, "ATTENTION NEEDED", Draw::bold + Draw::color("error"));
                 }
-                if (shell_failed && y < top + h - 4) {
-                    Draw::text(left + 2, y++, Draw::fit("- Shell build failed (check missing dependencies in log).", content_width), "error");
+                if (!failed_steps.empty() && y < top + h - 4) {
+                    string step_str = "- Failed steps: ";
+                    for (size_t i = 0; i < failed_steps.size(); ++i) {
+                        if (i > 0) step_str += ", ";
+                        step_str += failed_steps[i];
+                    }
+                    Draw::text(left + 2, y++, Draw::fit(step_str, content_width), "error");
                 }
                 if (!failed_pkgs.empty() && y < top + h - 4) {
                     string pkg_str = "- Failed packages: ";
@@ -828,58 +698,79 @@ namespace UI {
                 break;
             } else if (key == "l" || key == "L") {
                 log_view(log_path);
-                // The loop redraws the summary after returning from the log.
             }
         }
     }
 }
 
 namespace UI {
-    bool render_menu(const json& menu_items, const std::string& title) {
-        struct MenuItemMeta {
-            string type;
-            string title;
-            string id;
-            string help;
-            vector<string> options;
-            unordered_map<string, int> option_index;
-        };
+    // The one typed parse of menu.json, and the one definition of a valid entry.
+    // It replaces the previous two traversals (default seeding and the per-menu
+    // meta build), which each had their own validity rules: a bad entry could be
+    // seeded by one pass and skipped by the other, planting an answer the menu
+    // never shows. Malformed entries are skipped, not fatal: menu.json is data,
+    // and one bad element must not abort the TUI with an unhandled exception.
+    std::vector<MenuItem> parse_menu(const json& items) {
+        std::vector<MenuItem> parsed;
+        if (!items.is_array())
+            return parsed;
+        parsed.reserve(items.size());
+        for (const auto& item : items) {
+            if (!item.is_object())
+                continue;
+            MenuItem m;
+            if (item.contains("type")) {
+                if (!item["type"].is_string())
+                    continue;
+                m.type = item["type"].get<string>();
+            }
+            m.title = item.contains("title") && item["title"].is_string() ? item["title"].get<string>() : "Unknown";
+            m.id = item.contains("id") && item["id"].is_string() ? item["id"].get<string>() : "";
+            m.help = item.contains("help") && item["help"].is_string() ? item["help"].get<string>() : "";
 
-        int selected = 0;
-        int num_items = static_cast<int>(menu_items.size());
-        if (num_items == 0) return true;
-
-        // Seed defaults for this (sub)menu (idempotent: only fills gaps).
-        init_menu_defaults(menu_items);
-
-        vector<MenuItemMeta> meta;
-        meta.reserve(static_cast<size_t>(num_items));
-        for (int i = 0; i < num_items; ++i) {
-            auto& item = menu_items[i];
-            MenuItemMeta m;
-            m.type = item.contains("type") ? item["type"].get<string>() : "action";
-            m.title = item.contains("title") ? item["title"].get<string>() : "Unknown";
-            m.id = item.contains("id") ? item["id"].get<string>() : "";
-            m.help = item.contains("help") ? item["help"].get<string>() : "";
-
-            if (m.type == "select" && item.contains("options") && item["options"].is_array()) {
+            if (m.type == "submenu") {
+                if (!item.contains("items") || !item["items"].is_array())
+                    continue;
+                m.items = parse_menu(item["items"]);
+            } else if (m.type == "select" && item.contains("options") && item["options"].is_array()) {
                 auto& opts = item["options"];
                 m.options.reserve(opts.size());
-                for (size_t oi = 0; oi < opts.size(); ++oi) {
-                    string opt = opts[oi].get<string>();
-                    m.option_index[opt] = static_cast<int>(oi);
-                    m.options.push_back(opt);
-                }
-                if (!m.id.empty() && !m.options.empty() && g_answers[m.id].empty()) {
-                    g_answers[m.id] = m.options[0];
+                for (const auto& opt : opts) {
+                    if (!opt.is_string())
+                        continue;
+                    // Index by position in options, not by the raw JSON index: the
+                    // two spaces diverge as soon as a non-string entry is skipped.
+                    m.option_index[opt.get<string>()] = static_cast<int>(m.options.size());
+                    m.options.push_back(opt.get<string>());
                 }
             }
 
-            meta.push_back(std::move(m));
+            // Answers are seeded in the same pass that decides what exists, so a
+            // seeded answer is always one the menu can show.
+            if (m.type != "submenu" && !m.id.empty() && g_answers.find(m.id) == g_answers.end()) {
+                if (item.contains("default")) {
+                    if (item["default"].is_boolean())
+                        g_answers[m.id] = item["default"].get<bool>() ? "true" : "false";
+                    else if (item["default"].is_string())
+                        g_answers[m.id] = item["default"].get<string>();
+                }
+                if (m.type == "select" && g_answers[m.id].empty() && !m.options.empty())
+                    g_answers[m.id] = m.options.front();
+            }
+
+            parsed.push_back(std::move(m));
         }
+        return parsed;
+    }
+
+    bool render_menu(const std::vector<MenuItem>& items, const std::string& title) {
+        int selected = 0;
+        int num_items = static_cast<int>(items.size());
+        if (num_items == 0)
+            return false; // an empty or broken submenu must not count as "proceed with install"
 
         auto build_display = [&](int index) {
-            const auto& m = meta[index];
+            const MenuItem& m = items[index];
             string display;
             if (m.type == "submenu") {
                 display = m.title + " >";
@@ -928,8 +819,7 @@ namespace UI {
                 Draw::text(left + 4, start_y + i, line, color_name);
             }
 
-            // Help text for the selected item.
-            const string& help = meta[selected].help;
+            const string& help = items[selected].help;
             if (!help.empty()) {
                 Draw::text(left + 2, top + h - 2, Draw::fit(help, (size_t)(w - 4)), "muted");
             }
@@ -937,10 +827,9 @@ namespace UI {
             cout << Draw::sync_end() << flush;
 
             string key = Input::wait_key();
-            auto& item = menu_items[selected];
-            auto& selected_meta = meta[selected];
-            string type = selected_meta.type;
-            string id = selected_meta.id;
+            const MenuItem& m = items[selected];
+            string type = m.type;
+            string id = m.id;
 
             if (key == "KEY_up") {
                 if (selected > 0) selected--;
@@ -953,32 +842,30 @@ namespace UI {
                     if (id == "action_back") return false;
                     if (id == "action_review" || id == "action_proceed") return true;
                 } else if (type == "submenu") {
-                    if (item.contains("items")) {
-                        bool proceed = render_menu(item["items"], selected_meta.title);
-                        if (proceed) return true; // review chosen from a submenu bubbles up
-                    }
+                    bool proceed = render_menu(m.items, m.title);
+                    if (proceed) return true; // review chosen from a submenu bubbles up
                 } else if (type == "boolean") {
                     g_answers[id] = (g_answers[id] == "true") ? "false" : "true";
                 } else if (type == "select") {
-                    if (!selected_meta.options.empty()) {
+                    if (!m.options.empty()) {
                         int current_idx = 0;
-                        auto it = selected_meta.option_index.find(g_answers[id]);
-                        if (it != selected_meta.option_index.end()) current_idx = it->second;
-                        current_idx = (current_idx + 1) % static_cast<int>(selected_meta.options.size());
-                        g_answers[id] = selected_meta.options[static_cast<size_t>(current_idx)];
+                        auto it = m.option_index.find(g_answers[id]);
+                        if (it != m.option_index.end()) current_idx = it->second;
+                        current_idx = (current_idx + 1) % static_cast<int>(m.options.size());
+                        g_answers[id] = m.options[static_cast<size_t>(current_idx)];
                     }
                 }
             } else if (key == "KEY_left") {
                 if (type == "select") {
-                    if (!selected_meta.options.empty()) {
+                    if (!m.options.empty()) {
                         int current_idx = 0;
-                        auto it = selected_meta.option_index.find(g_answers[id]);
-                        if (it != selected_meta.option_index.end()) current_idx = it->second;
-                        current_idx = (current_idx - 1 + static_cast<int>(selected_meta.options.size())) % static_cast<int>(selected_meta.options.size());
-                        g_answers[id] = selected_meta.options[static_cast<size_t>(current_idx)];
+                        auto it = m.option_index.find(g_answers[id]);
+                        if (it != m.option_index.end()) current_idx = it->second;
+                        current_idx = (current_idx - 1 + static_cast<int>(m.options.size())) % static_cast<int>(m.options.size());
+                        g_answers[id] = m.options[static_cast<size_t>(current_idx)];
                     }
                 } else {
-                    return false; // back out of submenu
+                    return false;
                 }
             } else if (key == "escape") {
                 return false;

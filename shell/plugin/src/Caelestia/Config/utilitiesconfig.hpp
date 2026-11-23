@@ -1,10 +1,10 @@
 #pragma once
 
-#include "../Settings/objectnode.hpp"
-#include "common.hpp"
-
 #include <qstring.h>
 #include <qvariant.h>
+
+#include "../Settings/objectnode.hpp"
+#include "common.hpp"
 
 namespace caelestia::config {
 
@@ -14,11 +14,15 @@ using settings::vmap;
 class UtilitiesToasts : public settings::ObjectNode {
     CONFIG_NODE(UtilitiesToasts, settings::ObjectNode)
 
-    CONFIG_PROPERTY(QString, fullscreen, u"off"_s)
+    CONFIG_GLOBAL_PROPERTY(QString, fullscreen, u"off"_s)
+    // Which corner the toasts stack in: auto, top-left, top-right, bottom-left or
+    // bottom-right. `auto` keeps them in the bottom corner the shell has always used.
+    CONFIG_GLOBAL_PROPERTY(QString, position, u"auto"_s)
     CONFIG_GLOBAL_PROPERTY(bool, configLoaded, false)
     CONFIG_GLOBAL_PROPERTY(bool, chargingChanged, true)
     CONFIG_GLOBAL_PROPERTY(bool, gameModeChanged, true)
     CONFIG_GLOBAL_PROPERTY(bool, dndChanged, true)
+    CONFIG_GLOBAL_PROPERTY(bool, dndWhileStreaming, true)
     CONFIG_GLOBAL_PROPERTY(bool, audioOutputChanged, true)
     CONFIG_GLOBAL_PROPERTY(bool, audioInputChanged, true)
     CONFIG_GLOBAL_PROPERTY(bool, capsLockChanged, true)
@@ -31,16 +35,26 @@ class UtilitiesToasts : public settings::ObjectNode {
     CONFIG_GLOBAL_PROPERTY(bool, nightLightChanged, true)
     CONFIG_GLOBAL_PROPERTY(bool, transparency, false)
     CONFIG_GLOBAL_PROPERTY(qreal, transparencyBase, 0.85)
-
 };
+
+class UtilitiesVpnProvider : public settings::ObjectNode {
+    CONFIG_NODE(UtilitiesVpnProvider, settings::ObjectNode)
+
+    CONFIG_PROPERTY(QString, id, {})
+    CONFIG_PROPERTY(QString, name, {})
+    CONFIG_PROPERTY(QString, displayName, {})
+    CONFIG_PROPERTY(QString, interface, {})
+    CONFIG_PROPERTY(QStringList, connectCmd, {})
+    CONFIG_PROPERTY(QStringList, disconnectCmd, {})
+};
+CONFIG_LIST_TYPE(UtilitiesVpnProvider, UtilitiesVpnProviderList)
 
 class UtilitiesVpn : public settings::ObjectNode {
     CONFIG_NODE(UtilitiesVpn, settings::ObjectNode)
 
     CONFIG_GLOBAL_PROPERTY(bool, enabled, false)
-    CONFIG_GLOBAL_PROPERTY(QVariantList, provider, QVariantList())
+    CONFIG_GLOBAL_LIST(UtilitiesVpnProviderList, provider, {})
     CONFIG_GLOBAL_PROPERTY(QString, selectedProvider, QString())
-
 };
 
 class UtilitiesGameMode : public settings::ObjectNode {
@@ -58,7 +72,6 @@ class UtilitiesGameMode : public settings::ObjectNode {
 
     CONFIG_GLOBAL_PROPERTY(bool, autoEnable, true)
     CONFIG_GLOBAL_PROPERTY(QStringList, autoEnableRegexes, QStringList())
-
 };
 
 class UtilitiesConfig : public settings::ObjectNode {
@@ -74,8 +87,10 @@ class UtilitiesConfig : public settings::ObjectNode {
     CONFIG_SUBOBJECT(UtilitiesVpn, vpn)
     CONFIG_SUBOBJECT(UtilitiesGameMode, gameMode)
     CONFIG_PROPERTY(bool, showKeepAwake, true)
+    CONFIG_PROPERTY(bool, showTimers, true)
     CONFIG_PROPERTY(bool, showScreenRecorder, true)
     CONFIG_PROPERTY(bool, showGifRecorder, true)
+    CONFIG_PROPERTY(bool, showQuickShare, true)
     CONFIG_PROPERTY(bool, showQuickToggles, true)
     CONFIG_PROPERTY(QVariantList, quickToggles,
         DEFAULT_ARG({
@@ -83,13 +98,14 @@ class UtilitiesConfig : public settings::ObjectNode {
             vmap({ { u"id"_s, u"bluetooth"_s }, { u"enabled"_s, true } }),
             vmap({ { u"id"_s, u"mic"_s }, { u"enabled"_s, true } }),
             vmap({ { u"id"_s, u"settings"_s }, { u"enabled"_s, true } }),
+            vmap({ { u"id"_s, u"gameMode"_s }, { u"enabled"_s, true } }),
             vmap({ { u"id"_s, u"colorpicker"_s }, { u"enabled"_s, true } }),
             vmap({ { u"id"_s, u"dnd"_s }, { u"enabled"_s, true } }),
             vmap({ { u"id"_s, u"vpn"_s }, { u"enabled"_s, false } }),
             vmap({ { u"id"_s, u"wallpaper"_s }, { u"enabled"_s, true } }),
-            vmap({ { u"id"_s, u"badapple"_s }, { u"enabled"_s, true } }),
         }))
-
+    CONFIG_PROPERTY(bool, quickTogglesCustomOrder, false)
+    CONFIG_PROPERTY(int, quickTogglesPerPage, 6)
 };
 
 } // namespace caelestia::config

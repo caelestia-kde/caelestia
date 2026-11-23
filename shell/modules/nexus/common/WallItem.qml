@@ -25,6 +25,7 @@ Item {
     property bool fillLabel: true
     property bool isFolder: false
     property int folderCount: 0
+    property bool clickable: true
 
     signal clicked
 
@@ -44,11 +45,15 @@ Item {
             implicitHeight: width
             radius: Tokens.rounding.largeIncreased
             color: Colours.tPalette.m3surfaceContainer
+            // A 1px edge so a photo does not dissolve into the tile behind it. Pure
+            // black or white: a tinted neutral would show as a coloured fringe.
+            border.width: 1
+            border.color: Colours.light ? Qt.rgba(0, 0, 0, 0.1) : Qt.rgba(1, 1, 1, 0.1)
 
             Loader {
                 anchors.centerIn: parent
 
-                opacity: img.status === Image.Ready ? 0 : 1
+                opacity: img.status === Image.Loading ? 1 : 0
                 active: opacity > 0
 
                 sourceComponent: StyledRect {
@@ -135,6 +140,7 @@ Item {
 
     StateLayer {
         anchors.bottomMargin: root.fillLabel ? 0 : layout.implicitHeight - imgWrapper.implicitHeight
+        disabled: !root.clickable
         onClicked: root.clicked()
     }
 }

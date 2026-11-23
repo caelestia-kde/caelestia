@@ -4,7 +4,9 @@ import QtQuick
 import QtQuick.Layouts
 import Caelestia.Config
 import qs.components
+import qs.components.controls
 import qs.services
+import qs.utils
 
 StyledRect {
     id: root
@@ -15,7 +17,12 @@ StyledRect {
     required property DrawerVisibilities visibilities
 
     readonly property StyledText body: (expandedContent.item as ExpandedBody)?.body ?? null
-    readonly property real nonAnimHeight: expanded ? summary.implicitHeight + expandedContent.implicitHeight + expandedContent.anchors.topMargin + Tokens.padding.medium * 2 : summaryHeightMetrics.height
+    /// Only notifications whose sender asked for a reply can be answered.
+    readonly property bool canReply: root.modelData?.hasInlineReply ?? false
+    // The reply field is always laid out when it exists, expanded or not: a box you
+    // have to discover a gesture for is a box nobody types in.
+    readonly property real replyHeight: root.canReply ? replyField.implicitHeight + Tokens.spacing.small : 0
+    readonly property real nonAnimHeight: expanded ? summary.implicitHeight + root.replyHeight + expandedContent.implicitHeight + expandedContent.anchors.topMargin + Tokens.padding.medium * 2 : summaryHeightMetrics.height + root.replyHeight
 
     implicitHeight: nonAnimHeight
 
@@ -51,7 +58,7 @@ StyledRect {
         id: summaryHeightMetrics
 
         font: summary.font
-        text: " " // Use this height to prevent weird characters from changing the line height
+        text: " "
     }
 
     StyledText {
@@ -61,7 +68,7 @@ StyledRect {
         anchors.left: parent.left
 
         width: parent.width
-        text: root.modelData?.summary ?? ""
+        text: root.modelData?.summaryPlain ?? ""
         color: root.modelData?.urgency === "critical" ? Colours.palette.m3onSecondaryContainer : Colours.palette.m3onSurface
         elide: Text.ElideRight
         wrapMode: Text.WordWrap
@@ -75,7 +82,7 @@ StyledRect {
         anchors.left: parent.left
 
         visible: false
-        text: root.modelData?.summary ?? ""
+        text: root.modelData?.summaryPlain ?? ""
     }
 
     WrappedLoader {
@@ -88,7 +95,7 @@ StyledRect {
         anchors.leftMargin: Tokens.spacing.small
 
         sourceComponent: StyledText {
-            text: String(root.modelData?.body ?? "").replace(/\n/g, " ")
+            text: root.modelData?.bodyPlain ?? ""
             color: root.modelData?.urgency === "critical" ? Colours.palette.m3secondary : Colours.palette.m3outline
             elide: Text.ElideRight
         }
@@ -109,11 +116,31 @@ StyledRect {
         }
     }
 
+    StyledTextField {
+        id: replyField
+
+        visible: root.canReply
+        anchors.top: summary.bottom
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.leftMargin: Tokens.padding.medium
+        anchors.rightMargin: Tokens.padding.medium
+        anchors.topMargin: Tokens.spacing.small
+        placeholderText: root.modelData?.inlineReplyPlaceholder ?? ""
+
+        onAccepted: {
+            // Send and clear; the notification stays put so the sender can replace
+            // it with the answer.
+            root.modelData.sendReply(text);
+            text = "";
+        }
+    }
+
     WrappedLoader {
         id: expandedContent
 
         shouldBeActive: root.expanded
-        anchors.top: summary.bottom
+        anchors.top: root.canReply ? replyField.bottom : summary.bottom
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.topMargin: Tokens.spacing.extraSmall
@@ -134,14 +161,15 @@ StyledRect {
             id: bodyText
 
             Layout.fillWidth: true
-            textFormat: Text.MarkdownText
-            text: String(root.modelData?.body ?? "").replace(/(.)\n(?!\n)/g, "$1\n\n") || qsTr("No body here! :/")
+            textFormat: Text.StyledText
+            text: root.modelData?.bodyStyled || qsTr("No message text")
             color: root.modelData?.urgency === "critical" ? Colours.palette.m3secondary : Colours.palette.m3outline
-            wrapMode: Text.WordWrap
+            wrapMode: Text.WrapAtWordBoundaryOrAnywhere
 
             onLinkActivated: link => {
-                Qt.openUrlExternally(link);
-                root.visibilities.sidebar = false;
+                Launch.openUrl(link);
+                if (!Visibilities.sidebarPinned)
+                    root.visibilities.sidebar = false;
             }
         }
 
@@ -149,7 +177,6 @@ StyledRect {
             notif: root.modelData
         }
     }
-
     component WrappedLoader: Loader {
         id: comp
 
@@ -158,7 +185,6 @@ StyledRect {
         active: false
         opacity: 0
 
-        // Makes the loader load on the same frame shouldBeActive becomes true, which ensures size is set
         states: State {
             name: "active"
             when: comp.shouldBeActive

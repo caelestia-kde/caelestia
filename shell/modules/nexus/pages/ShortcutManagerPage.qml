@@ -6,13 +6,12 @@ import Caelestia.Config
 import Caelestia.Services
 import qs.components
 import qs.components.controls
+import qs.services
 import qs.utils
 import qs.modules.nexus.common
 
 PageBase {
     id: root
-
-    title: qsTr("Shortcuts")
 
     property var shellShortcuts: []
 
@@ -35,14 +34,14 @@ PageBase {
         return searchable.includes(query);
     }
 
-    function updateLists() {
+    function updateLists(): void {
         let all = KeybindsModel.query("")
         let shell = []
         let apps = []
         let workspaces = []
         let tiling = []
 
-        const shellRegex = /^(nexus|launcher|dashboard|showall|screenshot|googleLens|screenRecording|lock|session|sidebar|aiAssistant|utilities|emoji|clipboard|windowSwitcher.*|wallpaper|keybinds|whatsnew)$/
+        const shellRegex = /^(nexus.*|launcher|dashboard|showall|screenshot|googleLens|screenRecording|lock|session|sidebar|aiAssistant|utilities|emoji|clipboard|windowSwitcher.*|wallpaper.*|skwd-wall.*|keybinds|whatsnew)$/
         const workspaceRegex = /^workspace.*$/
         const tilingRegex = /^krohnkite.*$/
 
@@ -65,22 +64,23 @@ PageBase {
         apps.sort(sortByName)
         workspaces.sort(sortByName)
         tiling.sort(sortByName)
-        
+
         shellShortcuts = shell
         appShortcuts = apps
         workspaceShortcuts = workspaces
         tilingShortcuts = tiling
     }
 
-    onShortcutQueryChanged: updateLists()
-
-    function openCaptureDialog(name: string, currentKey: string, targetItem: var) {
+    function openCaptureDialog(name: string, currentKey: string, targetItem: var): void {
         dialogLoader.active = true
         dialogLoader.item.shortcutName = name
         dialogLoader.item.currentKey = currentKey
         dialogLoader.item.targetItem = targetItem
         dialogLoader.item.open()
     }
+
+    title: qsTr("Keyboard Shortcuts")
+    onShortcutQueryChanged: updateLists()
 
     ColumnLayout {
         anchors.horizontalCenter: parent.horizontalCenter
@@ -91,11 +91,11 @@ PageBase {
         Component.onCompleted: updateLists()
 
         Connections {
-            target: KeybindsModel
-
-            function onKeybindsChanged() {
+            function onKeybindsChanged(): void {
                 updateLists()
             }
+
+            target: KeybindsModel
         }
 
         Loader {
@@ -119,14 +119,38 @@ PageBase {
             id: searchField
 
             Layout.fillWidth: true
+            Layout.preferredHeight: 38
+            topPadding: Tokens.padding.small
+            bottomPadding: Tokens.padding.small
             placeholderText: qsTr("Search shortcuts")
-            font: Tokens.font.body.medium
+            font: Tokens.font.body.small
             bg.color: Colours.tPalette.m3surfaceContainerLowest
             bg.border.color: Colours.palette.m3outlineVariant
-            searchIcon.fontStyle: Tokens.font.icon.medium
-            clearIcon.font: Tokens.font.icon.medium
+            searchIcon.fontStyle: Tokens.font.icon.small
+            clearIcon.font: Tokens.font.icon.small
             clearIcon.padding: Tokens.padding.extraSmall
             onTextChanged: root.shortcutQuery = text
+
+            Keys.onDownPressed: {
+                focus = false;
+                root.moveDown();
+            }
+            Keys.onEscapePressed: event => {
+                if (text !== "") {
+                    text = "";
+                    event.accepted = true;
+                } else {
+                    focus = false;
+                }
+            }
+            Keys.onReturnPressed: {
+                focus = false;
+                root.moveDown();
+            }
+            Keys.onEnterPressed: {
+                focus = false;
+                root.moveDown();
+            }
         }
 
         SectionHeader {

@@ -1,10 +1,11 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Layouts
 import Quickshell
 import Quickshell.Widgets
 import Quickshell.Services.Mpris
 import Caelestia.Config
-import Caelestia.Services
 import qs.components
 import qs.components.images
 import qs.services
@@ -15,33 +16,20 @@ StyledRect {
 
     required property PopoutState popouts
     property var model: popouts.dockModel
-    // Resolved through the same helper the taskbar tile uses, so the hover popup
-    // can never disagree with the tile it belongs to.
     readonly property string iconSource: model ? WinIcons.sourceFor(model.entry, model.appClass, model.iconName, model.pid ?? 0) : ""
     property MprisPlayer player: {
         if (!model) return null;
         return Players.list.find(p => p.identity.toLowerCase().includes(model.appClass.toLowerCase()) || (model.id && p.identity.toLowerCase().includes(model.id.toLowerCase().replace(".desktop", "")))) || null;
     }
-    // Injected by Content.qml's Popout.
     property real scaleOffset: 1.0
     property real fontScale: 1.0
     property bool _isSidebarOpen: false
     readonly property int previewWidth: Math.round(Tokens.sizes.bar.windowPreviewSize * scaleOffset)
     readonly property int cardWidth: (root.model && root.model.toplevels && root.model.toplevels.length > 1) ? Math.round(previewWidth * 0.55) : previewWidth
-    // root.model is a snapshot taken when the popout opened, not a live binding, so
-    // it never learns a window closed on its own — that card's screencast dies
-    // (KWin has nothing left to stream) and falls back to the app icon instead of
-    // the card disappearing. Closing a window here therefore also has to patch the
-    // snapshot by hand: drop the closed toplevel, and if none are left, close the
-    // popout outright unless the app is pinned, in which case the empty-state
-    // fallback below is the correct thing to show.
 
     function closeToplevel(address: string): void {
-        if (typeof KWinActiveWindowBridge !== "undefined" && KWinActiveWindowBridge.windowList) {
-            KWinActiveWindowBridge.closeWindow(address);
-        } else {
-            Hypr.dispatch(Hypr.usingLua ? `hl.dsp.window.close({ window = "address:0x${address}" })` : `closewindow address:0x${address}`);
-        }
+        Kwin.clearHighlight();
+        Kwin.closeWindow(String(address));
 
         if (!root.model || !root.model.toplevels)
             return;
@@ -57,12 +45,15 @@ StyledRect {
 
         root.popouts.dockModel = Object.assign({}, root.model, { toplevels: remaining });
     }
+
+    Component.onDestruction: {
+        Kwin.clearHighlight();
+    }
     radius: Tokens.rounding.medium
     color: Colours.tPalette.m3surfaceContainer
     clip: true
     implicitWidth: mainLayout.implicitWidth + Tokens.padding.medium * scaleOffset * 2
     implicitHeight: mainLayout.implicitHeight + Tokens.padding.medium * scaleOffset * 2
-    // Explicit sizing for popout positioning calculations
     width: implicitWidth
     height: implicitHeight
 
@@ -89,15 +80,9 @@ StyledRect {
                 anchors.rightMargin: -Tokens.padding.medium * scaleOffset
                 radius: parent.radius
                 onClicked: {
-                    if (root.model && root.model.entry) {
-                        const subCmd = root.model.entry.runInTerminal
-                            ? [...GlobalConfig.general.apps.terminal, `${Quickshell.shellDir}/assets/wrap_term_launch.sh`, ...root.model.entry.command]
-                            : root.model.entry.command;
-                        Quickshell.execDetached({
-                            command: Launch.wrap(subCmd),
-                            workingDirectory: root.model.entry.workingDirectory
-                        });
-                    }
+                    if (root.model && root.model.entry)
+                        Launch.launchEntry(root.model.entry);
+
                     root.popouts.hasCurrent = false;
                 }
             }
@@ -122,7 +107,6 @@ StyledRect {
                 }
             }
         }
-        // Active windows row - live thumbnail previews, native Plasma taskbar style
         RowLayout {
             id: windowsRow
 
@@ -136,10 +120,6 @@ StyledRect {
 
                     required property var modelData
                     required property int index
-                    // Match thumbnail height to the window's actual aspect ratio
-                    // (modelData.width/height come from KWin's frameGeometry via DBus),
-                    // clamped to a reasonable max height so tall windows don't explode
-                    // the popout.  Fall back to 16:10 if the geometry isn't available yet.
                     readonly property real windowAspect: {
                         const w = card.modelData.width;
                         const h = card.modelData.height;
@@ -147,29 +127,56 @@ StyledRect {
                     }
                     readonly property int thumbHeight: {
                         const raw = Math.round(root.cardWidth / windowAspect);
-                        const max = Math.round(root.cardWidth * 1.6); // never taller than 1.6× width
+                        const max = Math.round(root.cardWidth * 1.6);
                         const min = Math.round(root.cardWidth * 0.4);
                         return Math.max(min, Math.min(max, raw));
                     }
+
+                    readonly property bool isDockPanel: root.popouts.sourcePanel === "dockPanel" || (root.popouts.sourcePanel !== "bar" && Boolean(Config.dockPanel && Config.dockPanel.enabled))
+                    readonly property bool previewEnabled: isDockPanel
+                        ? Boolean(Config.dockPanel && Config.dockPanel.previewOnDesktop)
+                        : Boolean(Config.bar && Config.bar.dock && Config.bar.dock.previewOnDesktop)
+                    readonly property bool isCardHovered: cardHover.hovered || cardStateLayer.containsMouse
 
                     implicitWidth: root.cardWidth
                     implicitHeight: cardLayout.implicitHeight
                     radius: Tokens.rounding.small
                     color: "transparent"
 
+                    onIsCardHoveredChanged: {
+                        if (isCardHovered) {
+                            previewTimer.restart();
+                        } else {
+                            previewTimer.stop();
+                            Kwin.clearHighlight();
+                        }
+                    }
+
+                    Timer {
+                        id: previewTimer
+
+                        interval: 400
+
+                        onTriggered: {
+                            if (card.isCardHovered && card.modelData?.address && card.previewEnabled)
+                                Kwin.highlightWindow(String(card.modelData.address));
+                        }
+                    }
+
                     HoverHandler {
                         id: cardHover
                     }
+
                     StateLayer {
+                        id: cardStateLayer
+
                         anchors.fill: parent
                         radius: parent.radius
                         onClicked: {
+                            previewTimer.stop();
+                            Kwin.clearHighlight();
                             if (card.modelData.address) {
-                                if (typeof KWinActiveWindowBridge !== "undefined" && KWinActiveWindowBridge.windowList) {
-                                    KWinActiveWindowBridge.focusWindow(card.modelData.address);
-                                } else {
-                                    Hypr.dispatch(Hypr.usingLua ? `hl.dsp.focus({ window = "address:0x${card.modelData.address}" })` : `focuswindow address:0x${card.modelData.address}`);
-                                }
+                                Kwin.focusWindow(String(card.modelData.address));
                             }
                             root.popouts.hasCurrent = false;
                         }
@@ -195,7 +202,6 @@ StyledRect {
                                 sourceAspect: card.windowAspect
                             }
 
-                            // Close button - only revealed while hovering this thumbnail
                             StyledRect {
                                 anchors.top: parent.top
                                 anchors.right: parent.right
@@ -204,7 +210,7 @@ StyledRect {
                                 implicitHeight: closeIcon.implicitHeight + Tokens.padding.small * scaleOffset * 2
                                 radius: Tokens.rounding.small
                                 color: Colours.tPalette.m3surfaceVariant
-                                opacity: cardHover.hovered ? 1 : 0
+                                opacity: card.isCardHovered ? 1 : 0
                                 visible: opacity > 0.01
 
                                 Behavior on opacity {
@@ -244,14 +250,12 @@ StyledRect {
             }
             Layout.alignment: Qt.AlignLeft
         }
-        // Media controls separator
         StyledRect {
             implicitHeight: 1
             color: Colours.tPalette.m3surfaceVariant
             visible: !!root.player
             Layout.fillWidth: true
         }
-        // Media controls
         RowLayout {
             spacing: Tokens.spacing.medium
             visible: !!root.player
@@ -312,5 +316,14 @@ StyledRect {
             }
             Layout.alignment: Qt.AlignHCenter
         }
+    }
+
+    Connections {
+        function onHasCurrentChanged(): void {
+            if (!root.popouts.hasCurrent)
+                Kwin.clearHighlight();
+        }
+
+        target: root.popouts
     }
 }

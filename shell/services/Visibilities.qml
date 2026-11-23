@@ -1,66 +1,213 @@
 pragma Singleton
 
+import QtQuick
 import Quickshell
-import Caelestia.Services
+import Quickshell.Io
+import Caelestia.Config
 import qs.components
 import qs.services
 
 Singleton {
+    id: root
+
     property var screens: new Map()
     property var bars: new Map()
-    property string launcherInitialSearch: ""
-    property string initialSidebarTab: "notifications"
+    property var docks: new Map()
+    property var dockPanels: new Map()
+    property var exclusions: new Map()
+    property string initialSidebarTab: ""
+    property string lastSidebarTab: "notifications"
+    property int openDialogs: 0
+    readonly property bool contextPopoutOpen: {
+        for (const bar of bars.values())
+            if (bar?.popouts?.isContextPopout || (bar?.popouts?.staysOpen && bar?.popouts?.hasCurrent))
+                return true;
+        return false;
+    }
+    readonly property bool sidebarPinned: GlobalConfig.sidebar.pinned
+    // Live width while the pinned sidebar's edge is dragged; otherwise follows
+    // sidebar.width, where 0 means the default width.
+    property int sidebarWidth
+    property bool sidebarResizing: false
     property string preOverviewActiveWindowAddress: ""
-    // A window card being dragged, shared so every screen's overview knows about
-    // it.
-    //
-    // Each overview is its own window and can only draw on its own screen, so a
-    // card dragged towards the next monitor simply vanishes at the edge -- the
-    // drag is still running and still lands correctly, but there is nothing to
-    // see, and it reads as having dropped the window into nowhere. Publishing
-    // the position here lets the screen the pointer has reached draw what is
-    // arriving.
+    /// The names of the application the overview is limited to, or empty for every
+    /// window. Set by the dock's "Show all windows" action, cleared when it closes.
+    property var overviewAppFilter: []
     property string dragAddress: ""
     property string dragOriginScreen: ""
     property real dragX: 0
     property real dragY: 0
     property real dragWidth: 0
     property real dragHeight: 0
-    /// Address of a window whose screencast is claimed by something other than
-    /// its card in the grid -- the preview shown on the screen a drag has been
-    /// carried to, or an icon pulled up out of the strip.
-    ///
-    /// KWin serves one node per window and a node feeds one consumer: a second
-    /// PipeWireSourceItem bound to the same stream draws black, which is what
-    /// both of those did. The card gives it up while the claim stands, and takes
-    /// it back afterwards. It is off screen or covered at that point, so there
-    /// is nothing to lose.
     property string streamClaim: ""
+    // The launcher is one panel across outputs, so the screen that opened it owns
+    // it. `launcherMode` is the mode it is in: "" for the app grid. The service
+    // seeds both when the launcher opens; the launcher keeps the mode in sync with
+    // its search field.
+    property DrawerVisibilities launcherScreen: null
+    property string launcherMode: ""
+    readonly property bool launcherOpen: launcherScreen !== null
 
-    // Raised when the overview shortcut is pressed while the overview is
-    // already up: the grid moves its selection on instead of the drawer
-    // closing under the user.
     signal cycleOverview(bool backwards)
+    signal exclusionBoundsChanged(ShellScreen screen)
+    signal launcherOpened(string mode)
+
+    function sidebarWidthFor(defaultWidth: real): real {
+        return sidebarPinned && sidebarWidth > 0 ? sidebarWidth : defaultWidth;
+    }
+
+    function setSidebarWidth(width: int): void {
+        // Also set the live width: the binding is off mid-drag, and a
+        // double-click's second press starts one.
+        sidebarWidth = Math.max(0, width);
+        GlobalConfig.sidebar.width = sidebarWidth;
+    }
+
+    function sidebarOpenTab(): string {
+        return GlobalConfig.sidebar.defaultTab === "last" ? lastSidebarTab : GlobalConfig.sidebar.defaultTab;
+    }
 
     function load(screen: ShellScreen, visibilities: DrawerVisibilities): void {
-        screens.set(Hypr.monitorFor(screen), visibilities);
-        screens = new Map(screens); // Force QML property change notification
-        visibilities.launcherChanged.connect(() => {
-            if (!visibilities.launcher)
-                return;
-            for (const other of screens.values()) {
-                if (other !== visibilities)
-                    other.launcher = false;
-            }
+        screens.set(Kwin.monitorFor(screen), visibilities);
+        screens = new Map(screens);
+        visibilities.launcherChanged.connect(() => { setLauncherOwner(visibilities, visibilities.launcher); });
+        // PersistentProperties can restore the launcher as open, before the change
+        // handler above is connected.
+        if (visibilities.launcher)
+            setLauncherOwner(visibilities, true);
+        visibilities.overviewChanged.connect(() => {
+            if (visibilities.overview)
+                Kwin.clearHighlight();
+        });
+        visibilities.sessionChanged.connect(() => {
+            if (visibilities.session)
+                Kwin.clearHighlight();
         });
     }
+
+    function unload(visibilities: DrawerVisibilities): void {
+        for (const monitor of screens.keys()) {
+            if (screens.get(monitor) !== visibilities)
+                continue;
+            screens.delete(monitor);
+            screens = new Map(screens);
+            break;
+        }
+        // The screen is going away: skip the highlight reset, which needs Kwin to
+        // still be up when the shell is shutting down with it.
+        if (launcherScreen === visibilities)
+            clearLauncherOwner();
+    }
+
     function registerBar(screen: ShellScreen, barWrapper: var): void {
         bars.set(screen.name, barWrapper);
-        bars = new Map(bars); // Force QML property change notification by changing the Map reference
+        bars = new Map(bars);
+    }
+    function registerDockPanel(screen: ShellScreen, dockPanelWrapper: var): void {
+        dockPanels.set(screen.name, dockPanelWrapper);
+        dockPanels = new Map(dockPanels);
+    }
+    function unregisterDockPanel(screen: ShellScreen): void {
+        dockPanels.delete(screen.name);
+        dockPanels = new Map(dockPanels);
+    }
+    function registerDock(screen: ShellScreen, dock: var): void {
+        docks.set(screen.name, dock);
+        docks = new Map(docks);
+    }
+    function unregisterDock(screen: ShellScreen): void {
+        docks.delete(screen.name);
+        docks = new Map(docks);
+    }
+    function registerExclusions(screen: ShellScreen, exclusionObj: var): void {
+        exclusions.set(screen.name, exclusionObj);
+        exclusions = new Map(exclusions);
+        exclusionBoundsChanged(screen);
+    }
+    function exclusionsFor(screen: ShellScreen): var {
+        return exclusions.get(screen?.name) ?? null;
+    }
+    function notifyExclusionBoundsChanged(screen: ShellScreen): void {
+        exclusionBoundsChanged(screen);
     }
     function getForActive(): DrawerVisibilities {
-        const monitor = Hypr.monitors[KWinActiveWindowBridge.cursorOutputName()] || Hypr.focusedMonitor;
+        const monitor = Kwin.monitors.find(m => m.name === Kwin.cursorOutputName()) || Kwin.focusedMonitor;
         return screens.get(monitor) || screens.values().next().value;
+    }
+    function modeForText(text: string): string {
+        const prefix = GlobalConfig.launcher.actionPrefix;
+        if (!text.startsWith(prefix))
+            return "";
+        const rest = text.slice(prefix.length);
+        const space = rest.indexOf(" ");
+        return space < 0 ? "" : rest.slice(0, space);
+    }
+    function openLauncher(mode: string): void {
+        // A disabled launcher has nothing to show: opening it anyway would leave
+        // the drawers window grabbing input for a panel that is not there.
+        if (!GlobalConfig.launcher.enabled)
+            return;
+        const v = launcherScreen ?? getForActive();
+        if (!v)
+            return;
+        // The mode has to be in place first: the launcher applies it to its search
+        // field when it opens.
+        launcherMode = mode;
+        setLauncherOwner(v, true);
+        launcherOpened(mode);
+        v.launcher = true;
+    }
+    function closeLauncher(): void {
+        if (launcherScreen)
+            launcherScreen.launcher = false;
+    }
+    function toggleLauncher(mode: string): void {
+        if (launcherOpen && (mode === "" || launcherMode === mode)) {
+            closeLauncher();
+            return;
+        }
+        openLauncher(mode);
+    }
+    function drawerOpen(drawer: string): bool {
+        if (drawer === "launcher")
+            return launcherOpen;
+        const v = getForActive();
+        return v ? v[drawer] === true : false;
+    }
+    function setDrawer(drawer: string, open: bool): void {
+        if (drawer === "launcher") {
+            if (open)
+                openLauncher("");
+            else
+                closeLauncher();
+            return;
+        }
+        if (drawer === "overview") {
+            setOverview(open);
+            return;
+        }
+        const v = getForActive();
+        if (v)
+            v[drawer] = open;
+    }
+
+    function setLauncherOwner(visibilities: DrawerVisibilities, open: bool): void {
+        if (!open) {
+            if (launcherScreen !== visibilities)
+                return;
+            Kwin.clearHighlight();
+            clearLauncherOwner();
+            return;
+        }
+        for (const other of screens.values()) {
+            if (other !== visibilities)
+                other.launcher = false;
+        }
+        launcherScreen = visibilities;
+    }
+    function clearLauncherOwner(): void {
+        launcherMode = "";
+        launcherScreen = null;
     }
     function setDrag(address: string, x: real, y: real, w: real, h: real, originScreen: string): void {
         dragAddress = address;
@@ -70,22 +217,78 @@ Singleton {
         dragHeight = h;
         dragOriginScreen = originScreen;
     }
+
     function clearDrag(): void {
         dragAddress = "";
         dragOriginScreen = "";
     }
-    /**
-     * Opens or closes the overview on every screen at once.
-     *
-     * Unlike the other drawers, the overview is a place you drag things across:
-     * a window can be moved to another monitor, or to a desktop that only exists
-     * on that monitor, and neither is possible if the destination is still
-     * showing the desktop underneath. Opening it on the focused screen alone
-     * also reads as broken on a multi-monitor setup -- one screen goes to the
-     * overview and the other carries on as if nothing happened.
-     */
+
     function setOverview(visible: bool): void {
+        if (!visible)
+            overviewAppFilter = [];
         for (const visibilities of screens.values())
             visibilities.overview = visible;
+    }
+
+    /// Opens the overview limited to one application, the way App Exposé does.
+    function showAppWindows(names: var): void {
+        overviewAppFilter = (names || []).filter(name => typeof name === "string" && name.length > 0);
+        setOverview(true);
+    }
+    /// Only one transient surface at a time. The launcher, the drawers, the session dialog,
+    /// the overview and the bar's panels all draw in the same part of the screen, so two of
+    /// them open at once means one hides the other. Whichever opens last takes the screen;
+    /// the callers name themselves in `except`. The sidebar, the notification stack, the OSD
+    /// and the toasts are deliberately absent — they sit beside a surface, not over it.
+    function closeTransients(except: string): void {
+        for (const vis of screens.values()) {
+            if (except !== "launcher")
+                vis.launcher = false;
+            if (except !== "dashboard")
+                vis.dashboard = false;
+            if (except !== "utilities")
+                vis.utilities = false;
+            if (except !== "session")
+                vis.session = false;
+        }
+        if (except !== "overview")
+            setOverview(false);
+        if (except !== "popouts") {
+            for (const bar of bars.values())
+                bar?.popouts?.close();
+        }
+    }
+    function closeContextPopouts(): void {
+        for (const bar of bars.values())
+            if (bar?.popouts?.isContextPopout || (bar?.popouts?.staysOpen && bar?.popouts?.hasCurrent))
+                bar.popouts.close();
+    }
+
+    Binding on sidebarWidth {
+        value: GlobalConfig.sidebar.width
+        when: !sidebarResizing
+        restoreMode: Binding.RestoreNone
+    }
+
+    Timer {
+        id: pinRestore
+
+        interval: 1500
+        running: GlobalConfig.sidebar.pinned
+        onTriggered: {
+            const v = getForActive();
+            if (v && GlobalConfig.sidebar.pinned)
+                v.sidebar = true;
+        }
+    }
+
+    IpcHandler {
+        /// Opens the overview limited to one application, for keybinds and scripts:
+        /// the names are the desktop entry id or window class, comma separated.
+        function showAppWindows(names: string): void {
+            root.showAppWindows(names.split(","));
+        }
+
+        target: "overview"
     }
 }

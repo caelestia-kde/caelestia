@@ -15,7 +15,7 @@ import qs.services
 
 Variants {
     model: Screens.screens
-    
+
     PanelWindow {
         id: root
 
@@ -24,7 +24,7 @@ Variants {
         screen: modelData
 
         property bool active: false
-        
+
         Connections {
             target: Visibilities.getForActive()
 
@@ -32,7 +32,7 @@ Variants {
                 root.active = Visibilities.getForActive().screenshot;
             }
         }
-        
+
         onActiveChanged: {
             if (!active) visible = false;
             else visible = true;
@@ -42,7 +42,7 @@ Variants {
 
         color: "transparent"
 
-        mask: Region {} // Capture all clicks outside
+        mask: Region {}
 
         anchors {
             top: true
@@ -61,14 +61,16 @@ Variants {
             color: Colours.palette.m3scrim
             opacity: root.active ? 0.3 : 0
             anchors.fill: parent
-            
+
             MouseArea {
                 anchors.fill: parent
                 onClicked: Visibilities.getForActive().screenshot = false
             }
-            
+
             Behavior on opacity {
-                CAnim {}
+                Anim {
+                    type: Anim.DefaultEffects
+                }
             }
         }
 
@@ -78,7 +80,7 @@ Variants {
             anchors.centerIn: parent
             color: Colours.palette.m3surface
             radius: Tokens.rounding.large
-            
+
             opacity: root.active ? 1 : 0
             scale: root.active ? 1 : 0.9
 
@@ -86,10 +88,15 @@ Variants {
             implicitHeight: layout.implicitHeight + Tokens.padding.extraLarge * 2
 
             Behavior on opacity {
-                CAnim {}
+                Anim {
+                    type: Anim.DefaultEffects
+                }
             }
+
             Behavior on scale {
-                CAnim {}
+                Anim {
+                    type: Anim.FastSpatial
+                }
             }
 
             ColumnLayout {
@@ -129,7 +136,7 @@ Variants {
                             Launch.exec(["spectacle", "-R", "r"]);
                         }
                     }
-                    
+
                     BigRecorderButton {
                         materialSymbol: "capture"
                         name: qsTr("Record screen")
@@ -145,7 +152,7 @@ Variants {
                     type: ButtonBase.Tonal
                     icon: "animated_images"
                     text: qsTr("Open recordings folder")
-                    
+
                     inactiveColour: Colours.palette.m3surfaceContainerHigh
                     activeColour: Colours.palette.m3surfaceContainerHighest
                     inactiveOnColour: Colours.palette.m3onSurface
@@ -153,7 +160,7 @@ Variants {
 
                     onClicked: {
                         Visibilities.getForActive().screenshot = false;
-                        Qt.openUrlExternally(`file://${Paths.recsdir}`);
+                        Qt.openUrlExternally(`file://${GlobalConfig.paths.recordingsDir}`);
                     }
                 }
             }
@@ -164,10 +171,10 @@ Variants {
 
             required property string materialSymbol
             required property string name
-            
+
             type: ButtonBase.Tonal
             isRound: true
-            
+
             inactiveColour: Colours.palette.m3surfaceContainerHigh
             activeColour: Colours.palette.m3surfaceContainerHighest
             inactiveOnColour: Colours.palette.m3onSurface
@@ -179,6 +186,7 @@ Variants {
             icon: bigButton.materialSymbol
 
             Tooltip {
+                parent: bigButton.Window.contentItem
                 target: bigButton
                 text: bigButton.name
             }

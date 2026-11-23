@@ -1,7 +1,3 @@
-/*
-    SPDX-FileCopyrightText: 2024 ladybug-me
-    SPDX-License-Identifier: GPL-3.0-or-later
-*/
 
 import QtQuick
 import QtQuick.Layouts
@@ -113,6 +109,10 @@ Item {
 
     function suspend(): void {
         root.actionTriggered("suspend");
+        Qt.callLater(root.requestSuspend);
+    }
+
+    function requestSuspend(): void {
         if (activeSessionManagement && activeSessionManagement.canSuspend) {
             try {
                 activeSessionManagement.suspend();

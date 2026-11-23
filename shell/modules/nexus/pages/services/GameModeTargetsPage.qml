@@ -6,7 +6,6 @@ import Quickshell
 import Quickshell.Widgets
 import Caelestia
 import Caelestia.Config
-import Caelestia.Services
 import qs.components
 import qs.components.containers
 import qs.components.controls
@@ -16,7 +15,7 @@ import qs.modules.nexus.common
 
 PageBase {
     id: root
-    
+
     title: qsTr("Target windows")
     isSubPage: true
     scrollable: false
@@ -65,7 +64,7 @@ PageBase {
 
                     StyledText {
                         text: qsTr("Add a custom class or regex pattern")
-                        font: Tokens.font.label.small
+                        font: NexusStyle.secondaryFont
                         color: Colours.palette.m3onSurfaceVariant
                         elide: Text.ElideRight
                     }
@@ -76,7 +75,7 @@ PageBase {
                     Layout.preferredHeight: 32
                     radius: Tokens.rounding.small
                     color: Colours.layer(Colours.palette.m3surfaceVariant, 2)
-                    
+
                     StyledTextField {
                         id: customInput
 
@@ -118,7 +117,7 @@ PageBase {
             }
         }
 
-        AutoEnableRow {
+        WindowPickerRow {
             Layout.fillWidth: true
             last: true
             icon: "touch_app"
@@ -153,9 +152,10 @@ PageBase {
                 spacing: Tokens.spacing.small
                 model: GlobalConfig.utilities.gameMode.autoEnableRegexes
                 clip: true
+                interactive: contentHeight > height
 
-                move: Transition { NumberAnimation { properties: "y"; duration: 200; easing.type: Easing.OutCubic } }
-                moveDisplaced: Transition { NumberAnimation { properties: "y"; duration: 200; easing.type: Easing.OutCubic } }
+                move: Transition { Anim { properties: "y"; type: Anim.FastSpatial } }
+                moveDisplaced: Transition { Anim { properties: "y"; type: Anim.FastSpatial } }
 
                 delegate: StyledRect {
                     id: delegateRect
@@ -207,7 +207,7 @@ PageBase {
 
                             StateLayer {
                                 anchors.fill: parent
-                                radius: 14
+                                radius: Tokens.rounding.full
                                 onClicked: {
                                     let list = Array.from(GlobalConfig.utilities.gameMode.autoEnableRegexes);
                                     list.splice(delegateRect.index, 1);
@@ -220,119 +220,6 @@ PageBase {
                                 anchors.centerIn: parent
                                 text: "close"
                                 font: Tokens.font.icon.small
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    component AutoEnableRow: PopupRow {
-        id: row
-
-        readonly property int popupHeight: mainLayout.height - y - Tokens.padding.large - Tokens.padding.extraExtraLarge
-
-        signal selected(windowClass: string)
-
-        keepPopupAsChild: {
-            if (root.nState.animatingContainer || root.opacity < 1)
-                return true;
-
-            let p = root.parent;
-            while (p && p.objectName !== "PageContainer")
-                p = p.parent;
-            return p?.opacity < 1;
-        }
-        popup.topMovement: Math.max(Tokens.sizes.nexus.minPopupHeight - popupHeight, Tokens.padding.large)
-
-        Loader {
-            anchors.centerIn: parent
-            active: row.popup.animDriver > 0
-
-            sourceComponent: Item {
-                implicitWidth: Tokens.sizes.nexus.popupWidth
-                implicitHeight: CUtils.clamp(row.popupHeight, Tokens.sizes.nexus.minPopupHeight, Tokens.sizes.nexus.maxPopupHeight)
-
-                ColumnLayout {
-                    anchors.fill: parent
-                    spacing: 0
-
-                    VerticalFadeListView {
-                        id: list
-                        Layout.fillWidth: true
-                        Layout.fillHeight: true
-
-                        Connections {
-                            target: KWinActiveWindowBridge
-
-                            function onWindowListChanged() {
-                                list.updateModel();
-                            }
-                        }
-
-                        function updateModel() {
-                            let toplevels = [];
-                            for (const toplevel of KWinActiveWindowBridge.windowList) {
-                                if (toplevel.title || toplevel.class) {
-                                    toplevels.push(toplevel);
-                                }
-                            }
-                            list.model = toplevels.sort((a, b) => (a.title ?? "").localeCompare(b.title ?? ""));
-                        }
-
-                        Component.onCompleted: updateModel()
-
-                        delegate: StateLayer {
-                            id: windowItem
-
-                            required property var modelData
-                            required property int index
-
-                            anchors.fill: undefined
-                            anchors.left: list.contentItem.left
-                            anchors.right: list.contentItem.right
-                            implicitHeight: itemLayout.implicitHeight + itemLayout.anchors.margins * 2
-                            radius: Tokens.rounding.small
-
-                            onClicked: {
-                                row.popup.open = false;
-                                row.selected(modelData.class ?? "");
-                            }
-
-                            RowLayout {
-                                id: itemLayout
-
-                                anchors.fill: parent
-                                anchors.margins: Tokens.padding.medium
-                                spacing: Tokens.spacing.medium
-
-                                IconImage {
-                                    asynchronous: true
-                                    implicitSize: Math.round(Tokens.font.icon.large.pointSize * 1.8)
-                                    source: Quickshell.iconPath(windowItem.modelData.class ?? "", "image-missing")
-                                }
-
-                                ColumnLayout {
-                                    Layout.fillWidth: true
-                                    spacing: 0
-
-                                    StyledText {
-                                        Layout.fillWidth: true
-                                        text: windowItem.modelData.title ?? "Unknown"
-                                        font: Tokens.font.body.small
-                                        elide: Text.ElideRight
-                                    }
-
-                                    StyledText {
-                                        Layout.fillWidth: true
-                                        visible: text !== ""
-                                        text: windowItem.modelData.class ?? ""
-                                        color: Colours.palette.m3onSurfaceVariant
-                                        font: Tokens.font.label.small
-                                        elide: Text.ElideRight
-                                    }
-                                }
                             }
                         }
                     }

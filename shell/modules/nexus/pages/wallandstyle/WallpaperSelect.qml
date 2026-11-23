@@ -26,12 +26,12 @@ PageBase {
 
     property var wallpaperColors: ({})
 
-    readonly property var sortColors: ["#e53935" // Red
-        , "#1e88e5" // Blue
-        , "#43a047" // Green
-        , "#fdd835" // Yellow
-        , "#8e24aa" // Purple
-        , "#fb8c00"  // Orange
+    readonly property var sortColors: ["#e53935"
+        , "#1e88e5"
+        , "#43a047"
+        , "#fdd835"
+        , "#8e24aa"
+        , "#fb8c00"
     ]
 
     property var wallsList: {
@@ -39,21 +39,8 @@ PageBase {
         const baseDir = Paths.wallsdir;
         const categories = {};
         const list = [];
-        const filter = root.nState ? root.nState.wallpaperFilterType : "all";
 
         for (const w of walls) {
-            const isVid = Images.isVideo(w.name);
-            const isGif = w.name.toLowerCase().endsWith(".gif");
-            const isImg = Images.isValidImageByName(w.name) && !isGif;
-
-            let matches = false;
-            if (filter === "all") matches = true;
-            else if (filter === "video" && isVid) matches = true;
-            else if (filter === "gif" && isGif) matches = true;
-            else if (filter === "image" && isImg) matches = true;
-
-            if (!matches) continue;
-
             if (w.parentDir !== baseDir) {
                 const category = Wallpapers.getCategoryFor(w);
                 if (category && (!(category in categories) || categories[category].name.localeCompare(w.name) > 0))
@@ -83,10 +70,11 @@ PageBase {
     }
 
     function colorDistance(c1: color, c2: color): real {
+        const rMean = (c1.r + c2.r) / 2;
         const dr = c1.r - c2.r;
         const dg = c1.g - c2.g;
         const db = c1.b - c2.b;
-        return Math.sqrt(dr * dr + dg * dg + db * db);
+        return Math.sqrt((2 + rMean) * dr * dr + 4 * dg * dg + (3 - rMean) * db * db);
     }
 
     function toggleSortColor(color: color) {
@@ -104,16 +92,25 @@ PageBase {
         const newDistances = {};
 
         for (const w of walls) {
-            if (w.parentDir === baseDir) {
-                newDistances[w.path] = colorDistance(root.wallpaperColors[w.path] ?? "black", root.sortColor);
-            }
+            if (w.parentDir !== baseDir)
+                continue;
+
+            const dominant = root.wallpaperColors[w.path];
+            if (dominant === undefined)
+                continue;
+
+            newDistances[w.path] = colorDistance(dominant, root.sortColor);
         }
 
         root.colorDistances = newDistances;
         root.sortVersion++;
     }
 
-    title: qsTr("Select wallpaper")
+    function restartSortDebouncer(): void {
+        sortDebouncer.restart();
+    }
+
+    title: qsTr("Wallpapers")
     isSubPage: true
     scrollable: false
 
@@ -121,6 +118,17 @@ PageBase {
         if (sortColor === "transparent") {
             wallpaperColors = ({});
             colorDistances = ({});
+        }
+    }
+
+    Item {
+        Timer {
+            id: sortDebouncer
+
+            interval: 250
+            onTriggered: {
+                root.analyzeColors();
+            }
         }
     }
 
@@ -140,219 +148,54 @@ PageBase {
             width: gridList.width
             spacing: Tokens.spacing.small
 
-            Timer {
-                id: sortDebouncer
-
-                interval: 250
-                onTriggered: {
-                    root.analyzeColors();
-                }
+            WallItem {
+                imgHeight: Math.round(width * 0.3)
+                radius: Tokens.rounding.extraLarge
+                source: Wallpapers.actualCurrent || Wallpapers.fallback
+                text: qsTr("Current wallpaper")
+                fillLabel: false
+                clickable: false
             }
 
-            ButtonRow {
-                Layout.bottomMargin: Tokens.spacing.medium
-                Layout.alignment: Qt.AlignHCenter
-                spacing: Tokens.spacing.small
-
-                IconTextButton {
-                    icon: "photo_library"
-                    text: qsTr("Browse")
-                    font: Tokens.font.body.large
-                    isRound: true
-                    shapeMorph: true
-                    horizontalPadding: Tokens.padding.extraLarge
-                    verticalPadding: Tokens.padding.medium
-                    onClicked: browseDialog.open()
-
-                    FileDialog {
-                        id: browseDialog
-
-                        title: qsTr("Select an image")
-                        filterLabel: qsTr("Image files")
-                        filters: Images.validImageExtensions
-                        onAccepted: path => {
-                            Wallpapers.setWallpaper(path);
-                        }
-                    }
-                }
-
-                IconTextButton {
-                    icon: "shuffle"
-                    text: qsTr("Random")
-                    font: Tokens.font.body.large
-                    isRound: true
-                    shapeMorph: true
-                    horizontalPadding: Tokens.padding.extraLarge
-                    verticalPadding: Tokens.padding.medium
-                    type: IconTextButton.Tonal
-                    onClicked: {
-                        Wallpapers.setRandom();
-                        root.nState.closeSubPage();
-                    }
-                }
-
-                IconTextButton {
-                    icon: "folder_open"
-                    text: qsTr("Open folder")
-                    font: Tokens.font.body.large
-                    isRound: true
-                    shapeMorph: true
-                    horizontalPadding: Tokens.padding.extraLarge
-                    verticalPadding: Tokens.padding.medium
-                    type: IconTextButton.Tonal
-                    onClicked: Quickshell.execDetached(["xdg-open", Paths.wallsdir])
-                }
-            }
-
-            // Color sorting and type filtering
             RowLayout {
                 Layout.topMargin: Tokens.spacing.medium
+                Layout.bottomMargin: Tokens.spacing.large
                 Layout.fillWidth: true
                 z: typeFilterBtn.expanded ? 1 : 0
 
-                Item {
-                    Layout.fillWidth: true
-                }
-
                 Row {
-                    spacing: Tokens.spacing.medium
+                    spacing: Tokens.spacing.small
 
-                    // Red button
-                    Rectangle {
-                        width: 36
-                        height: 36
-                        radius: Tokens.rounding.full
-                        color: "#e53935"
+                    IconTextButton {
+                        icon: "photo_library"
+                        text: qsTr("Browse")
+                        type: IconTextButton.Tonal
+                        onClicked: browseDialog.open()
 
-                        Rectangle {
-                            anchors.centerIn: parent
-                            width: 36
-                            height: 36
-                            radius: parent.radius
-                            color: "transparent"
-                            border.width: root.sortColor === "#e53935" ? 3 : 0
-                            border.color: Colours.palette.m3onSurface
-                        }
+                        FileDialog {
+                            id: browseDialog
 
-                        MouseArea {
-                            anchors.fill: parent
-                            onClicked: root.toggleSortColor("#e53935")
+                            title: qsTr("Select an image")
+                            filterLabel: qsTr("Image files")
+                            filters: Images.validImageExtensions
+                            onAccepted: path => {
+                                Wallpapers.setWallpaper(path);
+                            }
                         }
                     }
 
-                    // Blue button
-                    Rectangle {
-                        width: 36
-                        height: 36
-                        radius: Tokens.rounding.full
-                        color: "#1e88e5"
-
-                        Rectangle {
-                            anchors.centerIn: parent
-                            width: 36
-                            height: 36
-                            radius: parent.radius
-                            color: "transparent"
-                            border.width: root.sortColor === "#1e88e5" ? 3 : 0
-                            border.color: Colours.palette.m3onSurface
-                        }
-
-                        MouseArea {
-                            anchors.fill: parent
-                            onClicked: root.toggleSortColor("#1e88e5")
-                        }
+                    IconTextButton {
+                        icon: "shuffle"
+                        text: qsTr("Random")
+                        type: IconTextButton.Tonal
+                        onClicked: Wallpapers.setRandom()
                     }
 
-                    // Green button
-                    Rectangle {
-                        width: 36
-                        height: 36
-                        radius: Tokens.rounding.full
-                        color: "#43a047"
-
-                        Rectangle {
-                            anchors.centerIn: parent
-                            width: 36
-                            height: 36
-                            radius: parent.radius
-                            color: "transparent"
-                            border.width: root.sortColor === "#43a047" ? 3 : 0
-                            border.color: Colours.palette.m3onSurface
-                        }
-
-                        MouseArea {
-                            anchors.fill: parent
-                            onClicked: root.toggleSortColor("#43a047")
-                        }
-                    }
-
-                    // Yellow button
-                    Rectangle {
-                        width: 36
-                        height: 36
-                        radius: Tokens.rounding.full
-                        color: "#fdd835"
-
-                        Rectangle {
-                            anchors.centerIn: parent
-                            width: 36
-                            height: 36
-                            radius: parent.radius
-                            color: "transparent"
-                            border.width: root.sortColor === "#fdd835" ? 3 : 0
-                            border.color: Colours.palette.m3onSurface
-                        }
-
-                        MouseArea {
-                            anchors.fill: parent
-                            onClicked: root.toggleSortColor("#fdd835")
-                        }
-                    }
-
-                    // Purple button
-                    Rectangle {
-                        width: 36
-                        height: 36
-                        radius: Tokens.rounding.full
-                        color: "#8e24aa"
-
-                        Rectangle {
-                            anchors.centerIn: parent
-                            width: 36
-                            height: 36
-                            radius: parent.radius
-                            color: "transparent"
-                            border.width: root.sortColor === "#8e24aa" ? 3 : 0
-                            border.color: Colours.palette.m3onSurface
-                        }
-
-                        MouseArea {
-                            anchors.fill: parent
-                            onClicked: root.toggleSortColor("#8e24aa")
-                        }
-                    }
-
-                    // Orange button
-                    Rectangle {
-                        width: 36
-                        height: 36
-                        radius: Tokens.rounding.full
-                        color: "#fb8c00"
-
-                        Rectangle {
-                            anchors.centerIn: parent
-                            width: 36
-                            height: 36
-                            radius: parent.radius
-                            color: "transparent"
-                            border.width: root.sortColor === "#fb8c00" ? 3 : 0
-                            border.color: Colours.palette.m3onSurface
-                        }
-
-                        MouseArea {
-                            anchors.fill: parent
-                            onClicked: root.toggleSortColor("#fb8c00")
-                        }
+                    IconTextButton {
+                        icon: "folder_open"
+                        text: qsTr("Open folder")
+                        type: IconTextButton.Tonal
+                        onClicked: Quickshell.execDetached(["xdg-open", Paths.wallsdir])
                     }
                 }
 
@@ -364,60 +207,93 @@ PageBase {
                     id: typeFilterBtn
 
                     type: SplitButton.Tonal
-                    fallbackIcon: "collections"
-                    fallbackText: qsTr("All")
+                    fallbackIcon: {
+                        const f = Wallpapers.currentMediaFilter;
+                        if (f === "Video") return "movie";
+                        if (f === "Animated") return "gif";
+                        if (f === "Image") return "image";
+                        return "collections";
+                    }
+                    fallbackText: {
+                        const f = Wallpapers.currentMediaFilter;
+                        if (f === "Video") return qsTr("Videos");
+                        if (f === "Animated") return qsTr("GIFs");
+                        if (f === "Image") return qsTr("Images");
+                        return qsTr("All");
+                    }
                     minLeftWidth: 100
 
                     menuItems: [
                         MenuItem {
-                            property string filterValue: "all"
+                            property string filterValue: "All"
 
                             text: qsTr("All")
                             icon: "collections"
                             onClicked: {
-                                if (root.nState) root.nState.wallpaperFilterType = "all"
+                                Wallpapers.currentMediaFilter = "All";
                             }
                         },
                         MenuItem {
-                            property string filterValue: "image"
+                            property string filterValue: "Image"
 
                             text: qsTr("Images")
                             icon: "image"
                             onClicked: {
-                                if (root.nState) root.nState.wallpaperFilterType = "image"
+                                Wallpapers.currentMediaFilter = "Image";
                             }
                         },
                         MenuItem {
-                            property string filterValue: "gif"
+                            property string filterValue: "Animated"
 
                             text: qsTr("GIFs")
                             icon: "gif"
                             onClicked: {
-                                if (root.nState) root.nState.wallpaperFilterType = "gif"
+                                Wallpapers.currentMediaFilter = "Animated";
                             }
                         },
                         MenuItem {
-                            property string filterValue: "video"
+                            property string filterValue: "Video"
 
                             text: qsTr("Videos")
                             icon: "movie"
                             onClicked: {
-                                if (root.nState) root.nState.wallpaperFilterType = "video"
+                                Wallpapers.currentMediaFilter = "Video";
                             }
                         }
                     ]
 
                     active: {
-                        const f = root.nState ? root.nState.wallpaperFilterType : "all";
-                        return menuItems.find(m => m.filterValue === f) ?? menuItems[0];
+                        const f = Wallpapers.currentMediaFilter;
+                        for (let i = 0; i < menuItems.length; i++) {
+                            if (menuItems[i].filterValue === f)
+                                return menuItems[i];
+                        }
+                        return menuItems[0];
+                    }
+
+                    Component.onCompleted: {
+                        for (let i = 0; i < menuItems.length; i++) {
+                            if (menuItems[i].filterValue === Wallpapers.currentMediaFilter) {
+                                active = menuItems[i];
+                                return;
+                            }
+                        }
+                    }
+
+                    Connections {
+                        function onCurrentMediaFilterChanged(): void {
+                            for (let i = 0; i < typeFilterBtn.menuItems.length; i++) {
+                                if (typeFilterBtn.menuItems[i].filterValue === Wallpapers.currentMediaFilter) {
+                                    typeFilterBtn.active = typeFilterBtn.menuItems[i];
+                                    return;
+                                }
+                            }
+                            typeFilterBtn.active = typeFilterBtn.menuItems[0];
+                        }
+
+                        target: Wallpapers
                     }
                 }
-            }
-
-            StyledText {
-                Layout.topMargin: Tokens.spacing.large
-                text: qsTr("Local wallpapers")
-                font: Tokens.font.title.small
             }
         }
 
@@ -439,7 +315,6 @@ PageBase {
                     readonly property int globalIndex: rowDel.index * Config.nexus.wallpapersPerRow + index
                     readonly property var modelData: root.wallsList[globalIndex]
 
-                    // Empty placeholders for sizing
                     opacity: modelData ? 1 : 0
                     enabled: !!modelData
                     Layout.fillWidth: true
@@ -466,7 +341,7 @@ PageBase {
                     onClicked: {
                         if (modelData.parentDir !== Paths.wallsdir) {
                             root.nState.selectedWallpaperCategory = Wallpapers.getCategoryFor(modelData);
-                            root.nState.openSubPage(2); // Category page
+                            root.nState.openSubPage("wallpaperCategory");
                         } else {
                             Wallpapers.setWallpaper(modelData.path);
                         }
@@ -481,7 +356,7 @@ PageBase {
                             if (wallItem.modelData && dominantColour.a > 0) {
                                 root.wallpaperColors[wallItem.modelData.path] = dominantColour;
                                 if (root.sortColor !== "transparent") {
-                                    sortDebouncer.restart();
+                                    root.restartSortDebouncer();
                                 }
                             }
                         }

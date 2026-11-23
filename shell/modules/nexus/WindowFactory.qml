@@ -6,35 +6,80 @@ import Quickshell.Wayland
 import Caelestia.Config
 import qs.components
 import qs.services
+import qs.utils
 import qs.modules.nexus
 
 Singleton {
     id: root
 
-    // The one detached Nexus window, if open. Reused so repeated detach /
-    // "Open Updates" clicks navigate the existing window instead of stacking.
     property var openWindow: null
+    readonly property bool openWindowActive: root.openWindow !== null && root.openWindow.nexus.windowActive
 
     function create(parent: Item, props: var): var {
         props = props || {};
         if (root.openWindow) {
             const win = root.openWindow;
-            // Handles the sub-page as well: the page swap is animated, so
-            // opening it straight after the page change reaches the page that
-            // is on its way out instead of the one arriving.
-            if (props.initialPageIdx !== undefined)
-                win.nexus.nState.goToSubPage(props.initialPageIdx, props.initialSubPageIdx ?? -1);
+            if (props.initialPageIdx !== undefined) {
+                const isKey = typeof props.initialPageIdx === "string";
+                const pageIdx = isKey
+                    ? PageRegistry.indexForKey(props.initialPageIdx)
+                    : props.initialPageIdx;
+                const subPage = props.initialSubPage || (isKey ? PageRegistry.defaultSubPageForKey(props.initialPageIdx) : "");
+                win.nexus.nState.goToSubPage(pageIdx, String(subPage));
+            }
             win.visible = true;
-            win.raise();
+            Qt.callLater(win.raise);
+            win.nexus.forceActiveFocus();
+            Logger.mark("nexus=reused");
             return win;
         }
-        const win = nexusComp.createObject(parent ?? dummy, props);
+        const resolvedProps = Object.assign({}, props);
+        if (typeof resolvedProps.initialPageIdx === "string") {
+            const key = resolvedProps.initialPageIdx;
+            resolvedProps.initialPageIdx = PageRegistry.indexForKey(key);
+            if (!resolvedProps.initialSubPage)
+                resolvedProps.initialSubPage = PageRegistry.defaultSubPageForKey(key);
+        }
+
+        const win = nexusComp.createObject(parent ?? dummy, resolvedProps);
         root.openWindow = win;
+        if (win) {
+            win.visible = true;
+            Qt.callLater(win.raise);
+        }
+        Logger.mark("nexus=created");
         return win;
+    }
+
+    function close(): void {
+        if (root.openWindow)
+            root.openWindow.visible = false;
+    }
+
+    function goBack(): void {
+        if (!root.openWindow)
+            return;
+        const state = root.openWindow.nexus.nState;
+        if (state.subPageKeyStack.length > 0)
+            state.closeSubPage();
     }
 
     QtObject {
         id: dummy
+    }
+
+    // building the window costs seconds of CPU, so it is built once while idle and then only hidden/shown
+    Timer {
+        running: true
+        interval: 8000
+        onTriggered: {
+            if (root.openWindow)
+                return;
+            root.openWindow = nexusComp.createObject(dummy, {
+                visible: false
+            });
+            Logger.mark("nexus=created");
+        }
     }
 
     Component {
@@ -44,11 +89,26 @@ Singleton {
             id: win
 
             property alias nexus: nexus
-
             property int initialPageIdx: 0
-            property int initialSubPageIdx: -1
+            property string initialSubPage: ""
+
+            function raise(): void {
+                const pageTitles = PageRegistry.pages.map(p => p.label);
+                const target = Kwin.windowList.find(w => w.title === win.title || (pageTitles.includes(w.title) && w.class && w.class.includes("quickshell")));
+                if (target?.address)
+                    Kwin.focusWindow(target.address);
+            }
+
+            visible: true
+
+            onClosed: {
+                if (root.openWindow === win)
+                    root.openWindow = null;
+                win.destroy();
+            }
 
             Component.onDestruction: {
+                Logger.mark("nexus=destroyed");
                 if (root.openWindow === win)
                     root.openWindow = null;
             }
@@ -60,44 +120,30 @@ Singleton {
             surfaceFormat.opaque: false
 
             BackgroundEffect.blurRegion: Region {
-                Region { x: -10; y: -10; width: 1; height: 1 } // Prevent full-window blur fallback when disabled
+                Region { x: -10; y: -10; width: 1; height: 1 }
                 Region { item: (GlobalConfig.appearance.transparency.enabled && GlobalConfig.appearance.blur) ? nexus : null }
-            }
-
-            onVisibleChanged: {
-                // Some Quickshell versions do not expose a cancellable close
-                // signal on FloatingWindow. If the window is being hidden while
-                // an update runs, reopen and route through Nexus' close guard.
-                if (!visible && UpdateChecker.updateRunning) {
-                    visible = true;
-                    nexus.requestClose();
-                    return;
-                }
-
-                if (!visible)
-                    destroy();
             }
 
             implicitWidth: nexus.implicitWidth
             implicitHeight: nexus.implicitHeight
 
-            minimumSize.width: Tokens.sizes.nexus.minWidth
+            minimumSize.width: Math.max(1050, Tokens.sizes.nexus.minWidth)
             minimumSize.height: Tokens.sizes.nexus.minHeight
 
-            contentItem.Config.screen: screen.name
-            contentItem.Tokens.screen: screen.name
+            contentItem.Config.screen: screen ? screen.name : (Screens.activeScreen?.name ?? "")
+            contentItem.Tokens.screen: screen ? screen.name : (Screens.activeScreen?.name ?? "")
 
-            title: qsTr("%1").arg(PageRegistry.pages[nexus.nState.currentPageIdx].label)
+            title: PageRegistry.pages[nexus.nState.currentPageIdx] ? PageRegistry.pages[nexus.nState.currentPageIdx].label : "Nexus"
 
             Nexus {
                 id: nexus
 
                 anchors.fill: parent
                 initialPageIdx: win.initialPageIdx
-                initialSubPageIdx: win.initialSubPageIdx
-                nState.screen: win.screen
+                initialSubPage: win.initialSubPage
+                nState.screen: win.screen ?? Screens.activeScreen ?? Quickshell.screens[0]
                 nState.isWindow: true
-                onClose: win.destroy()
+                onClose: win.visible = false
             }
 
             Behavior on color {

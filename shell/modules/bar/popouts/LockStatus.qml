@@ -4,14 +4,15 @@ import qs.components
 import qs.services
 
 ColumnLayout {
+    id: root
+
     required property PopoutState popouts
 
-    // Injected by Content.qml's Popout.
     property real scaleOffset: 1.0
     property real fontScale: 1.0
     property bool _isSidebarOpen: false
 
-    implicitWidth: Math.max(300 * scaleOffset, _isSidebarOpen ? (Tokens.sizes.sidebar.width * scaleOffset) - Tokens.padding.extraLargeIncreased : 0)
+    implicitWidth: Math.max(300 * scaleOffset, _isSidebarOpen ? (Visibilities.sidebarWidthFor(Tokens.sizes.sidebar.width) * scaleOffset) - Tokens.padding.extraLargeIncreased : 0)
     spacing: Tokens.spacing.medium * scaleOffset
 
     StyledText {
@@ -39,12 +40,12 @@ ColumnLayout {
             spacing: Tokens.spacing.small * root.scaleOffset
 
             StyledText {
-                text: qsTr("Caps Lock: %1").arg(Hypr.capsLock ? "Enabled" : "Disabled")
+                text: Kwin.capsLock ? qsTr("Caps Lock enabled") : qsTr("Caps Lock disabled")
                 font.pointSize: Tokens.font.body.medium.pointSize * root.fontScale
             }
 
             StyledText {
-                text: qsTr("Num Lock: %1").arg(Hypr.numLock ? "Enabled" : "Disabled")
+                text: Kwin.numLock ? qsTr("Num Lock enabled") : qsTr("Num Lock disabled")
                 font.pointSize: Tokens.font.body.medium.pointSize * root.fontScale
             }
         }

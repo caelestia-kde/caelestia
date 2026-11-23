@@ -5,20 +5,30 @@ import qs.services
 
 Scope {
     Component.onCompleted: {
-        // Force certain singletons to load on shell init instead of lazily
-
-        IdleInhibitor;
-        GameMode;
+        ConfigMigrations;
         Notifs;
-        Players;
-        Brightness;
-        Weather.reload();
+    }
 
-        if (GlobalConfig.utilities.vpn.enabled)
-            VPN;
+    Timer {
+        id: deferredServices
 
-        // Watches for kde-material-you-colors re-applying the Plasma colour
-        // scheme in a loop, which flashes the screen every second.
-        KMYGuard;
+        interval: 250
+        repeat: false
+        running: true
+
+        onTriggered: {
+            IdleInhibitor;
+            Timers;
+            GameMode;
+            Players;
+            Brightness;
+            Weather.reload();
+            WorkspaceTrackerGuard;
+            PlasmaWidgets;
+            TrayRegistry;
+
+            if (GlobalConfig.utilities.vpn.enabled)
+                VPN;
+        }
     }
 }

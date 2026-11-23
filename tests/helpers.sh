@@ -1,35 +1,19 @@
 #!/usr/bin/env bash
-# helpers.sh - Assertions and fixtures for the bash test suite.
-#
-# Sourced by every tests/test_*.sh:
-#
-#     source "$(dirname "${BASH_SOURCE[0]}")/helpers.sh"
-#
-# A test file defines functions named `test_*` and ends with `run_tests`.
-# Assertions record failures instead of aborting, so one broken expectation
-# still reports the rest of the file.
-
-# Guard against double-sourcing, written as an if so a false test never trips
-# `set -e` in the sourcing file (same pattern as scripts/lib/privileges.sh).
 if [[ -z "${CAELESTIA_TEST_HELPERS_SOURCED:-}" ]]; then
 CAELESTIA_TEST_HELPERS_SOURCED=1
 
 CAELESTIA_TEST_FAILURES=0
 CAELESTIA_TEST_COUNT=0
-CAELESTIA_TEST_TMPDIRS=()
 
 fail() {
     CAELESTIA_TEST_FAILURES=$((CAELESTIA_TEST_FAILURES + 1))
     printf '    FAIL: %s\n' "$*" >&2
 }
 
-# Report a test as skipped because a prerequisite for it is missing on this
-# machine. Counts as neither a pass nor a failure; the test still returns 0.
 skip_test() {
     printf '    SKIP: %s\n' "$1"
 }
 
-# Like fail, but show the output of a command that was expected to succeed.
 fail_with_output() {
     local message="$1" output="$2"
     CAELESTIA_TEST_FAILURES=$((CAELESTIA_TEST_FAILURES + 1))
@@ -52,7 +36,6 @@ assert_ne() {
     fi
 }
 
-# assert_status <expected-status> <actual-status> <message>
 assert_status() {
     local expected="$1" actual="$2" message="${3:-unexpected exit status}"
     if [[ "$expected" != "$actual" ]]; then
@@ -71,8 +54,8 @@ assert_file_missing() {
 }
 
 assert_is_dir() {
-    local path="$1"
-    [[ -d "$path" ]] || fail "expected a directory: $path"
+    local path="$1" message="${2:-expected a directory}"
+    [[ -d "$path" ]] || fail "$message: $path"
 }
 
 assert_contains() {
@@ -89,32 +72,45 @@ assert_not_contains() {
     fi
 }
 
-# Scratch directory removed by run_tests when the file finishes.
+assert_file_contains() {
+    local path="$1" needle="$2" message="${3:-substring not found}"
+    if [[ ! -f "$path" ]]; then
+        fail "$message (no such file: $path)"
+        return 0
+    fi
+    if ! grep -qF -- "$needle" "$path"; then
+        fail "$message ($(basename "$path") does not contain $(printf '%q' "$needle"))"
+    fi
+}
+
+assert_file_not_contains() {
+    local path="$1" needle="$2" message="${3:-unexpected substring found}"
+    if [[ ! -f "$path" ]]; then
+        fail "$message (no such file: $path)"
+        return 0
+    fi
+    if grep -qF -- "$needle" "$path"; then
+        fail "$message ($(basename "$path") still contains $(printf '%q' "$needle"))"
+    fi
+}
+
+assert_file_matches() {
+    local path="$1" pattern="$2" message="${3:-no line matches}"
+    if [[ ! -f "$path" ]]; then
+        fail "$message (no such file: $path)"
+        return 0
+    fi
+    if ! grep -qE -- "$pattern" "$path"; then
+        fail "$message ($(basename "$path") has no line matching $(printf '%q' "$pattern"))"
+    fi
+}
+
 new_tmpdir() {
     local dir
     dir="$(mktemp -d "${TMPDIR:-/tmp}/caelestia-test.XXXXXX")"
-    CAELESTIA_TEST_TMPDIRS+=("$dir")
     printf '%s\n' "$dir"
 }
 
-cleanup_tmpdirs() {
-    local dir
-    for dir in "${CAELESTIA_TEST_TMPDIRS[@]:-}"; do
-        [[ -n "$dir" ]] && rm -rf -- "$dir"
-    done
-    CAELESTIA_TEST_TMPDIRS=()
-    return 0
-}
-
-# stub_bin <dir> <name> [body]
-#
-# Writes an executable stub named <name> into <dir> (created if needed) so a
-# test can put <dir> first on PATH and observe how the code under test shells
-# out. The body defaults to succeeding.
-#
-# The shebang is the absolute /bin/bash rather than /usr/bin/env bash: tests
-# that restrict PATH to a stub directory would otherwise have no way for env
-# to locate an interpreter.
 stub_bin() {
     local dir="$1" name="$2" body="${3:-exit 0}"
     mkdir -p "$dir"
@@ -122,23 +118,66 @@ stub_bin() {
     chmod +x "$dir/$name"
 }
 
-# recording_stub <dir> <name> <logfile> [exit-status]
-#
-# Stub that appends "<name> <args>" to <logfile> and exits with <exit-status>.
-# Lets a test assert both that a command ran and exactly how it was called.
 recording_stub() {
     local dir="$1" name="$2" log="$3" status="${4:-0}"
     stub_bin "$dir" "$name" "printf '%s %s\n' '$name' \"\$*\" >> '$log'
 exit $status"
 }
 
-# calls_to <logfile> <name>
-#
-# Print the recorded argument strings for <name>, one per line.
 calls_to() {
     local log="$1" name="$2"
     [[ -f "$log" ]] || return 0
     awk -v want="$name" '$1 == want { sub(/^[^ ]+ /, ""); print }' "$log"
+}
+
+# Prints a function's body out of a script, so a test can drive the real implementation
+# rather than a copy of it. The body ends at the first closing brace at column zero, which
+# is how the scripts in this repository close their functions.
+extract_function() {
+    local file="$1" name="$2"
+    awk -v name="$name" '
+        $0 ~ "^" name "\\(\\) \\{" { capture = 1 }
+        capture { print }
+        capture && $0 == "}" { exit }
+    ' "$file"
+}
+
+# Runs its command with PATH holding only $1, so the command can only reach the
+# stubs that are in there. $2 is the lrelease fallback path the toolchain tests set,
+# and is unused by callers that do not care.
+with_path() {
+    local dir="$1" fallback="$2"
+    shift 2
+    (
+        PATH="$dir"
+        export CAELESTIA_LRELEASE_FALLBACK="$fallback"
+        "$@"
+    )
+}
+
+# A QML `.pragma library` module is plain JS, so its behaviour can be run rather than
+# grepped. run_js evaluates one the way the engine does — the pragma stripped, its
+# top-level functions and vars exposed as one object under the given namespace — and runs
+# the given script with node's assert available. Prints "ok" when every assertion held.
+#
+#   run_js <module.js> <Namespace> <script>
+run_js() {
+    local module="$1" ns="$2" script="$3"
+    JS_MODULE="$module" JS_NS="$ns" node -e '
+const fs = require("fs");
+const assert = require("assert");
+const src = fs.readFileSync(process.env.JS_MODULE, "utf8").replace(/^\.pragma library$/m, "");
+const names = [...src.matchAll(/^(?:function|var) (\w+)/gm)].map(m => m[1]);
+globalThis[process.env.JS_NS] = new Function(src + "\nreturn {" + names.join(",") + "};")();
+'"$script"'
+console.log("ok");' 2>&1
+}
+
+# check_js <message> <module.js> <Namespace> <script>
+check_js() {
+    local message="$1" out
+    out="$(run_js "$2" "$3" "$4")"
+    [[ "$out" == "ok" ]] || fail_with_output "$message" "$out"
 }
 
 run_tests() {
@@ -148,8 +187,6 @@ run_tests() {
         printf '  %s\n' "$fn"
         "$fn"
     done < <(declare -F | awk '{ print $3 }' | grep '^test_' | sort)
-
-    cleanup_tmpdirs
 
     if [[ "$CAELESTIA_TEST_FAILURES" -gt 0 ]]; then
         printf '  %s assertion(s) failed across %s test(s)\n' \

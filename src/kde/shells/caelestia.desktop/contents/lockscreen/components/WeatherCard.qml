@@ -1,7 +1,3 @@
-/*
-    SPDX-FileCopyrightText: 2024 ladybug-me
-    SPDX-License-Identifier: GPL-3.0-or-later
-*/
 
 import QtQuick
 import QtQuick.Layouts
@@ -24,13 +20,10 @@ Rectangle {
     color: clSurfaceContainer
     clip: true
 
-    // Natural height = content + vertical padding so the card shrinks-to-fit
-    // when Layout.fillHeight is not set (matches Quickshell Content.qml behavior)
     implicitHeight: isHorizontalLayout
                     ? (horizontalContent.implicitHeight + Math.max(16, 24 * centerScale))
                     : (compactContent.implicitHeight + Math.max(12, 20 * centerScale))
 
-    // ── High-DPI / Wide Horizontal Layout ──
     RowLayout {
         id: horizontalContent
 
@@ -45,7 +38,6 @@ Rectangle {
             }
         }
 
-        // Left Section: Big Hero Temperature & Weather Icon
         RowLayout {
             id: heroSection
 
@@ -78,7 +70,6 @@ Rectangle {
             }
         }
 
-        // Vertical Divider Separator
         Rectangle {
             id: divider
 
@@ -88,7 +79,6 @@ Rectangle {
             color: Qt.rgba(root.clSurfaceVariantFg.r, root.clSurfaceVariantFg.g, root.clSurfaceVariantFg.b, 0.18)
         }
 
-        // Right Section: Condition, Feels Like, High / Low Range
         ColumnLayout {
             id: detailsSection
 
@@ -112,7 +102,7 @@ Rectangle {
             Text {
                 Layout.fillWidth: true
                 Layout.maximumWidth: detailsSection.Layout.maximumWidth
-                text: Weather.hasWeather ? ("Feels like " + Weather.feelsLike) : "Feels like --°C"
+                text: qsTr("Feels like %1").arg(Weather.hasWeather ? Weather.feelsLike : "--°C")
                 font {
                     pixelSize: Math.max(10, Math.round(12 * root.centerScale))
                     family: LockScreenConfig.fontBody
@@ -126,7 +116,7 @@ Rectangle {
                 Layout.fillWidth: true
                 Layout.maximumWidth: detailsSection.Layout.maximumWidth
                 text: (Weather.hasWeather && Weather.maxTemp.length > 0 && Weather.minTemp.length > 0)
-                      ? ("High " + Weather.maxTemp + " • Low " + Weather.minTemp)
+                      ? qsTr("High %1 • Low %2").arg(Weather.maxTemp).arg(Weather.minTemp)
                       : ""
                 font {
                     pixelSize: Math.max(10, Math.round(11 * root.centerScale))
@@ -138,7 +128,6 @@ Rectangle {
         }
     }
 
-    // ── Low-DPI / Compact Layout ──
     RowLayout {
         id: compactContent
 

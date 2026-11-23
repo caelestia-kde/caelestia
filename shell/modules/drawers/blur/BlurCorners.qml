@@ -17,62 +17,52 @@ Region {
 
     property int steps: Math.max(1, blurQuality)
 
-    function getM(i) { return Math.ceil(i * steps / 100); }
-    function isActive(i) { return GlobalConfig.appearance.blurMask && getM(i) > getM(i - 1); }
-    function getYo(i) { return getM(i) / steps; }
-    function getXVal(i) { return Math.sqrt(1 - Math.pow(getYo(i), 2)); }
+    // The strip geometry depends only on steps, so it is computed once here
+    // instead of in every region binding on every animation frame.
+    readonly property bool masked: GlobalConfig.appearance.blurMask
+    readonly property var strips: {
+        const active = [false], yo = [0], xVal = [1];
+        for (let i = 1; i <= 100; ++i) {
+            const m = Math.ceil(i * steps / 100);
+            const prev = Math.ceil((i - 1) * steps / 100);
+            active.push(m > prev);
+            yo.push(m / steps);
+            // Width at the strip's outer edge, so the steps cover the arc instead
+            // of leaving notches inside it; the region snaps to whole pixels anyway.
+            xVal.push(Math.sqrt(1 - Math.pow(prev / steps, 2)));
+        }
+        return { active, yo, xVal };
+    }
 
-    // Outer corner radii (only non-zero if both adjacent edges are rounded)
     property real rTL: Math.min(rTop, rLeft)
-
     property real rTR: Math.min(rTop, rRight)
-
     property real rBL: Math.min(rBottom, rLeft)
-
     property real rBR: Math.min(rBottom, rRight)
 
+    property real tlX: 0
+    property real tlY: 0
+    property real tlW: 1
+    property real tlH: 1
 
-    // Offsets for each corner (x, y, width, height)
-
-    // ( + is relative right/down, - is relative left/up )
-
-    // Top-left   
-    property real tlX: 0 // Shift the whole corner mask horizontally 
-
-    property real tlY: 0 // Shift the whole corner mask vertically
-
-    property real tlW: 1 // Change the width towards right
-
-    property real tlH: 0 // Change the height towards down
-
-    // Top-right
     property real trX: -1
-
     property real trY: 0
-
     property real trW: 1
+    property real trH: 1
 
-    property real trH: 0
-
-    // Bottom-left
     property real blX: 0
-
     property real blY: -1
-
     property real blW: 1
-
     property real blH: 1
 
-    // Bottom-right
     property real brX: -2
-
     property real brY: -2
-
     property real brW: 2
-
     property real brH: 2
 
-    // Top-Left Outer Corner
+    function isActive(i) { return masked && strips.active[i]; }
+    function getYo(i) { return strips.yo[i]; }
+    function getXVal(i) { return strips.xVal[i]; }
+
     Region { x: isActive(1) ? inLeft - rTL * getXVal(1) + tlX : 0; y: isActive(1) ? inTop - rTL * getYo(1) + tlY : 0; width: isActive(1) ? rTL * getXVal(1) + tlW : 0; height: isActive(1) ? rTL * getYo(1) + tlH : 0 }
     Region { x: isActive(2) ? inLeft - rTL * getXVal(2) + tlX : 0; y: isActive(2) ? inTop - rTL * getYo(2) + tlY : 0; width: isActive(2) ? rTL * getXVal(2) + tlW : 0; height: isActive(2) ? rTL * getYo(2) + tlH : 0 }
     Region { x: isActive(3) ? inLeft - rTL * getXVal(3) + tlX : 0; y: isActive(3) ? inTop - rTL * getYo(3) + tlY : 0; width: isActive(3) ? rTL * getXVal(3) + tlW : 0; height: isActive(3) ? rTL * getYo(3) + tlH : 0 }
@@ -119,6 +109,7 @@ Region {
     Region { x: isActive(44) ? inLeft - rTL * getXVal(44) + tlX : 0; y: isActive(44) ? inTop - rTL * getYo(44) + tlY : 0; width: isActive(44) ? rTL * getXVal(44) + tlW : 0; height: isActive(44) ? rTL * getYo(44) + tlH : 0 }
     Region { x: isActive(45) ? inLeft - rTL * getXVal(45) + tlX : 0; y: isActive(45) ? inTop - rTL * getYo(45) + tlY : 0; width: isActive(45) ? rTL * getXVal(45) + tlW : 0; height: isActive(45) ? rTL * getYo(45) + tlH : 0 }
     Region { x: isActive(46) ? inLeft - rTL * getXVal(46) + tlX : 0; y: isActive(46) ? inTop - rTL * getYo(46) + tlY : 0; width: isActive(46) ? rTL * getXVal(46) + tlW : 0; height: isActive(46) ? rTL * getYo(46) + tlH : 0 }
+    Region { x: isActive(47) ? inLeft - rTL * getXVal(47) + tlX : 0; y: isActive(47) ? inTop - rTL * getYo(47) + tlY : 0; width: isActive(47) ? rTL * getXVal(47) + tlW : 0; height: isActive(47) ? rTL * getYo(47) + tlH : 0 }
     Region { x: isActive(48) ? inLeft - rTL * getXVal(48) + tlX : 0; y: isActive(48) ? inTop - rTL * getYo(48) + tlY : 0; width: isActive(48) ? rTL * getXVal(48) + tlW : 0; height: isActive(48) ? rTL * getYo(48) + tlH : 0 }
     Region { x: isActive(49) ? inLeft - rTL * getXVal(49) + tlX : 0; y: isActive(49) ? inTop - rTL * getYo(49) + tlY : 0; width: isActive(49) ? rTL * getXVal(49) + tlW : 0; height: isActive(49) ? rTL * getYo(49) + tlH : 0 }
     Region { x: isActive(50) ? inLeft - rTL * getXVal(50) + tlX : 0; y: isActive(50) ? inTop - rTL * getYo(50) + tlY : 0; width: isActive(50) ? rTL * getXVal(50) + tlW : 0; height: isActive(50) ? rTL * getYo(50) + tlH : 0 }
@@ -173,7 +164,6 @@ Region {
     Region { x: isActive(99) ? inLeft - rTL * getXVal(99) + tlX : 0; y: isActive(99) ? inTop - rTL * getYo(99) + tlY : 0; width: isActive(99) ? rTL * getXVal(99) + tlW : 0; height: isActive(99) ? rTL * getYo(99) + tlH : 0 }
     Region { x: isActive(100) ? inLeft - rTL * getXVal(100) + tlX : 0; y: isActive(100) ? inTop - rTL * getYo(100) + tlY : 0; width: isActive(100) ? rTL * getXVal(100) + tlW : 0; height: isActive(100) ? rTL * getYo(100) + tlH : 0 }
 
-    // Top-Right Outer Corner
     Region { x: isActive(1) ? inRight + trX : 0; y: isActive(1) ? inTop - rTR * getYo(1) + trY : 0; width: isActive(1) ? rTR * getXVal(1) + trW : 0; height: isActive(1) ? rTR * getYo(1) + trH : 0 }
     Region { x: isActive(2) ? inRight + trX : 0; y: isActive(2) ? inTop - rTR * getYo(2) + trY : 0; width: isActive(2) ? rTR * getXVal(2) + trW : 0; height: isActive(2) ? rTR * getYo(2) + trH : 0 }
     Region { x: isActive(3) ? inRight + trX : 0; y: isActive(3) ? inTop - rTR * getYo(3) + trY : 0; width: isActive(3) ? rTR * getXVal(3) + trW : 0; height: isActive(3) ? rTR * getYo(3) + trH : 0 }
@@ -275,7 +265,6 @@ Region {
     Region { x: isActive(99) ? inRight + trX : 0; y: isActive(99) ? inTop - rTR * getYo(99) + trY : 0; width: isActive(99) ? rTR * getXVal(99) + trW : 0; height: isActive(99) ? rTR * getYo(99) + trH : 0 }
     Region { x: isActive(100) ? inRight + trX : 0; y: isActive(100) ? inTop - rTR * getYo(100) + trY : 0; width: isActive(100) ? rTR * getXVal(100) + trW : 0; height: isActive(100) ? rTR * getYo(100) + trH : 0 }
 
-    // Bottom-Left Outer Corner
     Region { x: isActive(1) ? inLeft - rBL * getXVal(1) + 1 + blX : 0; y: isActive(1) ? inBottom + blY : 0; width: isActive(1) ? rBL * getXVal(1) + blW : 0; height: isActive(1) ? rBL * getYo(1) + blH : 0 }
     Region { x: isActive(2) ? inLeft - rBL * getXVal(2) + 1 + blX : 0; y: isActive(2) ? inBottom + blY : 0; width: isActive(2) ? rBL * getXVal(2) + blW : 0; height: isActive(2) ? rBL * getYo(2) + blH : 0 }
     Region { x: isActive(3) ? inLeft - rBL * getXVal(3) + 1 + blX : 0; y: isActive(3) ? inBottom + blY : 0; width: isActive(3) ? rBL * getXVal(3) + blW : 0; height: isActive(3) ? rBL * getYo(3) + blH : 0 }
@@ -377,7 +366,6 @@ Region {
     Region { x: isActive(99) ? inLeft - rBL * getXVal(99) + 1 + blX : 0; y: isActive(99) ? inBottom + blY : 0; width: isActive(99) ? rBL * getXVal(99) + blW : 0; height: isActive(99) ? rBL * getYo(99) + blH : 0 }
     Region { x: isActive(100) ? inLeft - rBL * getXVal(100) + 1 + blX : 0; y: isActive(100) ? inBottom + blY : 0; width: isActive(100) ? rBL * getXVal(100) + blW : 0; height: isActive(100) ? rBL * getYo(100) + blH : 0 }
 
-    // Bottom-Right Outer Corner
     Region { x: isActive(1) ? inRight + brX : 0; y: isActive(1) ? inBottom + brY : 0; width: isActive(1) ? rBR * getXVal(1) + brW : 0; height: isActive(1) ? rBR * getYo(1) + brH : 0 }
     Region { x: isActive(2) ? inRight + brX : 0; y: isActive(2) ? inBottom + brY : 0; width: isActive(2) ? rBR * getXVal(2) + brW : 0; height: isActive(2) ? rBR * getYo(2) + brH : 0 }
     Region { x: isActive(3) ? inRight + brX : 0; y: isActive(3) ? inBottom + brY : 0; width: isActive(3) ? rBR * getXVal(3) + brW : 0; height: isActive(3) ? rBR * getYo(3) + brH : 0 }

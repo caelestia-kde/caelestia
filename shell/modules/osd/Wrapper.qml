@@ -14,7 +14,8 @@ Item {
     required property bool sidebarOrSessionVisible
     property bool hovered
     readonly property Brightness.Monitor monitor: Brightness.getMonitorForScreen(root.screen)
-    readonly property bool shouldBeActive: visibilities.osd && Config.osd.enabled && !(visibilities.utilities && Config.utilities.enabled) && !visibilities.overview
+    readonly property bool shouldBeActive: visibilities.osd && Config.osd.enabled && !(visibilities.utilities && Config.utilities.enabled) && !visibilities.overview && (Config.osd.showInFullscreen || !Kwin.hasFullscreenOn(root.screen?.name ?? ""))
+    readonly property bool active: shouldBeActive || offsetScale < 0.99
     property real offsetScale: shouldBeActive ? 0 : 1
     property real sidebarOffset: sidebarOrSessionVisible ? 12 : 0
     property real volume
@@ -24,8 +25,16 @@ Item {
     property real brightness
 
     function show(): void {
-        visibilities.osd = true;
-        timer.restart();
+        if (GlobalConfig.osd.style === "default") {
+            if (!GlobalConfig.osd.showInFullscreen && root.screen && Kwin.hasFullscreenOn(root.screen.name))
+                return;
+            visibilities.osd = true;
+            timer.restart();
+        }
+    }
+
+    function refreshBrightness(): void {
+        root.brightness = root.monitor?.effectiveBrightness ?? 0;
     }
 
     Component.onCompleted: {
@@ -33,7 +42,7 @@ Item {
         muted = Audio.muted;
         sourceVolume = Audio.sourceVolume;
         sourceMuted = Audio.sourceMuted;
-        brightness = root.monitor?.brightness ?? 0;
+        refreshBrightness();
     }
     visible: offsetScale < 1
     anchors.leftMargin: Config.bar.position === "right" ? (-implicitWidth - 5 - sidebarOffset) * offsetScale : 0
@@ -68,7 +77,11 @@ Item {
     Connections {
         function onBrightnessChanged(): void {
             root.show();
-            root.brightness = root.monitor?.brightness ?? 0;
+            root.refreshBrightness();
+        }
+
+        function onDimmingChanged(): void {
+            root.refreshBrightness();
         }
 
         target: root.monitor

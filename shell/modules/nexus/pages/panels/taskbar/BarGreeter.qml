@@ -10,6 +10,7 @@ import qs.components.controls
 import qs.components.filedialog
 import qs.services
 import qs.utils
+import qs.modules.bar
 import qs.modules.nexus.common
 
 PageBase {
@@ -24,8 +25,8 @@ PageBase {
     ]
 
     function formatHour(h: int): string {
-        if (GlobalConfig.services.useTwelveHourClock) {
-            const period = h >= 12 ? "PM" : "AM";
+        if (Units.twelveHourClock) {
+            const period = h >= 12 ? qsTr("PM") : qsTr("AM");
             const hour12 = (h % 12 === 0) ? 12 : (h % 12);
             return `${hour12}:00 ${period}`;
         }
@@ -48,14 +49,7 @@ PageBase {
             text: qsTr("Reset Defaults")
             icon: "restart_alt"
             type: TextButton.Tonal
-            scale: pressed ? 0.95 : 1.0
             onClicked: root.resetToDefaults()
-
-            Behavior on scale {
-                Anim {
-                    type: Anim.DefaultEffects
-                }
-            }
         }
     ]
 
@@ -73,46 +67,25 @@ PageBase {
         ToggleRow {
             first: true
             text: qsTr("Enable component")
-            checked: {
-                const entries = Config.bar.entries || [];
-                for (let i = 0; i < entries.length; i++) {
-                    if (entries[i].id === "greeter" || entries[i].id === "activeWindow")
-                        return entries[i].enabled;
+            checked: BarPlacements.placementOf("greeter") !== "off"
+            // Custom reset: enabled state lives in bar.entries, default is true
+            reset: ({
+                customGet: () => BarPlacements.placementOf("greeter") !== "off",
+                customDef: true,
+                customSet: v => {
+                    BarPlacements.setShown("greeter", v);
+                    GlobalConfig.save();
                 }
-                return false;
-            }
+            })
             onToggled: {
-                let newEntries = [...(GlobalConfig.bar.entries || [])];
-                let found = false;
-                for (let i = 0; i < newEntries.length; i++) {
-                    if (newEntries[i].id === "greeter" || newEntries[i].id === "activeWindow") {
-                        newEntries[i].enabled = checked;
-                        found = true;
-                        break;
-                    }
-                }
-
-                if (!found) {
-                    newEntries.push({ id: "greeter", enabled: checked, zone: "left" });
-                }
-
-                GlobalConfig.bar.entries = newEntries;
-                GlobalConfig.save();
-            }
-        }
-
-        ToggleRow {
-            Layout.fillWidth: true
-            text: qsTr("Compact")
-            checked: Config.bar.greeter?.compact ?? false
-            onToggled: {
-                GlobalConfig.bar.greeter.compact = checked;
+                BarPlacements.setShown("greeter", checked);
                 GlobalConfig.save();
             }
         }
 
         ToggleRow {
             text: qsTr("Inverted")
+            reset: ({ node: GlobalConfig.bar.greeter, setting: "inverted" })
             checked: Config.bar.greeter?.inverted ?? false
             onToggled: {
                 GlobalConfig.bar.greeter.inverted = checked;
@@ -121,22 +94,26 @@ PageBase {
         }
 
         ToggleRow {
-            text: qsTr("Show on hover")
-            subtext: qsTr("Only show the greeter while hovering")
-            checked: Config.bar.greeter?.showOnHover ?? true
+            last: !(Config.bar.popouts?.greeter ?? true)
+            text: qsTr("Enable popout")
+            subtext: qsTr("Show a popout panel for the greeter")
+            reset: ({ node: GlobalConfig.bar.popouts, setting: "greeter" })
+            checked: Config.bar.popouts?.greeter ?? true
             onToggled: {
-                GlobalConfig.bar.greeter.showOnHover = checked;
+                GlobalConfig.bar.popouts.greeter = checked;
                 GlobalConfig.save();
             }
         }
 
         ToggleRow {
+            visible: Config.bar.popouts?.greeter ?? true
             last: true
-            text: qsTr("Popout on hover")
-            subtext: qsTr("Show a greeter popout when hovering")
-            checked: Config.bar.popouts?.greeter ?? true
+            text: qsTr("Open on hover")
+            subtext: qsTr("Open popout on hover instead of on click")
+            reset: ({ node: GlobalConfig.bar.greeter, setting: "showOnHover" })
+            checked: Config.bar.greeter?.showOnHover ?? true
             onToggled: {
-                GlobalConfig.bar.popouts.greeter = checked;
+                GlobalConfig.bar.greeter.showOnHover = checked;
                 GlobalConfig.save();
             }
         }
@@ -158,9 +135,6 @@ PageBase {
             }
         }
 
-        // ==========================================
-        // TIME OF DAY SECTION
-        // ==========================================
         SectionHeader {
             visible: (Config.bar.greeter?.mode ?? "timeOfDay") !== "slideshow"
             text: qsTr("Time of Day Periods & Media")
@@ -171,7 +145,7 @@ PageBase {
             first: true
             icon: "wb_twilight"
             label: qsTr("Morning Media")
-            status: (Config.bar.greeter?.morningGif || "").split("/").pop()
+            status: Config.bar.greeter?.morningGif ? Config.bar.greeter.morningGif.split("/").pop() : qsTr("Not set")
             onClicked: morningDialog.open()
 
             FileDialog {
@@ -191,6 +165,7 @@ PageBase {
             visible: (Config.bar.greeter?.mode ?? "timeOfDay") !== "slideshow"
             label: qsTr("Morning start time")
             subtext: root.formatHour(Config.bar.greeter?.morningStart ?? 5)
+            reset: ({ node: GlobalConfig.bar.greeter, setting: "morningStart" })
             value: Config.bar.greeter?.morningStart ?? 5
             from: 0
             to: 23
@@ -204,7 +179,7 @@ PageBase {
         TextFieldRow {
             visible: (Config.bar.greeter?.mode ?? "timeOfDay") !== "slideshow"
             label: qsTr("Morning Greeting Text")
-            placeholderText: "Good Morning"
+            placeholderText: qsTr("Good Morning")
             value: Config.bar.greeter?.morningText || ""
             onEditingFinished: text => {
                 GlobalConfig.bar.greeter.morningText = text;
@@ -216,7 +191,7 @@ PageBase {
             visible: (Config.bar.greeter?.mode ?? "timeOfDay") !== "slideshow"
             icon: "light_mode"
             label: qsTr("Afternoon Media")
-            status: (Config.bar.greeter?.afternoonGif || "").split("/").pop()
+            status: Config.bar.greeter?.afternoonGif ? Config.bar.greeter.afternoonGif.split("/").pop() : qsTr("Not set")
             onClicked: afternoonDialog.open()
 
             FileDialog {
@@ -236,6 +211,7 @@ PageBase {
             visible: (Config.bar.greeter?.mode ?? "timeOfDay") !== "slideshow"
             label: qsTr("Afternoon start time")
             subtext: root.formatHour(Config.bar.greeter?.afternoonStart ?? 12)
+            reset: ({ node: GlobalConfig.bar.greeter, setting: "afternoonStart" })
             value: Config.bar.greeter?.afternoonStart ?? 12
             from: 0
             to: 23
@@ -249,7 +225,7 @@ PageBase {
         TextFieldRow {
             visible: (Config.bar.greeter?.mode ?? "timeOfDay") !== "slideshow"
             label: qsTr("Afternoon Greeting Text")
-            placeholderText: "Good Afternoon"
+            placeholderText: qsTr("Good Afternoon")
             value: Config.bar.greeter?.afternoonText || ""
             onEditingFinished: text => {
                 GlobalConfig.bar.greeter.afternoonText = text;
@@ -261,7 +237,7 @@ PageBase {
             visible: (Config.bar.greeter?.mode ?? "timeOfDay") !== "slideshow"
             icon: "wb_twilight"
             label: qsTr("Evening Media")
-            status: (Config.bar.greeter?.eveningGif || "").split("/").pop()
+            status: Config.bar.greeter?.eveningGif ? Config.bar.greeter.eveningGif.split("/").pop() : qsTr("Not set")
             onClicked: eveningDialog.open()
 
             FileDialog {
@@ -281,6 +257,7 @@ PageBase {
             visible: (Config.bar.greeter?.mode ?? "timeOfDay") !== "slideshow"
             label: qsTr("Evening start time")
             subtext: root.formatHour(Config.bar.greeter?.eveningStart ?? 17)
+            reset: ({ node: GlobalConfig.bar.greeter, setting: "eveningStart" })
             value: Config.bar.greeter?.eveningStart ?? 17
             from: 0
             to: 23
@@ -294,7 +271,7 @@ PageBase {
         TextFieldRow {
             visible: (Config.bar.greeter?.mode ?? "timeOfDay") !== "slideshow"
             label: qsTr("Evening Greeting Text")
-            placeholderText: "Good Evening"
+            placeholderText: qsTr("Good Evening")
             value: Config.bar.greeter?.eveningText || ""
             onEditingFinished: text => {
                 GlobalConfig.bar.greeter.eveningText = text;
@@ -306,7 +283,7 @@ PageBase {
             visible: (Config.bar.greeter?.mode ?? "timeOfDay") !== "slideshow"
             icon: "bedtime"
             label: qsTr("Night Media")
-            status: (Config.bar.greeter?.nightGif || "").split("/").pop()
+            status: Config.bar.greeter?.nightGif ? Config.bar.greeter.nightGif.split("/").pop() : qsTr("Not set")
             onClicked: nightDialog.open()
 
             FileDialog {
@@ -326,6 +303,7 @@ PageBase {
             visible: (Config.bar.greeter?.mode ?? "timeOfDay") !== "slideshow"
             label: qsTr("Night start time")
             subtext: root.formatHour(Config.bar.greeter?.nightStart ?? 20)
+            reset: ({ node: GlobalConfig.bar.greeter, setting: "nightStart" })
             value: Config.bar.greeter?.nightStart ?? 20
             from: 0
             to: 23
@@ -340,7 +318,7 @@ PageBase {
             visible: (Config.bar.greeter?.mode ?? "timeOfDay") !== "slideshow"
             last: true
             label: qsTr("Night Greeting Text")
-            placeholderText: "Good Night"
+            placeholderText: qsTr("Good Night")
             value: Config.bar.greeter?.nightText || ""
             onEditingFinished: text => {
                 GlobalConfig.bar.greeter.nightText = text;
@@ -348,9 +326,6 @@ PageBase {
             }
         }
 
-        // ==========================================
-        // SLIDESHOW SECTION
-        // ==========================================
         SectionHeader {
             visible: (Config.bar.greeter?.mode ?? "timeOfDay") === "slideshow"
             text: qsTr("Slideshow Timing & Order")
@@ -361,6 +336,7 @@ PageBase {
             first: true
             label: qsTr("Slide interval")
             subtext: qsTr("%1 seconds").arg(Math.round(Config.bar.greeter?.slideshowInterval ?? 60))
+            reset: ({ node: GlobalConfig.bar.greeter, setting: "slideshowInterval" })
             value: Config.bar.greeter?.slideshowInterval ?? 60
             from: 5
             to: 3600
@@ -375,6 +351,7 @@ PageBase {
             visible: (Config.bar.greeter?.mode ?? "timeOfDay") === "slideshow"
             text: qsTr("Random shuffle")
             subtext: qsTr("Pick random media instead of cycling sequentially")
+            reset: ({ node: GlobalConfig.bar.greeter, setting: "slideshowRandom" })
             checked: Config.bar.greeter?.slideshowRandom ?? false
             onToggled: {
                 GlobalConfig.bar.greeter.slideshowRandom = checked;
@@ -386,7 +363,7 @@ PageBase {
             visible: (Config.bar.greeter?.mode ?? "timeOfDay") === "slideshow"
             label: qsTr("Slideshow Greeting Text")
             subtext: qsTr("Optional custom text on bar, supports {user}")
-            placeholderText: "Blank for defaults"
+            placeholderText: qsTr("Blank for defaults")
             value: Config.bar.greeter?.slideshowText || ""
             onEditingFinished: text => {
                 GlobalConfig.bar.greeter.slideshowText = text;
@@ -399,7 +376,7 @@ PageBase {
             last: true
             label: qsTr("Slideshow Greeting Icon")
             subtext: qsTr("Material icon name for the bar widget")
-            placeholderText: "Blank for defaults"
+            placeholderText: qsTr("Blank for defaults")
             value: Config.bar.greeter?.slideshowIcon || ""
             onEditingFinished: text => {
                 GlobalConfig.bar.greeter.slideshowIcon = text;

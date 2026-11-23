@@ -18,7 +18,10 @@ StyledRect {
     required property Flickable container
     required property DrawerVisibilities visibilities
 
-    readonly property list<var> notifs: Notifs.list.filter(n => n.appName === modelData)
+    /// What the list is being narrowed to, empty when nothing is.
+    property string filter: ""
+
+    readonly property list<var> notifs: Notifs.list.filter(n => n.appName === modelData && Notifs.matchesQuery(n, root.filter))
     readonly property list<var> activeNotifs: notifs.filter(n => !n.closed)
     readonly property int notifCount: activeNotifs.length
     readonly property string image: activeNotifs.find(n => n.image.length > 0)?.image ?? ""
@@ -101,7 +104,7 @@ StyledRect {
 
                 ColouredIcon {
                     implicitSize: Math.round(TokenConfig.sizes.notifs.image * 0.6)
-                    source: Quickshell.iconPath(root.appIcon)
+                    source: Icons.getNotifAppIcon(root.appIcon)
                     colour: root.urgency === NotificationUrgency.Critical ? Colours.palette.m3onError : root.urgency === NotificationUrgency.Low ? Colours.palette.m3onSurface : Colours.palette.m3onSecondaryContainer
                     layer.enabled: root.appIcon.endsWith("symbolic")
                 }
@@ -111,7 +114,7 @@ StyledRect {
                 id: materialIconComp
 
                 MaterialIcon {
-                    text: Icons.getNotifIcon(root.activeNotifs[0]?.summary, root.urgency)
+                    text: root.activeNotifs[0]?.materialIcon || Icons.getNotifIcon(root.activeNotifs[0]?.summary, root.urgency)
                     color: root.urgency === NotificationUrgency.Critical ? Colours.palette.m3onError : root.urgency === NotificationUrgency.Low ? Colours.palette.m3onSurface : Colours.palette.m3onSecondaryContainer
                     fontStyle: Tokens.font.icon.medium
                 }
@@ -146,7 +149,7 @@ StyledRect {
                     ColouredIcon {
                         anchors.centerIn: parent
                         implicitSize: Math.round(Tokens.sizes.notifs.badge * 0.6)
-                        source: Quickshell.iconPath(root.appIcon)
+                        source: Icons.getNotifAppIcon(root.appIcon)
                         colour: root.urgency === NotificationUrgency.Critical ? Colours.palette.m3onError : root.urgency === NotificationUrgency.Low ? Colours.palette.m3onSurface : Colours.palette.m3onSecondaryContainer
                         layer.enabled: root.appIcon.endsWith("symbolic")
                     }

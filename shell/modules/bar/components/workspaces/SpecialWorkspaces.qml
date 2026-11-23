@@ -3,7 +3,6 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Layouts
 import Quickshell
-import Quickshell.Hyprland
 import Caelestia.Config
 import qs.components
 import qs.components.effects
@@ -16,12 +15,11 @@ Item {
     required property ShellScreen screen
     // See ContentWindow.qml note: loosely typed because the KDE fallback
     // bridge's monitorFor() returns a mock QtObject, not a real HyprlandMonitor.
-    readonly property var monitor: Hypr.monitorFor(screen)
-    readonly property string activeSpecial: (GlobalConfig.bar.workspaces.perMonitorWorkspaces ? monitor : Hypr.focusedMonitor)?.lastIpcObject.specialWorkspace?.name ?? ""
+    readonly property var monitor: Kwin.monitorFor(screen)
+    readonly property string activeSpecial: (Config.bar.workspaces.perMonitor ? monitor : Kwin.focusedMonitor)?.lastIpcObject?.specialWorkspace?.name ?? ""
 
     readonly property bool isHorizontal: Config.bar.position === "top" || Config.bar.position === "bottom"
 
-    // (Removed root-level 'size' property that was causing the 'label is not defined' error)
 
     layer.enabled: true
     layer.effect: Mask {
@@ -68,7 +66,6 @@ Item {
             anchors.right: isHorizontal ? undefined : parent.right
 
             radius: Tokens.rounding.full
-            // Changed undefined to 0 to fix "Unable to assign [undefined] to double"
             implicitWidth: isHorizontal ? parent.width / 2 : 0
             implicitHeight: isHorizontal ? 0 : parent.height / 2
             opacity: isHorizontal ? (view.contentX > 0 ? 0 : 1) : (view.contentY > 0 ? 0 : 1)
@@ -112,7 +109,9 @@ Item {
         onCurrentIndexChanged: currentIndex = Qt.binding(() => model.values.findIndex(w => w.name === root.activeSpecial))
 
         model: ScriptModel {
-            values: Hypr.workspaces.values.filter(w => w.name.startsWith("special:") && (!GlobalConfig.bar.workspaces.perMonitorWorkspaces || w.monitor === root.monitor))
+            // Kwin.workspaces is a plain array (KWinWorkspaceState.workspaces): `.values` is
+            // Array.prototype.values, so the filter threw and the strip never rendered.
+            values: Kwin.workspaces.filter(w => (w.name ?? "").startsWith("special:") && (!Config.bar.workspaces.perMonitor || w.monitor === root.monitor))
         }
 
         preferredHighlightBegin: 0
@@ -278,24 +277,21 @@ Item {
             if (Math.abs(currentPos - startPos) > drag.threshold)
                 return;
 
-            // KDE has no special/scratchpad workspace concept.
-            if (typeof KWinActiveWindowBridge !== "undefined")
-                return;
-
             const ws = view.itemAt(event.x, event.y) as SpecialWsDelegate;
             if (ws?.modelData)
-                Hypr.dispatch(Hypr.usingLua ? `hl.dsp.workspace.toggle_special("${ws.modelData.name.slice(8)}")` : `togglespecialworkspace ${ws.modelData.name.slice(8)}`);
+                Kwin.dispatch(Kwin.usingLua ? `hl.dsp.workspace.toggle_special("${ws.modelData.name.slice(8)}")` : `togglespecialworkspace ${ws.modelData.name.slice(8)}`);
             else
-                Hypr.dispatch(Hypr.usingLua ? 'hl.dsp.workspace.toggle_special("special")' : "togglespecialworkspace special");
+                Kwin.dispatch(Kwin.usingLua ? 'hl.dsp.workspace.toggle_special("special")' : "togglespecialworkspace special");
         }
     }
 
     component SpecialWsDelegate: GridLayout {
         id: ws
 
-        required property HyprlandWorkspace modelData
+        // A workspace map, not a HyprlandWorkspace: the backend hands out plain objects.
+        required property var modelData
         readonly property int size: isHorizontal ? (label.Layout.preferredWidth + (hasWindows ? windows.implicitWidth + Tokens.padding.extraSmall : 0)) : (label.Layout.preferredHeight + (hasWindows ? windows.implicitHeight + Tokens.padding.extraSmall : 0))
-        property int wsId
+        property string wsId
         property string icon
         property bool hasWindows
 
@@ -312,15 +308,15 @@ Item {
         rowSpacing: 0
 
         Component.onCompleted: {
-            wsId = modelData.id;
+            wsId = String(modelData.id ?? "");
             icon = Icons.getSpecialWsIcon(modelData.name);
-            hasWindows = Config.bar.workspaces.showWindowsOnSpecialWorkspaces && modelData.lastIpcObject.windows > 0;
+            hasWindows = Config.bar.workspaces.showWindowsOnSpecialWorkspaces && (modelData.lastIpcObject?.windows ?? 0) > 0;
         }
 
         Connections {
             function onIdChanged(): void {
                 if (ws.modelData)
-                    ws.wsId = ws.modelData.id;
+                    ws.wsId = String(ws.modelData.id ?? "");
             }
 
             function onNameChanged(): void {
@@ -330,8 +326,8 @@ Item {
 
             function onLastIpcObjectChanged(): void {
                 if (ws.modelData) {
-                    ws.hasWindows = root.Config.bar.workspaces.showWindowsOnSpecialWorkspaces && ws.modelData.lastIpcObject.windows > 0;
-                    ws.wsId = ws.modelData.id;
+                    ws.hasWindows = root.Config.bar.workspaces.showWindowsOnSpecialWorkspaces && (ws.modelData.lastIpcObject?.windows ?? 0) > 0;
+                    ws.wsId = String(ws.modelData.id ?? "");
                 }
             }
 
@@ -341,7 +337,7 @@ Item {
         Connections {
             function onShowWindowsOnSpecialWorkspacesChanged(): void {
                 if (ws.modelData)
-                    ws.hasWindows = root.Config.bar.workspaces.showWindowsOnSpecialWorkspaces && ws.modelData.lastIpcObject.windows > 0;
+                    ws.hasWindows = root.Config.bar.workspaces.showWindowsOnSpecialWorkspaces && (ws.modelData.lastIpcObject?.windows ?? 0) > 0;
             }
 
             target: root.Config.bar.workspaces
@@ -433,7 +429,7 @@ Item {
                 Repeater {
                     model: ScriptModel {
                         values: {
-                            const windows = Hypr.toplevels.values.filter(c => c.workspace?.id === ws.wsId);
+                            const windows = Kwin.toplevels.values.filter(c => c.workspace?.id === ws.wsId);
                             const maxIcons = root.Config.bar.workspaces.maxWindowIcons;
                             return maxIcons > 0 ? windows.slice(0, maxIcons) : windows;
                         }
@@ -443,7 +439,7 @@ Item {
                         required property var modelData
 
                         grade: 0
-                        text: Icons.getAppCategoryIcon(modelData.lastIpcObject.class, "terminal")
+                        text: Icons.getAppCategoryIcon(modelData.lastIpcObject?.class ?? "", "terminal")
                         color: Colours.palette.m3onSurfaceVariant
                     }
                 }
@@ -477,7 +473,7 @@ Item {
                 Repeater {
                     model: ScriptModel {
                         values: {
-                            const windows = Hypr.toplevels.values.filter(c => c.workspace?.id === ws.wsId);
+                            const windows = Kwin.toplevels.values.filter(c => c.workspace?.id === ws.wsId);
                             const maxIcons = root.Config.bar.workspaces.maxWindowIcons;
                             return maxIcons > 0 ? windows.slice(0, maxIcons) : windows;
                         }
@@ -487,7 +483,7 @@ Item {
                         required property var modelData
 
                         grade: 0
-                        text: Icons.getAppCategoryIcon(modelData.lastIpcObject.class, "terminal")
+                        text: Icons.getAppCategoryIcon(modelData.lastIpcObject?.class ?? "", "terminal")
                         color: Colours.palette.m3onSurfaceVariant
                     }
                 }

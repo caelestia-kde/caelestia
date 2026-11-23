@@ -7,14 +7,6 @@
 #include <cmath>
 #include <cstdio>
 
-namespace {
-
-constexpr qreal kBytesPerKiB = 1024.0;
-constexpr qreal kBytesPerMiB = 1024.0 * 1024.0;
-constexpr qreal kBytesPerGiB = 1024.0 * 1024.0 * 1024.0;
-
-} // namespace
-
 namespace caelestia::services {
 
 NetworkUsage::NetworkUsage(QObject* parent)
@@ -53,42 +45,11 @@ CircularBuffer* NetworkUsage::uploadBuffer() const {
     return m_uploadBuffer;
 }
 
-NetworkFormatResult NetworkUsage::formatBytesRate(qreal bytes) const {
-    NetworkFormatResult result = formatBytes(bytes);
-    result.unit = result.unit + QStringLiteral("/s");
-    return result;
-}
-
-NetworkFormatResult NetworkUsage::formatBytes(qreal bytes) const {
-    NetworkFormatResult result;
-
-    if (bytes < 0 || std::isnan(bytes) || !std::isfinite(bytes)) {
-        result.value = 0;
-        result.unit = QStringLiteral("B");
-        return result;
-    }
-    if (bytes < kBytesPerKiB) {
-        result.value = bytes;
-        result.unit = QStringLiteral("B");
-    } else if (bytes < kBytesPerMiB) {
-        result.value = bytes / kBytesPerKiB;
-        result.unit = QStringLiteral("KB");
-    } else if (bytes < kBytesPerGiB) {
-        result.value = bytes / kBytesPerMiB;
-        result.unit = QStringLiteral("MB");
-    } else {
-        result.value = bytes / kBytesPerGiB;
-        result.unit = QStringLiteral("GB");
-    }
-    return result;
-}
-
 void NetworkUsage::tick() {
     QFile f(QStringLiteral("/proc/net/dev"));
     if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) {
         return;
     }
-    // skip headers
     f.readLine();
     f.readLine();
 
@@ -103,7 +64,7 @@ void NetworkUsage::tick() {
         }
         const QByteArray iface = line.left(splitIdx).trimmed();
         if (iface == QByteArrayLiteral("lo")) {
-            continue; // skip loopback interface
+            continue;
         }
 
         std::array<unsigned long long, 9> fields{};
@@ -131,22 +92,26 @@ void NetworkUsage::tick() {
     const quint64 rxDelta = totalRx >= m_prevRx ? totalRx - m_prevRx : 0;
     const quint64 txDelta = totalTx >= m_prevTx ? totalTx - m_prevTx : 0;
 
-    m_downloadTotal += static_cast<qreal>(rxDelta);
-    m_uploadTotal += static_cast<qreal>(txDelta);
-
-    if (elapsed > 0.0) {
-        // Calculate speeds
-        m_downloadSpeed = static_cast<qreal>(rxDelta) / elapsed;
-        m_uploadSpeed = static_cast<qreal>(txDelta) / elapsed;
-
-        m_downloadBuffer->push(m_downloadSpeed);
-        m_uploadBuffer->push(m_uploadSpeed);
-    }
-
     m_prevRx = totalRx;
     m_prevTx = totalTx;
 
-    emit changed();
+    QMetaObject::invokeMethod(
+        this,
+        [this, rxDelta, txDelta, elapsed] {
+            m_downloadTotal += static_cast<qreal>(rxDelta);
+            m_uploadTotal += static_cast<qreal>(txDelta);
+
+            if (elapsed > 0.0) {
+                m_downloadSpeed = static_cast<qreal>(rxDelta) / elapsed;
+                m_uploadSpeed = static_cast<qreal>(txDelta) / elapsed;
+
+                m_downloadBuffer->push(m_downloadSpeed);
+                m_uploadBuffer->push(m_uploadSpeed);
+            }
+
+            emit changed();
+        },
+        Qt::QueuedConnection);
 }
 
 } // namespace caelestia::services

@@ -16,22 +16,14 @@ Searcher {
     }
 
     function previewVariant(variant: string): void {
-        const cmd = `import json\nfrom caelestia.utils.scheme import get_scheme\nscheme = get_scheme()\nscheme._variant = "${variant}"\nscheme._update_colours()\nprint(json.dumps({"name": scheme.name, "flavour": scheme.flavour, "mode": scheme.mode, "variant": scheme.variant, "colours": scheme.colours}))`;
-        getPreviewColoursProc.command = ["python3", "-c", cmd];
+        // The scheme command derives the preview from whatever is in effect: the
+        // wallpaper for a dynamic scheme, the shipped colors otherwise. It prints
+        // the palette instead of applying it, which is what a preview is.
+        getPreviewColoursProc.command = ["caelestia", "scheme", "set", "--preview", "-v", variant, ...Colours.smartArg];
         getPreviewColoursProc.running = true;
     }
 
-    Process {
-        id: getPreviewColoursProc
-
-        stdout: StdioCollector {
-            onStreamFinished: {
-                Colours.load(text, true);
-                Colours.showPreview = true;
-            }
-        }
-    }
-
+    useFuzzy: GlobalConfig.launcher.useFuzzy.variants
     list: [
         Variant {
             variant: "vibrant"
@@ -67,13 +59,13 @@ Searcher {
             variant: "fruitsalad"
             icon: "nutrition"
             name: qsTr("Fruit Salad")
-            description: qsTr("A playful theme - the seed color's hue does not appear in the theme.")
+            description: qsTr("A playful theme - the seed color shifts through unrelated hues.")
         },
         Variant {
             variant: "rainbow"
             icon: "looks"
             name: qsTr("Rainbow")
-            description: qsTr("A playful theme - the seed color's hue does not appear in the theme.")
+            description: qsTr("A playful theme - a full spectrum, with the seed only as an accent.")
         },
         Variant {
             variant: "neutral"
@@ -89,7 +81,15 @@ Searcher {
         }
     ]
 
-    useFuzzy: GlobalConfig.launcher.useFuzzy.variants
+    Process {
+        id: getPreviewColoursProc
+
+        stdout: StdioCollector {
+            onStreamFinished: {
+                Colours.loadPreview(text);
+            }
+        }
+    }
 
     component Variant: QtObject {
         required property string variant
@@ -101,7 +101,8 @@ Searcher {
             if (list) {
                 list.visibilities.launcher = false;
             }
-            Quickshell.execDetached(["caelestia", "scheme", "set", "-v", variant]);
+            GlobalConfig.services.smartScheme = false;
+            Quickshell.execDetached(["caelestia", "scheme", "set", "--no-smart", "-v", variant]);
         }
     }
 }

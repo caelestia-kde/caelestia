@@ -11,11 +11,6 @@ extern json g_theme;
 extern json g_menu;
 extern std::unordered_map<std::string, std::string> g_theme_colors;
 
-// Startup problems the user has to be told about: a data file that is missing or
-// unparsable, or step scripts that are not there. They are printed to stderr as
-// well, but the alternate screen hides stderr, so the UI draws these too. The
-// usual cause is a prebuilt installer binary from an older release, which looks
-// for its data where that release kept it; rebuilding via setup.sh fixes it.
 extern std::vector<std::string> g_startup_problems;
 
 extern std::atomic<bool> g_resized;
@@ -29,11 +24,19 @@ extern std::string g_sudo_bin_dir;
 void load_bundle_dir();
 void load_theme();
 
+/// The user's cache root: $XDG_CACHE_HOME, else $HOME/.cache, else /tmp when a caller
+/// has neither. Shared so no caller has to decide what an unset HOME means, and so
+/// none of them can build a string straight from a null getenv() result.
+std::string xdg_cache_dir();
+
+/// Runs a shell command and returns system()'s status, for callers that check it and
+/// for the ones that mark a deliberate ignore with a (void) cast.
+int run_shell(const std::string& command);
+
 struct Config {
   bool enable_transaction_confirm = true;
   bool remove_cache = false;
   bool apply_darkly = true;
-  bool enable_material_you = true;
   bool apply_custom_fonts = true;
 };
 

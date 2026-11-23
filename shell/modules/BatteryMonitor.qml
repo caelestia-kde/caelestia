@@ -1,3 +1,5 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import Quickshell
 import Quickshell.Services.UPower
@@ -8,15 +10,25 @@ import Caelestia.Services
 Scope {
     id: root
 
-    readonly property list<var> warnLevels: [...GlobalConfig.general.battery.warnLevels].sort((a, b) => b.level - a.level)
+    readonly property list<var> warnLevels: [...GlobalConfig.general.battery.warnLevels.values].sort((a, b) => b.level - a.level)
+
+    // UPower reports its initial state as a change shortly after startup, which is not a plug event.
+    property bool settled: false
+
+    Timer {
+        interval: 5000
+        running: true
+        onTriggered: root.settled = true
+    }
 
     Connections {
         function onOnBatteryChanged(): void {
+            const notify = root.settled && GlobalConfig.utilities.toasts.chargingChanged;
             if (UPower.onBattery) {
-                if (GlobalConfig.utilities.toasts.chargingChanged)
+                if (notify)
                     Toaster.toast(qsTr("Charger unplugged"), qsTr("Battery is discharging"), "power_off");
             } else {
-                if (GlobalConfig.utilities.toasts.chargingChanged)
+                if (notify)
                     Toaster.toast(qsTr("Charger plugged in"), qsTr("Battery is charging"), "power");
                 for (const level of root.warnLevels)
                     level.warned = false;
@@ -38,20 +50,8 @@ Scope {
                     Toaster.toast(level.title ?? qsTr("Battery warning"), level.message ?? qsTr("Battery level is low"), level.icon ?? "battery_android_alert", level.critical ? Toast.Error : Toast.Warning);
                 }
             }
-
-            if (!hibernateTimer.running && p <= GlobalConfig.general.battery.criticalLevel) {
-                Toaster.toast(qsTr("Hibernating in 5 seconds"), qsTr("Hibernating to prevent data loss"), "battery_android_alert", Toast.Error);
-                hibernateTimer.start();
-            }
         }
 
         target: UPower.displayDevice
-    }
-
-    Timer {
-        id: hibernateTimer
-
-        interval: 5000
-        onTriggered: SessionManager.hibernate()
     }
 }

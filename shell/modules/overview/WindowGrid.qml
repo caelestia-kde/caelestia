@@ -6,7 +6,6 @@ import Quickshell
 import Quickshell.Widgets
 import Caelestia.Config
 import Caelestia.Layouts
-import Caelestia.Services
 import qs.components
 import qs.components.controls
 import qs.components.images
@@ -19,54 +18,30 @@ Item {
     property var cardItems: []
     property var activeInfoClient: null
     property var panels: null
-    /// The screen this overview belongs to. Everything below is scoped to it:
-    /// KWin gives each output its own current desktop, and each window lives on
-    /// one output, so an overview that ignores this shows the other monitor's
-    /// desktop and the other monitor's windows.
     required property ShellScreen screen
     property var closingWindows: []
     property alias indicatorContainer: indicatorContainer
     readonly property real overviewBorderThickness: Math.min(width, height) * 0.15
-    readonly property real indicatorSpace: indicatorContainer.height + Tokens.padding.large * 2
+    readonly property real indicatorScale: Math.max(0.5, Math.min(3, height / 768))
+    readonly property real indicatorSpace: indicatorContainer.height + (Tokens.padding.large * 2) * indicatorScale
     readonly property real verticalOffset: indicatorSpace - overviewBorderThickness
     readonly property int activeWsId: {
-        if (typeof KWinWorkspaceState === "undefined")
-            return 1;
-        // activeId comes from D-Bus, which exposes a single current desktop and
-        // reports whichever output is focused. Per screen, only the tracker
-        // knows.
-        const perOutput = KWinWorkspaceState.activeByOutput[root.screen.name];
+        const perOutput = Kwin.activeByOutput[root.screen.name];
         if (perOutput > 0)
             return perOutput;
-        return KWinWorkspaceState.activeId > 0 ? KWinWorkspaceState.activeId : 1;
+        return Kwin.activeWsId > 0 ? Kwin.activeWsId : 1;
     }
     property bool ignoreNextSwitch: false
     property bool _initialized: false
     property bool isDragging: false
-    /// -1 while a drag rests against the left edge, +1 against the right, 0
-    /// otherwise. Drives the dwell that pages through workspaces.
-    ///
-    /// Read from the drag's own position rather than from drop areas at the
-    /// edges. Those reported entry and exit, and paging moves the grid under the
-    /// pointer, which counted as leaving -- so the second page never came while
-    /// the drag was held perfectly still. A position cannot be confused that way.
-    /// How far in from a screen edge counts as resting against it. Wide enough
-    /// to be reachable without pressing the pointer into the very last pixels:
-    /// on a shared edge the pointer glides onto the next monitor rather than
-    /// stopping, so a narrow band leaves almost nothing to aim at. The dwell,
-    /// not the width, is what keeps passing through from paging.
     readonly property real edgeBand: 140
     readonly property int edgeDirection: {
         if (!root.isDragging || Visibilities.dragAddress === "" || Visibilities.dragOriginScreen !== root.screen.name)
             return 0;
-        // Screen coordinates on both sides. The published position is relative
-        // to the window, which covers the screen; root is an item inside it and
-        // narrower, so measuring one against the other put the edge in the wrong
-        // place -- far enough out that it was never reached.
         const local = Visibilities.dragX - root.screen.x;
         const span = root.screen.width;
         if (local < 0 || local >= span)
-            return 0; // gone to another screen; that is a move, not a page
+            return 0;
         if (local < root.edgeBand)
             return -1;
         if (local > span - root.edgeBand)
@@ -76,21 +51,26 @@ Item {
     readonly property real hoverScale: 1.02
     property int selectedIndex: -1
     readonly property var currentWindows: {
-        if (typeof KWinWorkspaceState === "undefined" || listView.currentIndex < 0)
+        // The trigger and the filter are read here, not inside gridWindows(): a
+        // property read inside a function does not register as a dependency.
+        const _winTrigger = Kwin.windowList;
+        const _appFilter = Visibilities.overviewAppFilter;
+        if (listView.currentIndex < 0 || listView.currentIndex >= Kwin.workspaces.length)
             return [];
-        const wsList = KWinWorkspaceState.workspaces;
-        if (listView.currentIndex >= wsList.length)
-            return [];
-        const wsId = wsList[listView.currentIndex].index;
-        // windowsForWorkspace already scopes to the workspace; the overview is
-        // per-screen, so drop anything living on another output.
-        return typeof KWinActiveWindowBridge !== "undefined"
-            ? KWinActiveWindowBridge.windowsForWorkspace(wsId, false).filter(w => w.output === root.screen.name)
-            : [];
+        return root.gridWindows(Kwin.workspaces[listView.currentIndex].index);
     }
 
     signal requestWindowInfo(var client)
     signal requestClose()
+
+    /// What one page lays out: this screen, one workspace, and — when the overview was
+    /// opened from a dock entry — one application. The grid and the selection both ask
+    /// this, so they cannot disagree about what is on a page.
+    function gridWindows(wsId: int): var {
+        const wins = Kwin.filterWindows(Kwin.windowsForWorkspace(wsId, false), null, root.screen.name);
+        const filter = Visibilities.overviewAppFilter;
+        return filter.length === 0 ? wins : wins.filter(w => Kwin.windowMatchesApp(w, filter));
+    }
 
     /// The screen containing a point in global coordinates, or null.
     function screenAtGlobal(gx: real, gy: real): var {
@@ -101,20 +81,6 @@ Item {
                 return s;
         }
         return null;
-    }
-
-    // Resolve an icon for a window card, mirroring the dock: prefer an icon
-    // extracted from the window's own _NET_WM_ICON (apps with no desktop
-    // entry, e.g. Steam games or Minecraft), then fall back to the themed
-    // desktop-entry icon lookup the overview already used.
-    function windowIconSource(client: var): string {
-        if (!client)
-            return "";
-        const wp = WinIcons.paths[WinIcons.keyFor(client.class, client.pid ?? 0)];
-        if (wp)
-            return "file://" + wp;
-        return client.iconName ? Icons.getAppIcon(client.iconName, "image-missing")
-                               : (client.class ? Icons.getAppIcon(client.class, "image-missing") : "");
     }
 
     function cycleSelection(backwards: bool): void {
@@ -133,30 +99,21 @@ Item {
         const addr = wins[root.selectedIndex].address;
         if (!addr)
             return;
-        if (typeof KWinActiveWindowBridge !== "undefined")
-            KWinActiveWindowBridge.focusWindow(addr);
-        if (typeof KWinWorkspaceState !== "undefined" && listView.currentIndex >= 0)
-            KWinWorkspaceState.switchTo(KWinWorkspaceState.workspaces[listView.currentIndex].index, root.screen.name);
+                    Kwin.focusWindow(addr);
+        if (listView.currentIndex >= 0)
+            Kwin.switchToWorkspace(Kwin.workspaces[listView.currentIndex].index, root.screen.name);
         root.requestClose();
     }
     function syncPage() {
-        if (typeof KWinWorkspaceState === "undefined") return;
-        // Never while a window is being dragged. The page a drag has reached is
-        // chosen by the drag itself, but activeWsId only catches up once the
-        // compositor has switched and the tracker's payload has come back over
-        // its socket -- and any activeWsId notification arriving before that
-        // still carries the desktop the drag started on. Acting on it snaps the
-        // view back to that page, so the drop then finds the window already
-        // where it is and does nothing: the card flies home and the drag looks
-        // like it was ignored.
         if (root.isDragging) return;
-        for (let i = 0; i < KWinWorkspaceState.workspaces.length; ++i) {
-            const wId = KWinWorkspaceState.workspaces[i].index;
+        for (let i = 0; i < Kwin.workspaces.length; ++i) {
+            const wId = Kwin.workspaces[i].index;
             if (wId === activeWsId) {
                 if (listView.currentIndex !== i) {
                     listView.currentIndex = i;
-                    if (!root._initialized) listView.positionViewAtIndex(i, ListView.SnapPosition);
                 }
+                if (!root._initialized || root.opacity <= 0.01)
+                    listView.positionViewAtIndex(i, ListView.SnapPosition);
                 break;
             }
         }
@@ -168,10 +125,9 @@ Item {
     onOpacityChanged: {
         if (opacity <= 0) {
             selectedIndex = -1;
-            // A card destroyed mid-drag never reports the drag ending, and a
-            // stuck flag would leave syncPage() disabled for good.
             root.isDragging = false;
         } else {
+            root.syncPage();
             if (Visibilities.preOverviewActiveWindowAddress !== "") {
                 const targetAddress = Visibilities.preOverviewActiveWindowAddress;
                 let foundIndex = -1;
@@ -184,22 +140,19 @@ Item {
                         }
                     }
                 }
-                root.selectedIndex = foundIndex; // -1 if not found
+                root.selectedIndex = foundIndex;
             } else {
                 root.selectedIndex = -1;
             }
         }
     }
-    onActiveWsIdChanged: Qt.callLater(syncPage)
+    onActiveWsIdChanged: root.syncPage()
     Component.onCompleted: {
-        if (typeof KWinWorkspaceState !== "undefined") {
-            const count = KWinWorkspaceState.workspaces.length;
-            for (let i = 0; i < count; ++i) {
-                workspaceModel.append({});
-            }
-        } else {
+        const count = Kwin.workspaces.length;
+        for (let i = 0; i < count; ++i) {
             workspaceModel.append({});
         }
+
         Qt.callLater(syncPage);
     }
 
@@ -243,7 +196,7 @@ Item {
     }
     Connections {
         function onWorkspacesChanged() {
-            const newCount = KWinWorkspaceState.workspaces.length;
+            const newCount = Kwin.workspaces.length;
             while (workspaceModel.count < newCount) {
                 workspaceModel.append({});
             }
@@ -252,12 +205,12 @@ Item {
             }
         }
 
-        target: typeof KWinWorkspaceState !== "undefined" ? KWinWorkspaceState : null
+        target: Kwin
     }
     ListView {
         id: listView
 
-        property real rawSwipeOffset: typeof KWinWorkspaceState !== "undefined" ? (KWinWorkspaceState.swipeOffsetByOutput?.[root.screen.name] ?? KWinWorkspaceState.swipeOffset) : 0.0
+        property real rawSwipeOffset: Kwin.swipeOffsetByOutput?.[root.screen.name] ?? Kwin.swipeOffset
 
         property real targetContentX: (currentIndex + rawSwipeOffset) * width
 
@@ -266,21 +219,15 @@ Item {
         anchors.bottomMargin: verticalOffset
         orientation: ListView.Horizontal
         highlightRangeMode: ListView.NoHighlightRange
-        cacheBuffer: 100000 // Keep all pages instantiated to prevent drag-and-drop interruption
+        cacheBuffer: 100000
         boundsBehavior: Flickable.StopAtBounds
-        interactive: false // Disable native scroll to prevent fighting KWin swipe tracking
+        interactive: false
         contentX: root._initialized ? targetContentX : currentIndex * width
         model: workspaceModel
 
         onCountChanged: Qt.callLater(root.syncPage)
         onCurrentIndexChanged: {
             if (root.ignoreNextSwitch) return;
-            // Not while a window is being dragged. Switching the compositor's
-            // desktop cancels the pointer grab the drag is riding on, so the
-            // drag ended the instant the first page turned and the window was
-            // dropped on the page it had just reached -- holding on could never
-            // carry it further. The view still pages; the desktop catches up
-            // once the drag is over.
             if (root.isDragging) return;
             switchTimer.restart();
         }
@@ -289,32 +236,27 @@ Item {
             id: page
 
             required property int index
-            readonly property int wsId: (typeof KWinWorkspaceState !== "undefined" && KWinWorkspaceState.workspaces && index < KWinWorkspaceState.workspaces.length) ? KWinWorkspaceState.workspaces[index].index : index + 1
-            readonly property string wsName: (typeof KWinWorkspaceState !== "undefined" && KWinWorkspaceState.workspaces && index < KWinWorkspaceState.workspaces.length) ? KWinWorkspaceState.workspaces[index].name : wsId.toString()
+            readonly property int wsId: (Kwin.workspaces && index < Kwin.workspaces.length) ? Kwin.workspaces[index].index : index + 1
+            readonly property string wsName: (Kwin.workspaces && index < Kwin.workspaces.length) ? Kwin.workspaces[index].name : wsId.toString()
             property var wsWindows: []
-            readonly property var _winTrigger: typeof KWinActiveWindowBridge !== "undefined" ? KWinActiveWindowBridge.windowList : null
-            readonly property var _hyprTrigger: (typeof Hypr !== "undefined" && Hypr.toplevels) ? Hypr.toplevels.values : null
+            readonly property var _winTrigger: Kwin.windowList
+            // Read here so a filter change re-runs the page, the way window changes do.
+            readonly property var _appFilter: Visibilities.overviewAppFilter
 
-            function _updateWsWindows() {
-                const kwinList = typeof KWinActiveWindowBridge !== "undefined" ? KWinActiveWindowBridge.windowList : null;
-                const hyprList = (typeof Hypr !== "undefined" && Hypr.toplevels) ? Hypr.toplevels.values : null;
+            // A new array rebuilds every card on the page, and a title or geometry change is
+            // enough for one. While the overview is hidden that happens for nothing, so the
+            // page catches up when it is shown instead.
+            readonly property bool _shown: root.opacity > 0
 
-                let arr = [];
-                if (kwinList) {
-                    arr = KWinActiveWindowBridge.windowsForWorkspace(wsId, false).filter(w => w.output === root.screen.name);
-                } else if (hyprList) {
-                    for (let i = 0; i < hyprList.length; ++i) {
-                        const w = hyprList[i];
-                        if (w.workspace && w.workspace.id === wsId) {
-                            arr.push(w);
-                        }
-                    }
-                }
+            function _updateWsWindows(): void {
+                const arr = root.gridWindows(wsId);
 
                 let changed = arr.length !== wsWindows.length;
                 if (!changed) {
                     for (let i = 0; i < arr.length; ++i) {
-                        if (arr[i].address !== wsWindows[i].address) {
+                        const a = arr[i];
+                        const b = wsWindows[i];
+                        if (a.address !== b.address || a.width !== b.width || a.height !== b.height || a.x !== b.x || a.y !== b.y || a.title !== b.title) {
                             changed = true;
                             break;
                         }
@@ -326,15 +268,16 @@ Item {
                 }
             }
 
-            on_WinTriggerChanged: _updateWsWindows()
-            on_HyprTriggerChanged: _updateWsWindows()
+            on_WinTriggerChanged: if (_shown) _updateWsWindows()
+            on_AppFilterChanged: _updateWsWindows()
             onWsIdChanged: _updateWsWindows()
+            on_ShownChanged: if (_shown) _updateWsWindows()
 
             width: listView.width
             height: listView.height
             Component.onCompleted: {
                 _updateWsWindows();
-                //console.log("WindowGrid Page initialized. wsId:", wsId, "windows found:", wsWindows.length, "Total windows globally:", typeof KWinActiveWindowBridge !== "undefined" ? KWinActiveWindowBridge.windowList.length : -1);
+                //console.log("WindowGrid Page initialized. wsId:", wsId, "windows found:", wsWindows.length, "Total windows globally:", Kwin.windowList.length);
             }
             onWsWindowsChanged: {
                 //console.log("WindowGrid Page updated. wsId:", wsId, "windows found:", wsWindows.length);
@@ -345,16 +288,6 @@ Item {
             }
             DropArea {
                 anchors.fill: parent
-                // Accepted only when this page actually took the window in.
-                //
-                // Qt re-resolves which DropArea a drag is over on drag movement,
-                // not when the scene moves underneath it. Paging by holding the
-                // drag against an edge does exactly that -- the pages scroll
-                // while the pointer is deliberately still -- so the drag is
-                // still registered against the page it started on. Accepting
-                // there regardless reported the drop as handled, and the card's
-                // own release path, which goes by the page actually on screen,
-                // never ran: the workspace changed and the window stayed behind.
                 onDropped: drop => {
                     const sourceItem = drop.source;
                     if (sourceItem && sourceItem.clientAddress) {
@@ -363,11 +296,7 @@ Item {
                             const addr = sourceItem.clientAddress;
                             const targetId = page.wsId;
                             Qt.callLater(() => {
-                                if (typeof KWinActiveWindowBridge !== "undefined") {
-                                    KWinActiveWindowBridge.setWindowDesktop(addr, targetId);
-                                } else {
-                                    Hypr.dispatch(Hypr.usingLua ? `hl.dsp.movetoworkspace({ workspace = "${targetId}", window = "address:0x${addr}" })` : `movetoworkspace ${targetId},address:0x${addr}`);
-                                }
+                                Kwin.setWindowDesktop(addr, targetId);
                             });
                             drop.accept();
                         }
@@ -403,24 +332,9 @@ Item {
 
                             property bool closing: false
                             property url infoScreenshot: ""
-                            /// Set by a workspace thumbnail's DropArea while the
-                            /// card hovers it, so the card shrinks to the size it
-                            /// would occupy there. 0 means "not over one".
                             property real dropTargetScale: 0
-                            /// Over a workspace thumbnail: the preview collapses
-                            /// into the application's icon, the way a window does
-                            /// when it is dropped onto a workspace in GNOME. It is
-                            /// what the slot will actually contain once dropped, so
-                            /// the drag shows its own result; dragging back out
-                            /// reverses it.
                             readonly property bool morphed: dragHandler.active && activeWin.dropTargetScale > 0
 
-                            // The pointer, not the card's middle. The card is held
-                            // wherever it was grabbed, so its centre sits at an
-                            // offset that drifts across boundaries on its own --
-                            // enough to cross the screen edge while the pointer was
-                            // still well inside it, which read as leaving the screen
-                            // and reset the edge dwell every time it wobbled.
                             function publishDrag(): void {
                                 if (!dragHandler.active)
                                     return;
@@ -437,10 +351,6 @@ Item {
                             scale: {
                                 if (closing)
                                     return 0;
-                                // Dragged onto a workspace thumbnail: shrink to
-                                // roughly what it will look like once dropped, so
-                                // the target reads as a target rather than the
-                                // card just floating over it.
                                 if (dragHandler.active && activeWin.dropTargetScale > 0)
                                     return activeWin.dropTargetScale;
                                 return activeWin.isSelected && !dragHandler.active ? root.hoverScale : 1;
@@ -452,9 +362,6 @@ Item {
                             border.width: activeWin.isSelected && !activeWin.morphed ? 2 : 0
                             border.color: Colours.palette.m3primary
 
-                            // Published on every move so the screen the pointer
-                            // has reached can draw what is coming; this one cannot
-                            // draw past its own edge.
                             onXChanged: activeWin.publishDrag()
                             onYChanged: activeWin.publishDrag()
 
@@ -490,84 +397,67 @@ Item {
                                     if (!active) {
                                         activeWin.dropTargetScale = 0;
                                         Visibilities.clearDrag();
-                                        // Held back for the length of the drag; the
-                                        // desktop follows the page the drag landed on.
                                         switchTimer.restart();
 
-                                        if (typeof KWinWorkspaceState === "undefined" || typeof KWinActiveWindowBridge === "undefined") return;
 
-                                        // Checked before Drag.drop(), not after.
-                                        // Each screen has its own overview in its
-                                        // own window, so a drag can never be handed
-                                        // to the other one's drop areas -- but the
-                                        // pointer does travel there and the card
-                                        // goes with it, so where it was let go is
-                                        // enough to act on. This one's drop areas
-                                        // still claim a release out there, though,
-                                        // and one of them answering first is what
-                                        // made a window dragged to the next monitor
-                                        // land on a workspace of the monitor it came
-                                        // from. Leaving the screen is the stronger
-                                        // signal, so it is read first.
                                         const target = root.screenAtGlobal(Visibilities.dragX, Visibilities.dragY);
                                         if (target && target.name !== root.screen.name) {
                                             const addr = clientAddress;
                                             activeWin.Drag.cancel();
                                             activeWin.visible = false;
                                             Qt.callLater(() => {
-                                                KWinActiveWindowBridge.sendToOutput(addr, target.name);
+                                                Kwin.sendToOutput(addr, target.name);
                                             });
                                             return;
                                         }
 
                                         let dropAction = activeWin.Drag.drop();
                                         if (dropAction !== Qt.IgnoreAction) {
-                                            return; // Handled by DropArea
+                                            return;
                                         }
 
-                                        const targetWsId = KWinWorkspaceState.workspaces[listView.currentIndex].index;
+                                        const targetWsId = Kwin.workspaces[listView.currentIndex].index;
                                         if (targetWsId !== page.wsId) {
                                             activeWin.visible = false;
                                             const addr = clientAddress;
                                             Qt.callLater(() => {
-                                                KWinActiveWindowBridge.setWindowDesktop(addr, targetWsId);
+                                                Kwin.setWindowDesktop(addr, targetWsId);
                                             });
                                         }
                                     }
                                 }
                             }
                             Behavior on scale {
-                                // Slower while a drag is in progress: this is the
-                                // preview collapsing into its icon and opening back
-                                // out, which is meant to be read, not the snap of a
-                                // hover highlight.
                                 Anim {
                                     type: dragHandler.active ? Anim.SlowSpatial : Anim.DefaultSpatial
                                 }
                             }
                             Behavior on opacity {
-                                NumberAnimation {
+                                Anim {
                                     id: opacityAnim
 
-                                    duration: 250
-                                    easing.type: Easing.OutCubic
+                                    type: Anim.DefaultEffects
                                 }
                             }
                             Connections {
                                 function onRunningChanged() {
                                     if (!opacityAnim.running && activeWin.closing) {
-                                        if (typeof KWinActiveWindowBridge !== "undefined") {
-                                            KWinActiveWindowBridge.closeWindow(modelData.address);
-                                        } else {
-                                            Hypr.dispatch(Hypr.usingLua ? `hl.dsp.window.close({ window = "address:0x${modelData.address}" })` : `closewindow address:0x${modelData.address}`);
-                                        }
+                                        Kwin.closeWindow(modelData.address);
                                     }
                                 }
 
                                 target: opacityAnim
                             }
-                            Behavior on x { enabled: !dragHandler.active && root.opacity > 0.5; NumberAnimation { duration: 250; easing.type: Easing.OutQuad } }
-                            Behavior on y { enabled: !dragHandler.active && root.opacity > 0.5; NumberAnimation { duration: 250; easing.type: Easing.OutQuad } }
+                            Behavior on x {
+                                enabled: !dragHandler.active && root.opacity > 0.5
+
+                                Anim { type: Anim.FastSpatial }
+                            }
+                            Behavior on y {
+                                enabled: !dragHandler.active && root.opacity > 0.5
+
+                                Anim { type: Anim.FastSpatial }
+                            }
                             HoverHandler {
                                 id: hover
 
@@ -582,16 +472,11 @@ Item {
                                 }
                             }
 
-                            // The icon the card collapses into over a workspace
-                            // thumbnail. Sized as a share of the card so that the
-                            // card's own drop scale carries it down to icon size --
-                            // one animation drives both, and they cannot drift.
-                            IconImage {
+                            CachingIconImage {
                                 anchors.centerIn: parent
-                                asynchronous: true
                                 implicitSize: Math.round(Math.min(activeWin.width, activeWin.height) * 0.62)
                                 opacity: activeWin.morphed ? 1 : 0
-                                source: modelData.iconName ? Icons.getAppIcon(modelData.iconName, "image-missing") : (modelData.class ? Icons.getAppIcon(modelData.class, "image-missing") : "")
+                                source: WinIcons.sourceForClient(modelData)
                                 visible: opacity > 0.01
                                 z: 10
 
@@ -627,26 +512,10 @@ Item {
                                     radius: Tokens.rounding.medium
 
                                     WindowPreview {
-                                        // Only the page in view and its immediate
-                                        // neighbours: a workspace three swipes away
-                                        // is not worth a stream. The window shown in
-                                        // the info panel is excluded too -- that
-                                        // panel puts up its own frozen frame. And
-                                        // not while something outside the grid has
-                                        // claimed the stream: KWin serves one node
-                                        // per window and a node feeds one consumer,
-                                        // so holding on would leave the other one
-                                        // drawing black.
-                                        // The neighbour rule is about pages that
-                                        // cannot be seen, so it must not apply to a
-                                        // card being carried: a drag held across two
-                                        // pages left its own page two away, and the
-                                        // card in the user's hand collapsed to an
-                                        // icon mid-gesture.
                                         active: root.opacity > 0
                                             && (dragHandler.active || Math.abs(page.index - listView.currentIndex) <= 1)
-                                            && !(root.activeInfoClient && root.activeInfoClient.address === modelData.address)
-                                            && Visibilities.streamClaim !== modelData.address
+                                            && !(root.activeInfoClient && root.activeInfoClient.address === activeWin.clientAddress)
+                                            && Visibilities.streamClaim !== activeWin.clientAddress
                                         address: modelData.address ?? ""
                                         width: {
                                             const wAspect = activeWin.windowAspect;
@@ -659,7 +528,7 @@ Item {
                                             return (wAspect > containerAspect) ? thumb.height : thumb.width / wAspect;
                                         }
                                         anchors.centerIn: parent
-                                        fallbackIcon: root.windowIconSource(modelData)
+                                        fallbackIcon: WinIcons.sourceForClient(modelData)
                                         sourceAspect: activeWin.windowAspect
                                     }
 
@@ -688,7 +557,7 @@ Item {
                                     IconImage {
                                         implicitSize: Math.round(titleText.implicitHeight * 1.1)
                                         asynchronous: true
-                                        source: root.windowIconSource(modelData)
+                                        source: WinIcons.sourceForClient(modelData)
                                     }
                                     StyledText {
                                         id: titleText
@@ -699,8 +568,6 @@ Item {
                                         elide: Text.ElideRight
                                         Layout.fillWidth: true
                                     }
-
-                                    Behavior on opacity { Anim {} }
                                 }
                             }
 
@@ -710,14 +577,8 @@ Item {
                                 stateOpacity: containsMouse || manualHoverOverride ? 0.02 : 0
                                 onClicked: {
                                     if (modelData.address) {
-                                        if (typeof KWinActiveWindowBridge !== "undefined") {
-                                            KWinActiveWindowBridge.focusWindow(modelData.address);
-                                        } else {
-                                            Hypr.dispatch(Hypr.usingLua ? `hl.dsp.focus({ window = "address:0x${modelData.address}" })` : `focuswindow address:0x${modelData.address}`);
-                                        }
-                                        if (typeof KWinWorkspaceState !== "undefined") {
-                                            KWinWorkspaceState.switchTo(page.wsId, root.screen.name);
-                                        }
+                                        Kwin.focusWindow(modelData.address);
+                                        Kwin.switchToWorkspace(page.wsId, root.screen.name);
                                     }
                                     if (typeof Visibilities !== "undefined")
                                         Visibilities.setOverview(false);
@@ -729,9 +590,6 @@ Item {
                                 anchors.right: cardLayout.right
                                 anchors.margins: Tokens.padding.small
                                 spacing: Tokens.spacing.small
-                                // Hidden for the whole drag: it belongs to the
-                                // card sitting in the grid, and left up it hovers
-                                // over the collapsed icon with nothing to act on.
                                 opacity: hover.hovered && !dragHandler.active ? 1 : 0
                                 visible: opacity > 0.01
 
@@ -802,15 +660,10 @@ Item {
 
             interval: 50
             onTriggered: {
-                if (typeof KWinWorkspaceState !== "undefined" && KWinWorkspaceState.workspaces.length > listView.currentIndex) {
-                    const wId = KWinWorkspaceState.workspaces[listView.currentIndex].index;
-                    // Compared against this screen's desktop, not the global
-                    // activeId: with per-output desktops the global one belongs
-                    // to whichever screen is focused, so testing against it made
-                    // this fire on the screen that had not moved and stay quiet
-                    // on the one that had.
+                if (Kwin.workspaces.length > listView.currentIndex) {
+                    const wId = Kwin.workspaces[listView.currentIndex].index;
                     if (root.activeWsId !== wId) {
-                        KWinWorkspaceState.switchTo(wId, root.screen.name);
+                        Kwin.switchToWorkspace(wId, root.screen.name);
                     }
                 }
             }
@@ -837,8 +690,8 @@ Item {
             enabled: root._initialized
 
             NumberAnimation {
-                duration: rawSwipeOffset === 0.0 ? 300 : 0
-                easing.type: rawSwipeOffset === 0.0 ? Easing.OutCubic : Easing.Linear
+                duration: listView.rawSwipeOffset === 0.0 ? Tokens.anim.duration(300) : 0
+                easing.type: listView.rawSwipeOffset === 0.0 ? Easing.OutCubic : Easing.Linear
             }
         }
     }
@@ -847,16 +700,17 @@ Item {
 
         anchors.bottom: parent.bottom
         anchors.horizontalCenter: parent.horizontalCenter
-        anchors.bottomMargin:Tokens.padding.large
-        implicitWidth: workspaceIndicator.implicitWidth + Tokens.padding.large * 2
-        implicitHeight: workspaceIndicator.implicitHeight + Tokens.padding.medium * 2
-        radius: Tokens.rounding.large
+        anchors.bottomMargin: Tokens.padding.large * root.indicatorScale
+        implicitWidth: workspaceIndicator.implicitWidth + (Tokens.padding.large * 2) * root.indicatorScale
+        implicitHeight: workspaceIndicator.implicitHeight + (Tokens.padding.medium * 2) * root.indicatorScale
+        radius: Tokens.rounding.large * root.indicatorScale
         color: Colours.layer(Colours.palette.m3surfaceContainerHigh, 2)
 
         WorkspaceIndicator {
             id: workspaceIndicator
 
             anchors.centerIn: parent
+            baseScale: root.indicatorScale
             maxWidth: Math.max(200, root.width - 100)
             screenName: root.screen.name
             count: listView.count
@@ -869,11 +723,7 @@ Item {
             onWorkspaceReselected: root.requestClose()
             onCreateWorkspaceRequest: {
                 root.ignoreNextSwitch = true;
-                if (typeof KWinWorkspaceState !== "undefined") {
-                    KWinWorkspaceState.createWorkspace();
-                } else if (typeof Hypr !== "undefined") {
-                    Hypr.dispatch("workspace empty");
-                }
+                Kwin.createWorkspace();
                 ignoreTimer.restart();
             }
         }
@@ -884,22 +734,14 @@ Item {
         interval: 500
         onTriggered: root.ignoreNextSwitch = false
     }
-    // What a drag arriving from another screen looks like here.
-    //
-    // The card itself belongs to the overview it started in and is clipped at
-    // that screen's edge, so without this a window dragged across simply
-    // disappears halfway and is released onto nothing visible. This follows the
-    // published pointer position and shows the same live preview the card was
-    // showing, so the window keeps its identity across the gap rather than
-    // turning into an icon on the way.
     Item {
         id: incoming
 
         readonly property var window: {
             const addr = Visibilities.dragAddress;
-            if (!addr || typeof KWinActiveWindowBridge === "undefined")
+            if (!addr)
                 return null;
-            const all = KWinActiveWindowBridge.windowList || [];
+            const all = Kwin.windowList || [];
             for (let i = 0; i < all.length; ++i)
                 if (all[i].address === addr)
                     return all[i];
@@ -918,8 +760,6 @@ Item {
             return 16 / 9;
         }
 
-        // The size the card had on the screen it left, so crossing the gap does
-        // not resize the thing being carried.
         height: Visibilities.dragHeight > 0 ? Visibilities.dragHeight : Math.round(width / Math.max(0.2, incoming.aspect))
         opacity: arriving ? 1 : 0
         visible: opacity > 0.01
@@ -928,8 +768,6 @@ Item {
         y: Visibilities.dragY - root.screen.y - height / 2
         z: 1000
 
-        // Claimed while it is here so the card back on the origin screen gives
-        // the stream up; a node feeds one consumer.
         onArrivingChanged: Visibilities.streamClaim = incoming.arriving ? Visibilities.dragAddress : ""
 
         Behavior on opacity {
@@ -947,35 +785,15 @@ Item {
                 active: incoming.arriving
                 address: Visibilities.dragAddress
                 anchors.fill: parent
-                fallbackIcon: {
-                    const w = incoming.window;
-                    if (!w)
-                        return "";
-                    return w.iconName ? Icons.getAppIcon(w.iconName, "image-missing") : (w.class ? Icons.getAppIcon(w.class, "image-missing") : "");
-                }
+                fallbackIcon: incoming.window ? WinIcons.sourceForClient(incoming.window) : ""
                 sourceAspect: incoming.aspect
             }
         }
     }
 
-    // Holding a drag against an edge pages through workspaces, one step at a
-    // time for as long as it is held.
-    //
-    // It used to page the instant the drag touched the edge, which made the
-    // edge unusable as a way off the screen: on a side with another monitor,
-    // simply travelling towards it paged a workspace on the way past. Waiting
-    // for the drag to actually rest there separates the two gestures -- pass
-    // through and you reach the next monitor, stop and you page -- so both work
-    // on the same edge without a mode.
     Timer {
         id: edgeDwell
 
-        // running is bound rather than started and stopped by hand. A drag
-        // released while still inside an edge area never delivers an exit, so
-        // the stop call that was meant to pair with the start never arrived and
-        // the timer kept paging on its own long after the pointer was gone --
-        // workspaces flipping by themselves with nothing held. Tying it to the
-        // drag itself means it cannot outlive one.
         interval: 900
         repeat: true
         running: root.isDragging && root.edgeDirection !== 0
@@ -992,7 +810,7 @@ Item {
         anchors.leftMargin: Tokens.padding.large
         implicitWidth: prevIcon.implicitWidth + Tokens.padding.large * 2
         implicitHeight: prevIcon.implicitHeight + Tokens.padding.large * 2
-        radius: height / 2
+        radius: Tokens.rounding.full
         color: Colours.tPalette.m3surfaceContainerHigh
         opacity: hoverPrev.hovered ? 1 : 0.6
         visible: listView.currentIndex > 0
@@ -1018,7 +836,7 @@ Item {
         anchors.rightMargin: Tokens.padding.large
         implicitWidth: nextIcon.implicitWidth + Tokens.padding.large * 2
         implicitHeight: nextIcon.implicitHeight + Tokens.padding.large * 2
-        radius: height / 2
+        radius: Tokens.rounding.full
         color: Colours.tPalette.m3surfaceContainerHigh
         opacity: hoverNext.hovered ? 1 : 0.6
         visible: listView.currentIndex < listView.count - 1

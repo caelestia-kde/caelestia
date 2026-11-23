@@ -12,13 +12,12 @@ ColumnLayout {
 
     required property PopoutState popouts
 
-    // Injected by Content.qml's Popout.
     property real scaleOffset: 1.0
     property real fontScale: 1.0
     property bool _isSidebarOpen: false
 
-    width: Math.max(300 * scaleOffset, _isSidebarOpen ? (Tokens.sizes.sidebar.width * scaleOffset) - Tokens.padding.extraLargeIncreased : 0)
-    implicitWidth: Math.max(300 * scaleOffset, _isSidebarOpen ? (Tokens.sizes.sidebar.width * scaleOffset) - Tokens.padding.extraLargeIncreased : 0)
+    width: Math.max(300 * scaleOffset, _isSidebarOpen ? (Visibilities.sidebarWidthFor(Tokens.sizes.sidebar.width) * scaleOffset) - Tokens.padding.extraLargeIncreased : 0)
+    implicitWidth: Math.max(300 * scaleOffset, _isSidebarOpen ? (Visibilities.sidebarWidthFor(Tokens.sizes.sidebar.width) * scaleOffset) - Tokens.padding.extraLargeIncreased : 0)
     spacing: Tokens.spacing.medium * scaleOffset
 
     StyledText {
@@ -45,14 +44,17 @@ ColumnLayout {
             y: Tokens.padding.medium * root.scaleOffset
             spacing: Tokens.spacing.medium * root.scaleOffset
 
-            Toggle {
+            PopoutToggleRow {
+                scaleOffset: root.scaleOffset
+                fontScale: root.fontScale
+                rightMargin: Tokens.padding.small * root.scaleOffset
                 label: qsTr("Do not disturb")
-                checked: Notifs.dnd
+                checked: Notifs.quiet
                 toggle.onToggled: Notifs.dnd = checked
             }
 
             StyledText {
-                text: Notifs.dnd ? qsTr("Notifications off") : qsTr("%1 unread").arg(Notifs.openCount)
+                text: Notifs.quiet ? qsTr("Notifications off") : qsTr("%1 unread").arg(Notifs.openCount)
                 color: Colours.palette.m3onSurfaceVariant
                 font.pointSize: Tokens.font.body.small.pointSize * root.fontScale
             }
@@ -68,25 +70,5 @@ ColumnLayout {
         icon: "clear_all"
 
         onClicked: Notifs.clear()
-    }
-
-    component Toggle: RowLayout {
-        required property string label
-        property alias checked: toggle.checked
-        property alias toggle: toggle
-
-        Layout.fillWidth: true
-        Layout.rightMargin: Tokens.padding.small * root.scaleOffset
-        spacing: Tokens.spacing.medium * root.scaleOffset
-
-        StyledText {
-            Layout.fillWidth: true
-            text: parent.label
-            font.pointSize: Tokens.font.body.medium.pointSize * root.fontScale
-        }
-
-        StyledSwitch {
-            id: toggle
-        }
     }
 }

@@ -4,35 +4,11 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import Caelestia.Config
+import Caelestia.Images
 
-// How the shell starts other people's applications.
-//
-// Spawning them as plain children hands them the shell's stdio, and the shell
-// may have been started detached (`quickshell -d`, `caelestia shell -d`), which
-// points stdout and stderr at /dev/null. Vesktop deadlocks when a call starts
-// in exactly that state - issue #402, reproducible on its own with
-// `vesktop >/dev/null 2>&1`.
-//
-// So the launch is wrapped in systemd-cat, which execs the application with
-// its output on the journal and changes nothing else about how it runs.
-//
-// Nothing else about it, deliberately. Launching applications as transient
-// systemd *services* also fixes this, and additionally gives them the session
-// environment and their own unit - but a service's lifetime is tied to its
-// main process, and desktop launchers do not survive that. Heroic gets moved
-// into KDE's own app-heroic-<pid>.scope as soon as its window appears, which
-// empties the unit systemd was watching; systemd then tears the unit down and
-// signals whatever is still in the cgroup, which is the game. umu-run dies in
-// its signal handler and the game is left on a blank window.
-//
-// app2unit stays available for anyone who wants the app in its own unit, under
-// services.useSystemd. It uses a scope by default, which does not have the
-// lifetime problem a service does.
 Singleton {
     id: root
 
-    // Set once the probe below has run. Until then launches use the plain
-    // command, which is the old behaviour rather than a failure.
     property bool hasSystemdCat: false
     property bool hasApp2Unit: false
 
@@ -55,20 +31,55 @@ Singleton {
         return ["systemd-run", "--user", "--scope", "--quiet", "--", ...command];
     }
 
-    /// Launches a command, detached from the shell.
     function exec(command: list<string>): void {
         if (command.length > 0)
             Quickshell.execDetached(root.wrap(command));
     }
 
-    /// Launches a desktop entry, honouring its working directory and its
-    /// request to run in a terminal.
+    /// Whether `url` names a web page. The two callers that need this — a link in a
+    /// notification body and a portal's redirect — both act on text someone else
+    /// chose, and only a page may be opened from either.
+    function isWebUrl(url: string): bool {
+        return /^https?:\/\//i.test(url || "");
+    }
+
+    /// Opens a link clicked in a notification. The URL is sender-controlled text, so
+    /// only web and mail links go through: another scheme (`file://`, `smb://`, an
+    /// application's own handler) would turn one click into whatever the sender named.
+    function openUrl(url: string): void {
+        if (!root.isWebUrl(url) && !/^mailto:/i.test(url || ""))
+            return;
+
+        Qt.openUrlExternally(url);
+    }
+
+    /// Whether KDE ships a settings module by this name. Printing, the on-screen
+    /// keyboard and the accessibility options stay KDE's to own: the shell gives them a
+    /// front door, and says so when the module is missing rather than opening a dead page.
+    function kcmAvailable(name: string): bool {
+        const dirs = ["/usr/lib/qt6/plugins/plasma/kcms/systemsettings", "/usr/lib64/qt6/plugins/plasma/kcms/systemsettings"];
+        return dirs.some(dir => IUtils.fileExists(`${dir}/${name}.so`));
+    }
+
+    /// Opens one of those modules.
+    function kcm(name: string): void {
+        root.exec(["systemsettings", name]);
+    }
+
+    function terminalCommand(command: list<string>): list<string> {
+        return [...GlobalConfig.general.apps.terminal, `${Quickshell.shellDir}/assets/wrap_term_launch.sh`, ...command];
+    }
+
+    function launchInTerminal(command: list<string>, workingDirectory: string): void {
+        Quickshell.execDetached({
+            command: root.wrap(root.terminalCommand(command)),
+            workingDirectory: workingDirectory
+        });
+    }
+
     function launchEntry(entry: DesktopEntry): void {
         if (entry.runInTerminal)
-            Quickshell.execDetached({
-                command: root.wrap([...GlobalConfig.general.apps.terminal, `${Quickshell.shellDir}/assets/wrap_term_launch.sh`, ...entry.command]),
-                workingDirectory: entry.workingDirectory
-            });
+            root.launchInTerminal(entry.command, entry.workingDirectory);
         else
             Quickshell.execDetached({
                 command: root.wrap(entry.command),

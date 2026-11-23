@@ -20,6 +20,7 @@ ConnectedRect {
     implicitHeight: navLayout.implicitHeight + navLayout.anchors.margins * 2
 
     StateLayer {
+        manualHoverOverride: root.isSelected
         onClicked: root.clicked()
     }
 
@@ -57,7 +58,7 @@ ConnectedRect {
                 Layout.fillWidth: true
                 visible: text
                 color: Colours.palette.m3onSurfaceVariant
-                font: Tokens.font.label.small
+                font: NexusStyle.secondaryFont
                 elide: Text.ElideRight
                 animate: true
             }

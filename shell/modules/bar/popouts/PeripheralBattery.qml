@@ -1,18 +1,18 @@
 pragma ComponentBehavior: Bound
 
 import QtQuick
+import QtQuick.Layouts
 import Quickshell
 import Quickshell.Services.UPower
 import Caelestia.Config
 import qs.components
 import qs.services
 
-Column {
+ColumnLayout {
     id: root
 
     readonly property var excluded: Config.bar.status.peripheralBatteryExcluded
 
-    // Injected by Content.qml's Popout.
     property real scaleOffset: 1.0
     property real fontScale: 1.0
     property bool _isSidebarOpen: false
@@ -24,15 +24,15 @@ Column {
             values: UPower.devices.values.filter(d => !d.isLaptopBattery && d.type !== UPowerDeviceType.LinePower && d.isPresent && !root.excluded.some(e => e === d.model || e === d.nativePath))
         }
 
-        Row {
+        RowLayout {
             id: peripheralRow
 
             required property UPowerDevice modelData
 
+            Layout.fillWidth: true
             spacing: Tokens.spacing.small * root.scaleOffset
 
             MaterialIcon {
-                anchors.verticalCenter: parent.verticalCenter
                 text: {
                     const t = peripheralRow.modelData.type;
                     if (t === UPowerDeviceType.Mouse || t === UPowerDeviceType.Touchpad)
@@ -56,7 +56,8 @@ Column {
             }
 
             StyledText {
-                anchors.verticalCenter: parent.verticalCenter
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
                 text: (peripheralRow.modelData.model || "Device") + ": " + Math.round(peripheralRow.modelData.percentage * 100) + "%"
                 font.pointSize: Tokens.font.body.medium.pointSize * root.fontScale
             }

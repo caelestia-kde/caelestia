@@ -61,7 +61,7 @@ ConnectedRect {
                 Layout.fillWidth: true
                 visible: text
                 color: Colours.palette.m3onSurfaceVariant
-                font: Tokens.font.label.small
+                font: NexusStyle.secondaryFont
                 elide: Text.ElideRight
                 animate: true
             }
@@ -88,7 +88,7 @@ ConnectedRect {
                         return triggerArea;
 
                     const win = QsWindow.window;
-                    const contentWin = win as ContentWindow; // If inside the drawer content window, put it inside the interaction wrapper so hover works
+                    const contentWin = win as ContentWindow;
                     return contentWin ? contentWin.interactionWrapper : (win as QsWindow).contentItem;
                 }
                 anchors.fill: parent

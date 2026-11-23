@@ -1,7 +1,3 @@
-/*
-    SPDX-FileCopyrightText: 2024 ladybug-me
-    SPDX-License-Identifier: GPL-3.0-or-later
-*/
 
 import QtQuick
 import ".."
@@ -16,8 +12,9 @@ FocusScope {
     property real centerScale: 1.0
     property real centerWidth: 600 * centerScale
     property real pillWidth: 0
-    property bool isAuthenticating: false
-    property bool graceLocked: false
+    property bool pamTimeout: false
+    property bool isAuthenticating: pamTimeout
+    property bool graceLocked: pamTimeout
     property bool hasFingerprint: false
     property bool fprintDisabledDueToTries: false
     property bool lockoutActive: false
@@ -35,17 +32,47 @@ FocusScope {
     property alias text: passwordBox.text
     property real shakeX: 0
 
+    // Shows the typed password as text instead of the shape-per-character drawing the
+    // pill normally shows. Cleared whenever the field empties, so an attempt never
+    // starts with the previous attempt's password on screen.
+    property bool showPassword: false
+    readonly property bool canReveal: !root.pamTimeout
+
     signal loginRequested(string password)
 
+    function focusInput() {
+        if (passwordBox.enabled)
+            passwordBox.forceActiveFocus();
+    }
+
+    property bool isError: false
+
+    Timer {
+        id: errorResetTimer
+        interval: 2000
+        repeat: false
+        onTriggered: root.isError = false
+    }
+
     function shake() {
+        root.isError = true;
+        errorResetTimer.restart();
         rejectAnim.restart();
     }
 
     function clearPassword() {
-        passwordBox.forceActiveFocus();
+        root.isError = false;
+        errorResetTimer.stop();
+        root.showPassword = false;
+        root.focusInput();
         passwordBox.text = "";
         passwordBox.text = Qt.binding(() => PasswordSync.password);
     }
+
+    onActiveFocusChanged: if (activeFocus) root.focusInput()
+    onVisibleChanged: if (visible) root.focusInput()
+
+    Component.onCompleted: root.focusInput()
 
     readonly property var shapeQueue: {
         var shapes = [
@@ -65,7 +92,7 @@ FocusScope {
 
     TextMetrics {
         id: placeholderMetrics
-        text: root.isAuthenticating ? qsTr("Loading...") : (root.graceLocked ? qsTr("Please wait...") : (root.lockoutActive && root.lockoutText.length > 0 ? root.lockoutText : qsTr("Enter your password")))
+        text: root.pamTimeout ? qsTr("Please wait...") : (root.lockoutActive && root.lockoutText.length > 0 ? root.lockoutText : qsTr("Enter your password"))
         font { pixelSize: Math.max(11, Math.round(13 * root.centerScale)); family: LockScreenConfig.fontHeading; weight: Font.Normal }
     }
 
@@ -103,14 +130,14 @@ FocusScope {
         anchors.fill: parent
         radius: height / 2
         color: root.clSurfaceContainer
-        border.color: root.lockoutActive ? root.clError : "transparent"
-        border.width: root.lockoutActive ? Math.max(1, Math.round(1.5 * root.centerScale)) : 0
+        border.color: (root.lockoutActive || root.graceLocked || root.isError || rejectAnim.running) ? root.clError : "transparent"
+        border.width: (root.lockoutActive || root.graceLocked || root.isError || rejectAnim.running) ? Math.max(1, Math.round(1.5 * root.centerScale)) : 0
         Behavior on border.color { ColorAnimation { duration: 250 } }
 
         MouseArea {
             anchors.fill: parent
             cursorShape: Qt.IBeamCursor
-            onClicked: passwordBox.forceActiveFocus()
+            onClicked: root.focusInput()
         }
 
         RowLayout {
@@ -119,7 +146,6 @@ FocusScope {
             anchors.rightMargin: Math.max(4, Math.round(6 * root.centerScale))
             spacing: Math.max(3, Math.round(6 * root.centerScale))
 
-            // Left: Lock / Fingerprint Icon / Spinner
             Item {
                 id: iconWrapper
                 Layout.preferredWidth: Math.max(16, Math.round(22 * root.centerScale))
@@ -128,12 +154,19 @@ FocusScope {
 
                 Text {
                     anchors.centerIn: parent
-                    text: root.fprintDisabledDueToTries ? "fingerprint_off" : (root.hasFingerprint ? "fingerprint" : "lock")
+                    text: root.showPassword ? "visibility" : (root.fprintDisabledDueToTries ? "fingerprint_off" : (root.hasFingerprint ? "fingerprint" : "lock"))
                     font.family: LockScreenConfig.fontIcon
                     font.pixelSize: Math.max(12, Math.round(16 * root.centerScale))
-                    color: (root.graceLocked || root.lockoutActive) ? root.clError : (root.fprintDisabledDueToTries ? root.clError : root.clSurfaceVariantFg)
+                    color: (root.graceLocked || root.lockoutActive || root.isError || rejectAnim.running) ? root.clError : (root.fprintDisabledDueToTries ? root.clError : root.clSurfaceVariantFg)
                     visible: !root.isAuthenticating
                     Behavior on color { ColorAnimation { duration: 250 } }
+                }
+
+                MouseArea {
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: root.canReveal ? Qt.PointingHandCursor : Qt.ArrowCursor
+                    onClicked: if (root.canReveal) root.showPassword = !root.showPassword
                 }
 
                 Item {
@@ -153,7 +186,6 @@ FocusScope {
                 }
             }
 
-            // Middle: Placeholder & Animated Material Shapes
             Item {
                 id: inputContainer
                 Layout.fillWidth: true
@@ -179,11 +211,12 @@ FocusScope {
                     id: charList
                     anchors.centerIn: parent
                     orientation: Qt.Horizontal
-                    spacing: 6 * root.centerScale
-                    height: 18 * root.centerScale
+                    spacing: 4 * root.centerScale
+                    height: 14 * root.centerScale
                     width: Math.min(parent.width, (count * height) + Math.max(0, count - 1) * spacing)
                     model: charModel
                     interactive: false
+                    visible: !root.showPassword
 
                     delegate: Item {
                         id: ch
@@ -234,6 +267,21 @@ FocusScope {
                     }
                 }
 
+                Text {
+                    anchors.fill: parent
+                    anchors.leftMargin: 2
+                    anchors.rightMargin: 2
+                    elide: Text.ElideMiddle
+                    font.family: LockScreenConfig.fontBody
+                    font.pixelSize: Math.max(11, Math.round(14 * root.centerScale))
+                    color: root.clSurfaceFg
+                    horizontalAlignment: Text.AlignHCenter
+                    maximumLineCount: 1
+                    text: root.showPassword ? passwordBox.text : ""
+                    verticalAlignment: Text.AlignVCenter
+                    visible: root.showPassword && passwordBox.text.length > 0
+                }
+
                 TextInput {
                     id: passwordBox
                     anchors.fill: parent
@@ -242,10 +290,12 @@ FocusScope {
                     cursorDelegate: Item {}
                     echoMode: TextInput.NoEcho
                     focus: true
-                    enabled: !root.graceLocked && !root.isAuthenticating
+                    enabled: !root.pamTimeout
                     text: PasswordSync.password
 
                     onTextChanged: {
+                        // Never leave a revealed password on screen once the field empties
+                        if (text.length === 0) root.showPassword = false;
                         var targetLen = text.length;
                         while (charModel.count < targetLen) {
                             var idx = charModel.count;
@@ -256,12 +306,18 @@ FocusScope {
                         }
                     }
 
-                    onAccepted: if (!root.graceLocked && !root.isAuthenticating) root.loginRequested(passwordBox.text)
+                    onTextEdited: {
+                        if (root.isError) {
+                            root.isError = false;
+                            errorResetTimer.stop();
+                        }
+                    }
+
+                    onAccepted: if (!root.pamTimeout) root.loginRequested(passwordBox.text)
                 }
                 Binding { target: PasswordSync; property: "password"; value: passwordBox.text }
             }
 
-            // Right: MaterialShape Enter Arrow / Circle Button
             Item {
                 id: enterButton
                 implicitWidth: Math.max(20, Math.round(28 * root.centerScale))
@@ -273,7 +329,7 @@ FocusScope {
                 MaterialShape {
                     id: enterShape
                     anchors.fill: parent
-                    color: passwordBox.text.length > 0 ? ((root.graceLocked || root.lockoutActive) ? root.clError : root.clPrimary) : root.clSurfaceContainerHigh
+                    color: passwordBox.text.length > 0 ? ((root.pamTimeout || root.lockoutActive) ? root.clError : root.clPrimary) : root.clSurfaceContainerHigh
                     shape: passwordBox.text.length > 0 ? MaterialShape.Arrow : MaterialShape.Circle
                     rotation: 90
                     scale: passwordBox.text.length === 0 ? 1.0 : (enterMouse.pressed ? 0.6 : (enterMouse.containsMouse ? 0.8 : 0.7))
@@ -285,8 +341,12 @@ FocusScope {
                         id: enterMouse
                         anchors.fill: parent
                         hoverEnabled: true
-                        cursorShape: (passwordBox.text.length > 0 && !root.graceLocked && !root.isAuthenticating) ? Qt.PointingHandCursor : Qt.ArrowCursor
-                        onClicked: if (passwordBox.text.length > 0 && !root.isAuthenticating && !root.graceLocked) root.loginRequested(passwordBox.text)
+                        cursorShape: (passwordBox.text.length > 0 && !root.pamTimeout) ? Qt.PointingHandCursor : Qt.ArrowCursor
+                        onClicked: {
+                            root.focusInput();
+                            if (passwordBox.text.length > 0 && !root.pamTimeout)
+                                root.loginRequested(passwordBox.text);
+                        }
                     }
                 }
 

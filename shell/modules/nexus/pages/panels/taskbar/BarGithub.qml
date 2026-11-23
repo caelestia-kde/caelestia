@@ -17,8 +17,6 @@ PageBase {
     title: qsTr("GitHub")
     isSubPage: true
 
-    // Report what the widget currently knows, so a missing or rejected token is
-    // visible here - the page that fixes it - instead of only in the shell log.
     readonly property bool githubProblem: BarComponents.GithubStore.tokenMissing || BarComponents.GithubStore.lastError !== ""
 
     readonly property string githubStatusLabel: {
@@ -47,10 +45,11 @@ PageBase {
     readonly property color githubStatusColour: githubProblem ? Colours.palette.m3error : Colours.palette.m3onSurfaceVariant
 
     function saveToken(token: string): void {
+        saveProc.environment = ({ CAELESTIA_GITHUB_TOKEN: token });
         if (!token) {
             saveProc.command = ["secret-tool", "clear", "service", "caelestia-shell", "account", "github"];
         } else {
-            saveProc.command = ["bash", "-c", "secret-tool store --label=\"Caelestia GitHub Token\" service caelestia-shell account github <<< \"$1\"", "--", token];
+            saveProc.command = ["bash", "-c", "printf %s \"$CAELESTIA_GITHUB_TOKEN\" | secret-tool store --label=\"Caelestia GitHub Token\" service caelestia-shell account github"];
         }
         saveProc.running = true;
     }
@@ -100,6 +99,7 @@ PageBase {
             Layout.fillWidth: true
             text: qsTr("Component background")
             subtext: qsTr("Render a solid background behind the GitHub activity widget")
+            reset: ({ node: GlobalConfig.bar.github, setting: "background" })
             checked: Config.bar.github.background
             onToggled: GlobalConfig.bar.github.background = checked
         }
@@ -137,7 +137,7 @@ PageBase {
 
                     StyledText {
                         text: qsTr("Used to fetch your contribution graph (read:user)")
-                        font: Tokens.font.label.small
+                        font: NexusStyle.secondaryFont
                         color: Colours.palette.m3onSurfaceVariant
                         elide: Text.ElideRight
                     }

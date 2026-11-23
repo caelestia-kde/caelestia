@@ -1,7 +1,8 @@
 #include "configattached.hpp"
-#include "rootnodes.hpp"
 
 #include <qquickitem.h>
+
+#include "rootnodes.hpp"
 
 namespace caelestia::config {
 
@@ -56,7 +57,7 @@ void Config::attachedParentChange(
     const Type* Config::name() const {                                                                                 \
         if (m_config)                                                                                                  \
             return m_config->name();                                                                                   \
-        return ConfigSingleton::instance()->name();                                                                       \
+        return ConfigSingleton::instance()->name();                                                                    \
     }
 
 CONFIG_ATTACHED_GETTER(AppearanceConfig, appearance)
@@ -65,6 +66,7 @@ CONFIG_ATTACHED_GETTER(BackgroundConfig, background)
 CONFIG_ATTACHED_GETTER(BarConfig, bar)
 CONFIG_ATTACHED_GETTER(BorderConfig, border)
 CONFIG_ATTACHED_GETTER(DashboardConfig, dashboard)
+CONFIG_ATTACHED_GETTER(DockConfig, dockPanel)
 CONFIG_ATTACHED_GETTER(LauncherConfig, launcher)
 CONFIG_ATTACHED_GETTER(LockConfig, lock)
 CONFIG_ATTACHED_GETTER(NexusConfig, nexus)

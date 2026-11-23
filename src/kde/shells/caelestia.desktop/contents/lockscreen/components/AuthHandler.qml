@@ -1,8 +1,3 @@
-/*
-    SPDX-FileCopyrightText: 2024 ladybug-me
-    SPDX-License-Identifier: GPL-3.0-or-later
-*/
-
 import QtQuick
 import org.kde.kscreenlocker as ScreenLocker
 
@@ -18,22 +13,33 @@ Item {
     }
     readonly property var activeAuthenticator: authenticatorTarget
 
-    property bool isAuthenticating: false
-    property bool localGraceLocked: false
-    readonly property bool graceLocked: localGraceLocked || Boolean(activeAuthenticator && activeAuthenticator.graceLocked)
     property string authMessage: ""
     property string pendingPassword: ""
+    property bool viewVisible: true
+    property bool showPrompt: false
+    property bool expectingPrompt: false
+    // kscreenlocker keeps a prompt open until it is answered and leaves prompt/promptForSecret
+    // set after the conversation ends, so track whether a live prompt is waiting.
+    property bool promptPending: false
+    // PamAuthenticators::AuthenticatorsState values (Idle = 0, Authenticating = 1).
+    // Plasma <= 6.6 does not register PamAuthenticators as a QML type, so avoid its QML enum namespace.
+    readonly property int idleState: 0
+    readonly property int authenticatingState: 1
+
+    readonly property bool busy: Boolean(activeAuthenticator && (activeAuthenticator.busy || activeAuthenticator.pamTimeout || activeAuthenticator.inPasswordDelay))
+    readonly property bool pamTimeout: Boolean(activeAuthenticator && (activeAuthenticator.pamTimeout || activeAuthenticator.inPasswordDelay))
+    readonly property bool unlocked: Boolean(activeAuthenticator && activeAuthenticator.unlocked)
+    readonly property bool isAuthenticating: pamTimeout
+    readonly property bool graceLocked: pamTimeout
 
     property int lockoutSecondsRemaining: 0
     readonly property int lockoutMinutesRemaining: Math.ceil(lockoutSecondsRemaining / 60)
     readonly property bool lockoutActive: lockoutSecondsRemaining > 0
-    readonly property string lockoutText: lockoutMinutesRemaining > 0 ? (lockoutMinutesRemaining + " min left") : ""
+    readonly property string lockoutText: lockoutMinutesRemaining > 0 ? qsTr("%1 min left").arg(lockoutMinutesRemaining) : ""
 
     property int fprintTries: 0
     property int maxFprintTries: 3
-    property int timeoutInterval: 15000
-    property int notificationDismissInterval: 5000
-    property int graceLockInterval: 3000
+    property int notificationDismissInterval: 3000
 
     signal messageChanged(string message)
     signal shakeRequested()
@@ -42,15 +48,27 @@ Item {
     signal notificationRepeated()
     signal succeeded()
 
-    function isExactFailMsg(msg) {
-        if (!msg) return false;
-        var trimmed = (typeof msg === "string") ? msg.trim() : "";
-        var lower = trimmed.toLowerCase();
-        var localized = i18ndc("plasma_shell_org.kde.plasma.desktop", "@info:status", "Unlocking failed").trim();
-        return lower === "unlocking failed" ||
-               lower === "unlocking failed." ||
-               trimmed === localized ||
-               trimmed === (localized + ".");
+    onActiveAuthenticatorChanged: root.promptPending = root.hasOpenPrompt(activeAuthenticator)
+    Component.onCompleted: root.promptPending = root.hasOpenPrompt(activeAuthenticator)
+
+    function isAuthenticatingState(auth) {
+        return Boolean(auth) && (typeof auth.state === "undefined" || auth.state === root.authenticatingState);
+    }
+
+    function hasOpenPrompt(auth) {
+        if (!auth || auth.unlocked || auth.busy || auth.pamTimeout || auth.inPasswordDelay) return false;
+        if (!root.isAuthenticatingState(auth)) return false;
+        return Boolean(auth.promptForSecret || auth.prompt);
+    }
+
+    function flushPendingPassword() {
+        if (!activeAuthenticator || root.pamTimeout || !root.promptPending || !root.isAuthenticatingState(activeAuthenticator) || root.pendingPassword.length === 0) return;
+        root.promptPending = false;
+        if (typeof activeAuthenticator.respond === "function") {
+            activeAuthenticator.respond(root.pendingPassword);
+        }
+        root.pendingPassword = "";
+        root.focusSecretRequested();
     }
 
     function extractTimeInSeconds(text) {
@@ -79,9 +97,6 @@ Item {
             if (extractTimeInSeconds(line) > 0) {
                 continue;
             }
-            if (isExactFailMsg(line)) {
-                continue;
-            }
             kept.push(line);
         }
         return kept.join("\n");
@@ -97,7 +112,10 @@ Item {
         }
 
         var filteredMsg = stripTimeLines(msg);
-        if (!filteredMsg || filteredMsg.trim().length === 0 || isExactFailMsg(filteredMsg)) return;
+        if (!filteredMsg || filteredMsg.trim().length === 0) return;
+
+        var lower = (typeof filteredMsg === "string") ? filteredMsg.trim().toLowerCase() : "";
+        if (lower === "password:" || lower === "password" || lower === "passwd:" || lower === "passwd") return;
 
         if (typeof parent !== "undefined" && typeof parent.notification !== "undefined") {
             if (!parent.notification) {
@@ -122,33 +140,6 @@ Item {
         root.messageChanged(root.authMessage);
     }
 
-    function ensureAuthenticating() {
-        if (root.graceLocked || root.isAuthenticating || (activeAuthenticator && activeAuthenticator.busy)) return;
-        if (activeAuthenticator && typeof activeAuthenticator.startAuthenticating === "function") {
-            activeAuthenticator.startAuthenticating();
-        }
-    }
-
-    function startLogin(pass) {
-        if (!pass || pass.length === 0 || root.isAuthenticating || root.graceLocked) return;
-        root.clearAuthMessage();
-        root.isAuthenticating = true;
-        root.localGraceLocked = false;
-        authTimeoutTimer.restart();
-
-        if (activeAuthenticator) {
-            var hasPrompt = Boolean(activeAuthenticator.promptForSecret || activeAuthenticator.prompt);
-            if (typeof activeAuthenticator.respond === "function" && hasPrompt) {
-                activeAuthenticator.respond(pass);
-            } else {
-                root.pendingPassword = pass;
-                if (typeof activeAuthenticator.startAuthenticating === "function") {
-                    activeAuthenticator.startAuthenticating();
-                }
-            }
-        }
-    }
-
     function clearAuthMessage() {
         root.authMessage = "";
         if (typeof parent !== "undefined" && typeof parent.notification !== "undefined") {
@@ -161,33 +152,61 @@ Item {
         root.messageChanged("");
     }
 
-    Timer {
-        id: authTimeoutTimer
+    function ensureAuthenticating() {
+        if (!root.viewVisible || (activeAuthenticator && activeAuthenticator.unlocked)) return;
+        if (activeAuthenticator &&
+            !root.promptPending &&
+            !activeAuthenticator.busy &&
+            !root.pamTimeout &&
+            typeof activeAuthenticator.startAuthenticating === "function") {
+            activeAuthenticator.startAuthenticating();
+        }
+    }
 
-        interval: root.timeoutInterval
-        repeat: false
+    function respond(pass) {
+        if (!pass || pass.length === 0) return;
+        root.clearAuthMessage();
+        if (!activeAuthenticator) return;
+        if (activeAuthenticator.pamTimeout || activeAuthenticator.inPasswordDelay) {
+            root.pendingPassword = pass;
+            return;
+        }
+        if (root.promptPending && root.isAuthenticatingState(activeAuthenticator) && typeof activeAuthenticator.respond === "function") {
+            root.promptPending = false;
+            root.pendingPassword = "";
+            activeAuthenticator.respond(pass);
+            return;
+        }
+        root.pendingPassword = pass;
+        if (!activeAuthenticator.busy && typeof activeAuthenticator.startAuthenticating === "function") {
+            activeAuthenticator.startAuthenticating();
+        }
+    }
+
+    function startLogin(pass) {
+        root.respond(pass);
+    }
+
+    // Heart beat keeping the backend active for as long as we are in visible state
+    // Exact 1:1 match with upstream LockScreenUi.qml:170-175
+    Timer {
+        id: backendHeartbeatTimer
+        interval: 1000
+        repeat: true
+        running: root.viewVisible && Boolean(activeAuthenticator) && !(activeAuthenticator && activeAuthenticator.unlocked)
         onTriggered: {
-            if (root.isAuthenticating || root.localGraceLocked) {
-                root.isAuthenticating = false;
-                root.localGraceLocked = false;
-                root.pendingPassword = "";
-                root.clearPasswordRequested();
-                if (activeAuthenticator && typeof activeAuthenticator.cancel === "function") {
-                    activeAuthenticator.cancel();
-                }
-                if (activeAuthenticator && typeof activeAuthenticator.startAuthenticating === "function") {
-                    activeAuthenticator.startAuthenticating();
-                }
-                if (!root.authMessage) {
-                    root.handleMessage(i18ndc("plasma_shell_org.kde.plasma.desktop", "@info:status", "Authentication timed out"));
-                }
+            if (activeAuthenticator &&
+                !root.promptPending &&
+                !activeAuthenticator.busy &&
+                !root.pamTimeout &&
+                typeof activeAuthenticator.startAuthenticating === "function") {
+                activeAuthenticator.startAuthenticating();
             }
         }
     }
 
     Timer {
         id: notificationRemoveTimer
-
         interval: root.notificationDismissInterval
         onTriggered: {
             root.clearAuthMessage();
@@ -195,36 +214,7 @@ Item {
     }
 
     Timer {
-        id: graceLockTimer
-
-        interval: root.graceLockInterval
-        repeat: false
-        onTriggered: {
-            root.clearPasswordRequested();
-            if (activeAuthenticator && typeof activeAuthenticator.startAuthenticating === "function") {
-                activeAuthenticator.startAuthenticating();
-            }
-            fallbackUnlockTimer.restart();
-        }
-    }
-
-    Timer {
-        id: fallbackUnlockTimer
-
-        interval: 2000
-        repeat: false
-        onTriggered: {
-            if (root.localGraceLocked || root.isAuthenticating) {
-                root.localGraceLocked = false;
-                root.isAuthenticating = false;
-                root.focusSecretRequested();
-            }
-        }
-    }
-
-    Timer {
         id: lockoutCountdownTimer
-
         interval: 1000
         repeat: true
         running: root.lockoutSecondsRemaining > 0
@@ -236,10 +226,11 @@ Item {
     }
 
     Connections {
-        function onFailed(kind, auth) {
-            authTimeoutTimer.stop();
-            root.pendingPassword = "";
+        target: activeAuthenticator
+        ignoreUnknownSignals: true
 
+        function onFailed(kind, auth) {
+            // Only interactive (password) failure resets the conversation; non-interactive errors are handled separately
             if (kind !== 0) {
                 if (kind & ScreenLocker.Authenticator.Fingerprint) {
                     root.fprintTries++;
@@ -251,21 +242,19 @@ Item {
                 return;
             }
 
+            root.pendingPassword = "";
+            root.promptPending = false;
             var authErr = (auth && auth.errorMessage) ? auth.errorMessage :
                           (activeAuthenticator && activeAuthenticator.errorMessage ? activeAuthenticator.errorMessage :
                           (activeAuthenticator && activeAuthenticator.infoMessage ? activeAuthenticator.infoMessage : ""));
+            const msg = authErr || i18ndc("plasma_shell_org.kde.plasma.desktop", "@info:status", "Unlocking failed");
+            root.handleMessage(msg);
+            root.clearPasswordRequested();
 
-            if (authErr) {
-                root.handleMessage(authErr);
+            if (activeAuthenticator && typeof activeAuthenticator.startAuthenticating === "function") {
+                activeAuthenticator.startAuthenticating();
             }
-
-            if (!graceLockTimer.running) {
-                root.isAuthenticating = false;
-                root.localGraceLocked = true;
-                root.shakeRequested();
-                graceLockTimer.interval = root.graceLockInterval;
-                graceLockTimer.restart();
-            }
+            root.shakeRequested();
         }
 
         function onNoninteractiveError(kind, auth) {
@@ -282,17 +271,32 @@ Item {
         }
 
         function onSucceeded() {
-            root.isAuthenticating = false;
-            root.localGraceLocked = false;
-            root.pendingPassword = "";
-            root.lockoutSecondsRemaining = 0;
-            authTimeoutTimer.stop();
-            graceLockTimer.stop();
-            fallbackUnlockTimer.stop();
+            backendHeartbeatTimer.stop();
             lockoutCountdownTimer.stop();
+            root.pendingPassword = "";
+            root.promptPending = false;
+            root.lockoutSecondsRemaining = 0;
             root.fprintTries = 0;
+
+            if (activeAuthenticator && typeof activeAuthenticator.stopAuthenticating === "function") {
+                activeAuthenticator.stopAuthenticating();
+            }
             root.succeeded();
             Qt.quit();
+        }
+
+        function onStateChanged() {
+            if (activeAuthenticator && activeAuthenticator.state === root.idleState) {
+                root.promptPending = false;
+            }
+        }
+
+        function onPamTimeoutChanged() {
+            root.flushPendingPassword();
+        }
+
+        function onInPasswordDelayChanged() {
+            root.flushPendingPassword();
         }
 
         function onInfoMessageChanged() {
@@ -307,80 +311,28 @@ Item {
             }
         }
 
-        function onPromptChanged(msg) {
+        function onPromptChanged() {
+            root.promptPending = Boolean(activeAuthenticator && activeAuthenticator.prompt) && root.isAuthenticatingState(activeAuthenticator);
             if (activeAuthenticator && activeAuthenticator.prompt) {
                 root.handleMessage(activeAuthenticator.prompt);
             }
-            if (root.pendingPassword) {
-                var pass = root.pendingPassword;
-                root.pendingPassword = "";
-                root.isAuthenticating = true;
-                authTimeoutTimer.restart();
-                if (activeAuthenticator && typeof activeAuthenticator.respond === "function") {
-                    activeAuthenticator.respond(pass);
-                }
+            if (root.promptPending && root.pendingPassword.length > 0) {
+                // Defer past PamAuthenticator::promptInternal(), which records m_pendingPrompt after emitting this signal.
+                Qt.callLater(root.flushPendingPassword);
             }
         }
 
-        function onPromptForSecretChanged(msg) {
-            fallbackUnlockTimer.stop();
-            root.localGraceLocked = false;
-            authTimeoutTimer.stop();
-            if (root.pendingPassword) {
-                var pass = root.pendingPassword;
-                root.pendingPassword = "";
-                root.isAuthenticating = true;
-                authTimeoutTimer.restart();
-                if (activeAuthenticator && typeof activeAuthenticator.respond === "function") {
-                    activeAuthenticator.respond(pass);
-                }
-                return;
-            }
-            root.isAuthenticating = false;
+        function onPromptForSecretChanged() {
+            root.promptPending = Boolean(activeAuthenticator && activeAuthenticator.promptForSecret) && root.isAuthenticatingState(activeAuthenticator);
             root.focusSecretRequested();
-        }
-
-        function onLoginFailedDelayStarted(kind, auth, uSecDelay) {
-            authTimeoutTimer.stop();
-            if (kind !== 0) {
-                return;
+            var show = root.showPrompt || Boolean(activeAuthenticator && activeAuthenticator.showPrompt);
+            if (show && activeAuthenticator && activeAuthenticator.promptForSecret) {
+                root.handleMessage(activeAuthenticator.promptForSecret);
             }
-            root.isAuthenticating = false;
-            root.localGraceLocked = true;
-            root.shakeRequested();
-
-            var delayMs = (uSecDelay && uSecDelay > 0) ? (Math.round(uSecDelay / 1000) + 150) : root.graceLockInterval;
-            graceLockTimer.interval = Math.max(delayMs, root.graceLockInterval);
-            graceLockTimer.restart();
-
-            var msg = (auth && auth.errorMessage) ? auth.errorMessage :
-                      (activeAuthenticator && activeAuthenticator.errorMessage ? activeAuthenticator.errorMessage :
-                      (activeAuthenticator && activeAuthenticator.infoMessage ? activeAuthenticator.infoMessage : ""));
-            if (msg) {
-                root.handleMessage(msg);
+            if (root.promptPending && root.pendingPassword.length > 0) {
+                // Defer past PamAuthenticator::promptInternal(), which records m_pendingPrompt after emitting this signal.
+                Qt.callLater(root.flushPendingPassword);
             }
         }
-
-        function onBusyChanged() {
-            if (activeAuthenticator && typeof activeAuthenticator.busy !== "undefined" && !activeAuthenticator.busy) {
-                if (root.isAuthenticating && !root.graceLocked && !graceLockTimer.running) {
-                    root.isAuthenticating = false;
-                    authTimeoutTimer.stop();
-                }
-            }
-        }
-
-        function onGraceLockedChanged() {
-            if (activeAuthenticator && !activeAuthenticator.graceLocked) {
-                fallbackUnlockTimer.stop();
-                root.localGraceLocked = false;
-                root.isAuthenticating = false;
-                authTimeoutTimer.stop();
-                root.focusSecretRequested();
-            }
-        }
-
-        target: activeAuthenticator
-        ignoreUnknownSignals: true
     }
 }

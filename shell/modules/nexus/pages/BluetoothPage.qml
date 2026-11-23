@@ -17,13 +17,18 @@ PageBase {
     readonly property BluetoothAdapter adapter: Bluetooth.defaultAdapter // qmllint disable unresolved-type
     readonly property bool btEnabled: adapter?.enabled ?? false
 
-    title: qsTr("Connected devices")
+    title: qsTr("Bluetooth")
 
     ColumnLayout {
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.top: parent.top
         width: root.cappedWidth
         spacing: Tokens.spacing.extraSmall / 2
+
+        SectionHeader {
+            first: true
+            text: qsTr("Connected Devices")
+        }
 
         ToggleRow {
             first: true
@@ -124,7 +129,7 @@ PageBase {
                             Layout.fillWidth: true
                             text: device.connected ? qsTr("Connected%1").arg(device.modelData?.batteryAvailable ? " • " + Math.round(device.modelData.battery * 100) + "%" : "") : qsTr("Saved")
                             color: device.connected ? Colours.palette.m3primary : Colours.palette.m3onSurfaceVariant
-                            font: Tokens.font.label.small
+                            font: NexusStyle.secondaryFont
                             elide: Text.ElideRight
                             animate: true
                         }
@@ -150,7 +155,7 @@ PageBase {
 
                                     onClicked: {
                                         root.nState.selectedBtDevice = device.modelData;
-                                        root.nState.openSubPage(1); // Per device info page
+                                        root.nState.openSubPage("btDeviceInfo");
                                     }
                                 }
                             }
@@ -175,7 +180,7 @@ PageBase {
 
             StateLayer {
                 disabled: !root.btEnabled
-                onClicked: root.nState.openSubPage(2)
+                onClicked: root.nState.openSubPage("bluetoothPairing")
             }
 
             RowLayout {

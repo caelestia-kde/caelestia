@@ -21,15 +21,19 @@ StyledListView {
     readonly property string requestedState: stateForText(search.text)
     readonly property string displayState: stateForText(displayText)
 
+    // KRunner answers asynchronously, so its query is driven from the search text
+    // instead of resultsForText, which has to stay synchronous to feed the model.
+    readonly property string searchQuery: root.searchQueryForText(search.text)
+
     function syncDisplayText(): void {
-        if (visibilities.launcher && requestedState === displayState)
+        if (!visibilities.launcher || requestedState === displayState)
             displayText = search.text;
     }
 
     function stateForText(text: string): string {
         const prefix = GlobalConfig.launcher.actionPrefix;
         if (text.startsWith(prefix)) {
-            for (const action of ["calc", "scheme", "variant", "emoji", "clipboard", "windows"])
+            for (const action of ["calc", "scheme", "variant", "emoji", "clipboard", "windows", "search"])
                 if (text.startsWith(`${prefix}${action} `))
                     return action;
 
@@ -39,8 +43,28 @@ StyledListView {
         return "apps";
     }
 
+    function searchQueryForText(text: string): string {
+        const prefix = `${GlobalConfig.launcher.actionPrefix}search `;
+        return text.startsWith(prefix) ? text.slice(prefix.length) : "";
+    }
+
     function resultsForText(text: string): var {
         switch (stateForText(text)) {
+        case "search": {
+            const q = root.searchQueryForText(text).trim();
+            const url = WebSearch.searchUrl(q);
+            // KRunner offers the configured engine itself once nothing else matched —
+            // and for "ddg:cats" style keyword queries — so the launcher only adds a
+            // row of its own when there is none, which keeps the two from doubling up.
+            if (!url || Search.results.some(match => match.runner === "krunner_webshortcuts"))
+                return Search.results;
+
+            return Search.results.concat([{
+                webSearchUrl: url,
+                text: qsTr("Search %1 for \"%2\"").arg(WebSearch.currentName).arg(q),
+                icon: "internet-web-browser"
+            }]);
+        }
         case "actions":
             return Actions.query(text);
         case "calc":
@@ -51,7 +75,7 @@ StyledListView {
             return M3Variants.query(text);
         case "emoji": {
             const prefix = GlobalConfig.launcher.actionPrefix;
-            const q = root._debouncedSearchText.slice((prefix + "emoji ").length).toLowerCase();
+            const q = root.search.text.slice((prefix + "emoji ").length).toLowerCase();
             if (!q)
                 return Emojis.getSortedItems();
             return Emojis.search(q);
@@ -70,6 +94,10 @@ StyledListView {
         default:
             return Apps.search(text);
         }
+    }
+
+    function openContextMenu(app: DesktopEntry, targetItem: Item): void {
+        contextMenu.openFor(app, targetItem);
     }
 
     model: ScriptModel {
@@ -101,27 +129,10 @@ StyledListView {
         }
     }
 
-    property string _debouncedSearchText: search.text
-
-    Timer {
-        id: searchDebounceTimer
-
-        interval: 80
-        onTriggered: root._debouncedSearchText = search.text
-    }
-    Connections {
-        target: search
-
-        function onTextChanged(): void {
-            if (root.state === "emoji") {
-                searchDebounceTimer.restart();
-            } else {
-                root._debouncedSearchText = search.text;
-            }
-        }
-    }
 
     state: visibilities.launcher ? requestedState : displayState
+
+    onSearchQueryChanged: Search.search(root.searchQuery)
 
     onStateChanged: {
         if (state === "scheme" || state === "variant")
@@ -130,9 +141,9 @@ StyledListView {
             Emojis.reload();
         if (state === "clipboard")
             Clipboard.reload();
-            
+
         if (state !== "scheme" && state !== "variant") {
-            Colours.showPreview = false;
+            Colours.clearPreview();
         }
     }
 
@@ -144,88 +155,14 @@ StyledListView {
     }
 
     Component.onDestruction: {
-        Colours.showPreview = false;
-    }
-
-    Timer {
-        id: previewTimer
-
-        interval: 100
-        onTriggered: {
-            if (!root.currentItem || !root.currentItem.modelData) return;
-            if (root.state === "scheme") {
-                const schemeData = root.currentItem.modelData;
-                Colours.load(JSON.stringify({ name: schemeData.name, flavour: schemeData.flavour, variant: Colours.variant, mode: Colours.light ? "light" : "dark", colours: schemeData.colours }), true);
-                Colours.showPreview = true;
-            } else if (root.state === "variant") {
-                const variantData = root.currentItem.modelData;
-                M3Variants.previewVariant(variantData.variant);
-            }
-        }
+        Colours.clearPreview();
     }
 
     Component.onCompleted: displayText = search.text
 
-    states: [
-        State {
-            name: "apps"
-
-            PropertyChanges {
-                root.delegate: appItem
-            }
-        },
-        State {
-            name: "actions"
-
-            PropertyChanges {
-                root.delegate: actionItem
-            }
-        },
-        State {
-            name: "calc"
-
-            PropertyChanges {
-                root.delegate: calcItem
-            }
-        },
-        State {
-            name: "scheme"
-
-            PropertyChanges {
-                root.delegate: schemeItem
-            }
-        },
-        State {
-            name: "variant"
-
-            PropertyChanges {
-                root.delegate: variantItem
-            }
-        },
-        State {
-            name: "emoji"
-
-            PropertyChanges {
-                root.delegate: emojiItem
-            }
-        },
-        State {
-            name: "clipboard"
-
-            PropertyChanges {
-                root.delegate: clipItem
-            }
-        },
-        State {
-            name: "windows"
-
-            PropertyChanges {
-                root.delegate: windowsItem
-            }
-        }
-    ]
-
     transitions: Transition {
+        enabled: root.visibilities.launcher && !root.visibilities.skipLauncherAnim
+
         SequentialAnimation {
             ParallelAnimation {
                 Anim {
@@ -281,10 +218,6 @@ StyledListView {
                 value: true
             }
         }
-    }
-
-    StyledScrollBar.vertical: StyledScrollBar {
-        flickable: root
     }
 
     add: Transition {
@@ -343,10 +276,81 @@ StyledListView {
         }
     }
 
+    StyledScrollBar.vertical: StyledScrollBar {
+        flickable: root
+    }
+
+    states: [
+        State {
+            name: "apps"
+
+            PropertyChanges {
+                root.delegate: appItem
+            }
+        },
+        State {
+            name: "actions"
+
+            PropertyChanges {
+                root.delegate: actionItem
+            }
+        },
+        State {
+            name: "calc"
+
+            PropertyChanges {
+                root.delegate: calcItem
+            }
+        },
+        State {
+            name: "scheme"
+
+            PropertyChanges {
+                root.delegate: schemeItem
+            }
+        },
+        State {
+            name: "variant"
+
+            PropertyChanges {
+                root.delegate: variantItem
+            }
+        },
+        State {
+            name: "emoji"
+
+            PropertyChanges {
+                root.delegate: emojiItem
+            }
+        },
+        State {
+            name: "clipboard"
+
+            PropertyChanges {
+                root.delegate: clipItem
+            }
+        },
+        State {
+            name: "windows"
+
+            PropertyChanges {
+                root.delegate: windowsItem
+            }
+        },
+        State {
+            name: "search"
+
+            PropertyChanges {
+                root.delegate: krunnerItem
+            }
+        }
+    ]
+
     Component {
         id: appItem
 
         AppItem {
+            list: root
             visibilities: root.visibilities
         }
     }
@@ -405,6 +409,38 @@ StyledListView {
         WindowSwitcherItem {
             list: root
         }
+    }
+
+    Component {
+        id: krunnerItem
+
+        KRunnerItem {
+            list: root
+        }
+    }
+
+    Timer {
+        id: previewTimer
+
+        interval: 100
+        onTriggered: {
+            if (!root.visibilities.launcher) return;
+            if (!root.currentItem || !root.currentItem.modelData) return;
+            if (root.state === "scheme") {
+                const schemeData = root.currentItem.modelData;
+                Colours.loadPreview(JSON.stringify({ name: schemeData.name, flavour: schemeData.flavour, variant: Colours.variant, mode: Colours.light ? "light" : "dark", colours: schemeData.colours }));
+            } else if (root.state === "variant") {
+                const variantData = root.currentItem.modelData;
+                M3Variants.previewVariant(variantData.variant);
+            }
+        }
+    }
+
+    AppContextMenu {
+        id: contextMenu
+
+        attachTo: root
+        visibilities: root.visibilities
     }
 
     Connections {

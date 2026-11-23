@@ -56,9 +56,27 @@ PageBase {
             }
         }
 
+        // Only present when NetworkManager's own probe landed on a login page: most
+        // networks never show it, and a permanent row would be noise.
+        SectionHeader {
+            first: true
+            visible: Connectivity.portal
+            text: qsTr("Sign-in required")
+        }
+
+        NavRow {
+            visible: Connectivity.portal
+            first: true
+            last: true
+            icon: "wifi_tethering"
+            label: Connectivity.working ? qsTr("Looking for the sign-in page...") : qsTr("Open sign-in page")
+            status: Connectivity.portalUrl || Connectivity.lastError || qsTr("This network asks you to sign in before it lets traffic through")
+            onClicked: Connectivity.signIn()
+        }
+
         ToggleRow {
             Layout.topMargin: Nmcli.hasAvailableEthernet ? Tokens.spacing.large : 0
-            first: true
+            first: !Connectivity.portal
             text: qsTr("Wi-Fi")
             font: Tokens.font.body.medium
             horizontalPadding: Tokens.padding.largeIncreased
@@ -79,121 +97,42 @@ PageBase {
         }
 
         // All networks button, only when > max networks
-        ConnectedRect {
-            Layout.fillWidth: true
-            Layout.preferredHeight: Nmcli.wifiEnabled && Nmcli.networks.length > GlobalConfig.nexus.maxNetworksShown ? showAllLayout.implicitHeight + Tokens.padding.medium * 2 : 0
+        NavRow {
+            Layout.preferredHeight: Nmcli.wifiEnabled && Nmcli.networks.length > GlobalConfig.nexus.maxNetworksShown ? implicitHeight : 0
             clip: true
+
+            icon: "expand_content"
+            label: qsTr("Show all networks (%1)").arg(Nmcli.networks.length)
+            onClicked: root.nState.openSubPage("allNetworks")
 
             Behavior on Layout.preferredHeight {
                 Anim {
                     type: Anim.DefaultEffects
                 }
             }
-
-            StateLayer {
-                onClicked: root.nState.openSubPage(5) // All networks sub-page
-            }
-
-            RowLayout {
-                id: showAllLayout
-
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                anchors.margins: Tokens.padding.largeIncreased
-                spacing: Tokens.spacing.medium
-
-                MaterialIcon {
-                    text: "expand_content"
-                    fontStyle: Tokens.font.icon.medium
-                }
-
-                StyledText {
-                    Layout.fillWidth: true
-                    text: qsTr("Show all networks (%1)").arg(Nmcli.networks.length)
-                    font: Tokens.font.body.small
-                    elide: Text.ElideRight
-                }
-
-                MaterialIcon {
-                    text: "chevron_right"
-                    color: Colours.palette.m3onSurfaceVariant
-                    fontStyle: Tokens.font.icon.medium
-                }
-            }
         }
 
         // Saved networks button
-        ConnectedRect {
-            Layout.fillWidth: true
-            implicitHeight: savedNetworksLayout.implicitHeight + savedNetworksLayout.anchors.margins * 2
-
-            StateLayer {
-                onClicked: root.nState.openSubPage(6) // Saved networks sub-page
-            }
-
-            RowLayout {
-                id: savedNetworksLayout
-
-                anchors.fill: parent
-                anchors.margins: Tokens.padding.medium
-                anchors.leftMargin: Tokens.padding.largeIncreased
-                anchors.rightMargin: Tokens.padding.largeIncreased
-                spacing: Tokens.spacing.medium
-
-                MaterialIcon {
-                    text: "bookmark"
-                    color: Colours.palette.m3onSurfaceVariant
-                    fontStyle: Tokens.font.icon.medium
-                    fill: 1
-                }
-
-                StyledText {
-                    Layout.fillWidth: true
-                    text: qsTr("Saved networks")
-                    font: Tokens.font.body.small
-                    elide: Text.ElideRight
-                }
-
-                MaterialIcon {
-                    text: "chevron_right"
-                    color: Colours.palette.m3onSurfaceVariant
-                    fontStyle: Tokens.font.icon.medium
-                }
-            }
+        NavRow {
+            icon: "bookmark"
+            label: qsTr("Saved networks")
+            onClicked: root.nState.openSubPage("savedNetworks")
         }
 
-        ConnectedRect {
-            Layout.fillWidth: true
-            implicitHeight: addNetworkLayout.implicitHeight + addNetworkLayout.anchors.margins * 2
+        NavRow {
+            icon: "add"
+            label: qsTr("Add network")
+            onClicked: root.nState.openSubPage("addNetwork")
+        }
+
+        // Sits with the Wi-Fi controls rather than with the saved-network rows:
+        // it is a per-machine switch, not a profile.
+        NavRow {
             last: true
-
-            StateLayer {
-                onClicked: root.nState.openSubPage(2) // Add network sub-page
-            }
-
-            RowLayout {
-                id: addNetworkLayout
-
-                anchors.fill: parent
-                anchors.margins: Tokens.padding.medium
-                anchors.leftMargin: Tokens.padding.largeIncreased
-                anchors.rightMargin: Tokens.padding.largeIncreased
-
-                spacing: Tokens.spacing.medium
-
-                MaterialIcon {
-                    text: "add"
-                    fontStyle: Tokens.font.icon.medium
-                }
-
-                StyledText {
-                    Layout.fillWidth: true
-                    text: qsTr("Add network")
-                    font: Tokens.font.body.small
-                    elide: Text.ElideRight
-                }
-            }
+            icon: "wifi_tethering"
+            label: qsTr("Hotspot")
+            status: Nmcli.hotspot.enabled ? Nmcli.hotspot.ssid : ""
+            onClicked: root.nState.openSubPage("hotspot")
         }
 
         SectionHeader {
@@ -287,7 +226,7 @@ PageBase {
                             Layout.fillWidth: true
                             text: vpn.connected ? qsTr("Connected") : qsTr("Available")
                             color: Colours.palette.m3onSurfaceVariant
-                            font: Tokens.font.label.small
+                            font: NexusStyle.secondaryFont
                             elide: Text.ElideRight
                             animate: true
                         }
@@ -365,7 +304,8 @@ PageBase {
                 id: provider
 
                 required property var modelData
-                readonly property bool isSelected: modelData.providerId === VPN.selectedProvider
+                required property int index
+                readonly property bool isSelected: modelData.id === VPN.selectedProvider
                 readonly property bool isConnected: isSelected && VPN.connected
 
                 anchors.left: providerList.list.contentItem.left
@@ -377,7 +317,7 @@ PageBase {
                     radius: Tokens.rounding.extraSmall
                     onClicked: {
                         if (!provider.isSelected)
-                            VPN.setActiveProvider(provider.modelData.index);
+                            VPN.setActiveProvider(provider.index);
                     }
                 }
 
@@ -414,7 +354,7 @@ PageBase {
 
                         StyledText {
                             Layout.fillWidth: true
-                            text: provider.modelData.displayName
+                            text: provider.modelData.displayName || provider.modelData.name
                             font: Tokens.font.body.medium
                             elide: Text.ElideRight
                         }
@@ -434,7 +374,7 @@ PageBase {
                                 case "needs-auth":
                                     return VPN.status.reason || qsTr("Authentication required");
                                 case "error":
-                                    return VPN.status.reason || qsTr("An error occurred");
+                                    return VPN.status.reason || qsTr("Could not connect. Check the VPN settings and try again.");
                                 default:
                                     return qsTr("Selected");
                                 }
@@ -452,7 +392,7 @@ PageBase {
                                     return Colours.palette.m3secondary;
                                 }
                             }
-                            font: Tokens.font.label.small
+                            font: NexusStyle.secondaryFont
                             elide: Text.ElideRight
                             animate: true
                         }
@@ -485,16 +425,16 @@ PageBase {
                                     Layout.alignment: Qt.AlignRight
                                     text: qsTr("Interface")
                                     color: Colours.palette.m3onSurfaceVariant
-                                    font: Tokens.font.label.small
+                                    font: NexusStyle.secondaryFont
                                     elide: Text.ElideRight
                                     horizontalAlignment: Text.AlignRight
                                 }
 
                                 StyledText {
                                     Layout.alignment: Qt.AlignRight
-                                    text: provider.modelData.iface
+                                    text: provider.modelData.interface
                                     color: Colours.palette.m3onSurfaceVariant
-                                    font: Tokens.font.label.small
+                                    font: NexusStyle.secondaryFont
                                     elide: Text.ElideRight
                                     horizontalAlignment: Text.AlignRight
                                 }
@@ -507,7 +447,7 @@ PageBase {
                                     Layout.alignment: Qt.AlignRight
                                     text: qsTr("Current Ping")
                                     color: Colours.palette.m3onSurfaceVariant
-                                    font: Tokens.font.label.small
+                                    font: NexusStyle.secondaryFont
                                     elide: Text.ElideRight
                                     horizontalAlignment: Text.AlignRight
                                 }
@@ -527,7 +467,7 @@ PageBase {
                                     StyledText {
                                         text: qsTr("%1 ms").arg(VPN.pingMs)
                                         color: Colours.palette.m3onSurfaceVariant
-                                        font: Tokens.font.label.small
+                                        font: NexusStyle.secondaryFont
                                         elide: Text.ElideRight
                                         horizontalAlignment: Text.AlignRight
                                     }
@@ -542,8 +482,8 @@ PageBase {
                         isRound: true
                         icon: "edit"
                         onClicked: {
-                            root.nState.editingVpnIndex = provider.modelData.index;
-                            root.nState.openSubPage(4); // Add/edit provider sub-page
+                            root.nState.editingVpnIndex = provider.index;
+                            root.nState.openSubPage("addVpn");
                         }
                     }
                 }
@@ -556,8 +496,21 @@ PageBase {
             text: qsTr("Add provider")
             onClicked: {
                 root.nState.editingVpnIndex = -1;
-                root.nState.openSubPage(4); // Add/edit provider sub-page
+                root.nState.openSubPage("addVpn");
             }
+        }
+
+        SectionHeader {
+            text: qsTr("Advanced")
+        }
+
+        NavRow {
+            first: true
+            last: true
+            icon: "lan"
+            label: qsTr("Proxy")
+            status: Proxy.summary
+            onClicked: root.nState.openSubPage("proxy")
         }
     }
 }

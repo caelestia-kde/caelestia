@@ -1,80 +1,65 @@
 #!/usr/bin/env bash
-# toolchain.sh - Build-tool prerequisites for the install/update step scripts.
-#
-# Source alongside lib/privileges.sh, which provides caelestia_sudo:
-#
-#     source "$(dirname "${BASH_SOURCE[0]}")/lib/toolchain.sh"
-#
-#   linguist_tools_available   Is Qt's lrelease reachable?
-#   install_linguist_tools     Install it through caelestia_sudo
-#   install_cava_sdk           Download & extract prebuilt CAVA SDK tarball
-#
-# These helpers never log; callers decide what to tell the user.
+# The build toolchain's own dependencies: the Qt Linguist tools the translations step
+# needs, and the prebuilt CAVA SDK the shell links against. Nothing here knows which
+# distro it is on beyond the name its caller passes in.
 
-# linguist_tools_available
-#
-# True when `lrelease` can be run, either from PATH or from the location
-# distros use when they keep the Qt tools out of PATH.
+source "$(dirname "${BASH_SOURCE[0]}")/download.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/log.sh"
+
+# What the shell build can link against, in the same words 08-build-shell.sh stores
+# in its toolchain stamp: a pkg-config version, "sdk" for the prebuilt headers, or
+# "none". One probe, so the stamp and the guard cannot disagree.
+cava_state() {
+    local version=""
+    if command -v pkg-config >/dev/null 2>&1; then
+        version="$(pkg-config --modversion libcava 2>/dev/null || pkg-config --modversion cava 2>/dev/null || true)"
+    fi
+    if [[ -n "$version" ]]; then
+        printf '%s\n' "$version"
+    elif [[ -f /usr/include/cava/cavacore.h ]]; then
+        printf 'sdk\n'
+    else
+        printf 'none\n'
+    fi
+}
+
+cava_sdk_installed() {
+    [[ "$(cava_state)" != "none" ]]
+}
+
 linguist_tools_available() {
     local fallback="${CAELESTIA_LRELEASE_FALLBACK:-/usr/lib/qt6/bin/lrelease}"
 
     command -v lrelease >/dev/null 2>&1 || [[ -x "$fallback" ]]
 }
 
-# install_linguist_tools
+# install_linguist_tools <arch|fedora|debian>
 #
-# Install Qt's Linguist tools so CMake can compile the translation catalogs.
-# Without lrelease CMake only warns and the shell ships English regardless of
-# the catalogs in shell/translations.
-#
-# Privileged package calls go through caelestia_sudo rather than plain sudo:
-# this step also runs from a GUI-triggered update with no controlling terminal,
-# where a bare sudo has nothing to prompt on and fails silently (#664).
-# caelestia_sudo falls back through cached credentials, SUDO_PASS, an askpass
-# helper and finally pkexec.
-#
-# Returns 0 when the tools are already present or were installed, 1 otherwise.
+# Takes the distro for the same reason install_cava_sdk does: "whichever manager is on
+# PATH" answers for the wrong package universe on a machine with a second one installed.
 install_linguist_tools() {
+    local distro="${1:-}"
+
     if linguist_tools_available; then
         return 0
     fi
 
-    if command -v pacman >/dev/null 2>&1; then
-        caelestia_sudo pacman -S --needed --noconfirm qt6-tools
-    elif command -v dnf >/dev/null 2>&1; then
-        caelestia_sudo dnf install -y qt6-qttools-devel
-    elif command -v apt-get >/dev/null 2>&1; then
-        caelestia_sudo apt-get install -y qt6-l10n-tools qt6-tools-dev
-    else
-        return 1
-    fi
+    case "$distro" in
+        arch) caelestia_sudo pacman -S --needed --noconfirm qt6-tools ;;
+        fedora) caelestia_sudo dnf install -y qt6-qttools-devel ;;
+        debian) caelestia_sudo apt-get install -y qt6-l10n-tools qt6-tools-dev ;;
+        *) return 1 ;;
+    esac
 }
 
-# install_cava_sdk [distro]
+# install_cava_sdk <arch|fedora|debian>
 #
-# Download and extract the prebuilt CAVA SDK (libcava + headers) from the CAVA
-# continuous release so the shell can link against it without building from source.
-#
-# Distro can be explicitly passed (e.g. arch, fedora, debian/ubuntu) or defaults
-# to $BASE_DISTRO / detected package manager.
-#
-# Returns 0 on success, 1 on failure.
+# Unpacks the prebuilt SDK into /usr, which needs escalation. Callers that cannot
+# know the SDK is missing should ask cava_sdk_installed first: this asks for a
+# password, and asking for one to re-unpack what is already there is a password for
+# nothing.
 install_cava_sdk() {
-    local arch="${CAELESTIA_TARGET_ARCH:-}"
-    if [[ -z "$arch" ]]; then
-        arch="$(uname -m 2>/dev/null || echo "x86_64")"
-    fi
-
-    local distro="${1:-${BASE_DISTRO:-}}"
-    if [[ -z "$distro" ]]; then
-        if command -v pacman >/dev/null 2>&1; then
-            distro="arch"
-        elif command -v dnf >/dev/null 2>&1; then
-            distro="fedora"
-        elif command -v apt-get >/dev/null 2>&1; then
-            distro="ubuntu"
-        fi
-    fi
+    local distro="${1:-}"
 
     local asset_suffix
     case "$distro" in
@@ -84,8 +69,33 @@ install_cava_sdk() {
         *) return 1 ;;
     esac
 
+    local arch="${CAELESTIA_TARGET_ARCH:-}"
+    if [[ -z "$arch" ]]; then
+        arch="$(uname -m 2>/dev/null || echo "x86_64")"
+    fi
+
     local url="https://github.com/ladybug-me/cava/releases/download/continuous/cava-${arch}-${asset_suffix}.tar.gz"
-    local tar_cmd=(tar -C /usr -xzf - --exclude='bin')
+    local archive
+    archive="$(mktemp)"
+
+    # The continuous build is republished under the same asset name on every cava commit, so
+    # the digest has to be the one the release reports rather than a constant here. When it
+    # cannot be resolved the refusal is reported as this project's own omission rather than a
+    # third party's, because the release that publishes no checksum is ours.
+    if ! fetch_verified_asset "$url" "$archive" "" unpack; then
+        rm -f "$archive"
+        return 1
+    fi
+
+    # The archive is unpacked as root and tar takes the mode and the owner from it, so
+    # the entries themselves have to be safe when there is no published hash to check.
+    if ! archive_entries_are_safe "$archive"; then
+        warn "Refusing to unpack $url: the archive has setuid, setgid or escaping entries."
+        rm -f "$archive"
+        return 1
+    fi
+
+    local tar_cmd=(tar --no-same-owner --no-same-permissions --exclude='bin' -C /usr -xzf "$archive")
     if [[ "$EUID" -ne 0 ]]; then
         if command -v caelestia_sudo >/dev/null 2>&1; then
             tar_cmd=(caelestia_sudo "${tar_cmd[@]}")
@@ -94,5 +104,8 @@ install_cava_sdk() {
         fi
     fi
 
-    curl -fsSL "$url" | "${tar_cmd[@]}" 2>/dev/null
+    local unpack_status=0
+    "${tar_cmd[@]}" 2>/dev/null || unpack_status=$?
+    rm -f "$archive"
+    return "$unpack_status"
 }

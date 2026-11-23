@@ -11,6 +11,7 @@
 #include <stop_token>
 #include <vector>
 
+#include "../Config/rootnodes.hpp"
 #include "service.hpp"
 
 Q_LOGGING_CATEGORY(lcAc, "caelestia.services.ac", QtInfoMsg)
@@ -18,10 +19,12 @@ Q_LOGGING_CATEGORY(lcAcWorker, "caelestia.services.ac.worker", QtInfoMsg)
 
 namespace caelestia::services {
 
-PipeWireWorker::PipeWireWorker(std::stop_token token, AudioCollector* collector)
+PipeWireWorker::PipeWireWorker(
+    std::stop_token token, AudioCollector* collector, caelestia::config::VisualiserInput::Enum captureMode)
     : m_loop(nullptr)
     , m_stream(nullptr)
     , m_timer(nullptr)
+    , m_stopEvent(nullptr)
     , m_idle(true)
     , m_token(token)
     , m_collector(collector) {
@@ -44,9 +47,22 @@ PipeWireWorker::PipeWireWorker(std::stop_token token, AudioCollector* collector)
     }
     pw_loop_update_timer(pw_main_loop_get_loop(m_loop), m_timer, &timeout, &timeout, false);
 
-    auto props = pw_properties_new(
-        PW_KEY_MEDIA_TYPE, "Audio", PW_KEY_MEDIA_CATEGORY, "Capture", PW_KEY_MEDIA_ROLE, "Music", nullptr);
-    pw_properties_set(props, PW_KEY_STREAM_CAPTURE_SINK, "true");
+    m_stopEvent = pw_loop_add_event(pw_main_loop_get_loop(m_loop), handleStop, this);
+    if (!m_stopEvent) {
+        qCWarning(lcAcWorker) << "init: failed to create stop event";
+        pw_main_loop_destroy(m_loop);
+        pw_deinit();
+        return;
+    }
+
+    // Output taps the default sink's monitor - everything the system is playing,
+    // and so the only case that is actually "Music". Input stays a plain capture
+    // stream, which PipeWire auto-connects to the default source.
+    auto props = pw_properties_new(PW_KEY_MEDIA_TYPE, "Audio", PW_KEY_MEDIA_CATEGORY, "Capture", nullptr);
+    if (captureMode == caelestia::config::VisualiserInput::Output) {
+        pw_properties_set(props, PW_KEY_STREAM_CAPTURE_SINK, "true");
+        pw_properties_set(props, PW_KEY_MEDIA_ROLE, "Music");
+    }
     pw_properties_setf(
         props, PW_KEY_NODE_LATENCY, "%u/%u", nextPowerOf2(512 * ac::SAMPLE_RATE / 48000), ac::SAMPLE_RATE);
     pw_properties_set(props, PW_KEY_NODE_PASSIVE, "true");
@@ -97,11 +113,25 @@ PipeWireWorker::PipeWireWorker(std::stop_token token, AudioCollector* collector)
         return;
     }
 
-    pw_main_loop_run(m_loop);
+    {
+        // stop() joins this thread from the main thread. While the stream is STREAMING the
+        // timer is off, so with no audio flowing (e.g. a bluetooth sink went away) no callback
+        // ever checks the token, the loop never exits and the whole shell hangs on join().
+        // The event wakes the loop up.
+        std::stop_callback onStop(m_token, [this] {
+            pw_loop_signal_event(pw_main_loop_get_loop(m_loop), m_stopEvent);
+        });
+        pw_main_loop_run(m_loop);
+    }
 
     pw_stream_destroy(m_stream);
     pw_main_loop_destroy(m_loop);
     pw_deinit();
+}
+
+void PipeWireWorker::handleStop(void* data, uint64_t) {
+    auto* self = static_cast<PipeWireWorker*>(data);
+    pw_main_loop_quit(self->m_loop);
 }
 
 void PipeWireWorker::handleTimeout(void* data, uint64_t expirations) {
@@ -237,7 +267,17 @@ AudioCollector::AudioCollector(QObject* parent)
     , m_buffer1(ac::CHUNK_SIZE)
     , m_buffer2(ac::CHUNK_SIZE)
     , m_readBuffer(&m_buffer1)
-    , m_writeBuffer(&m_buffer2) {}
+    , m_writeBuffer(&m_buffer2) {
+    auto* services = caelestia::config::ConfigSingleton::instance()->services();
+    QObject::connect(services, &caelestia::config::ServiceConfig::visualiserInputChanged, this, [this] {
+        // The worker builds its stream from the mode at start, so a running one
+        // has to be rebuilt; otherwise the next start() picks the change up.
+        if (m_thread.joinable()) {
+            stop();
+            start();
+        }
+    });
+}
 
 AudioCollector::~AudioCollector() {
     AudioCollector::stop();
@@ -250,8 +290,9 @@ void AudioCollector::start() {
 
     clearBuffer();
 
-    m_thread = std::jthread([this](std::stop_token token) {
-        PipeWireWorker worker(token, this);
+    const auto captureMode = caelestia::config::ConfigSingleton::instance()->services()->visualiserInput();
+    m_thread = std::jthread([this, captureMode](std::stop_token token) {
+        PipeWireWorker worker(token, this, captureMode);
     });
 }
 

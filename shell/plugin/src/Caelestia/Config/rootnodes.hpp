@@ -5,14 +5,15 @@
 
 #include "../Settings/layerregistry.hpp"
 #include "../Settings/rootnode.hpp"
-#include "appearanceconfig.hpp"
 #include "aiconfig.hpp"
+#include "appearanceconfig.hpp"
 #include "audioconfig.hpp"
 #include "backgroundconfig.hpp"
 #include "barconfig.hpp"
 #include "borderconfig.hpp"
 #include "common.hpp"
 #include "dashboardconfig.hpp"
+#include "dockconfig.hpp"
 #include "generalconfig.hpp"
 #include "launcherconfig.hpp"
 #include "lockconfig.hpp"
@@ -23,11 +24,11 @@
 #include "serviceconfig.hpp"
 #include "sessionconfig.hpp"
 #include "sidebarconfig.hpp"
+#include "tabswitchconfig.hpp"
 #include "tokens.hpp"
 #include "userpaths.hpp"
 #include "utilitiesconfig.hpp"
 #include "winfoconfig.hpp"
-#include "tabswitchconfig.hpp"
 
 namespace caelestia::config {
 
@@ -42,6 +43,7 @@ class ConfigRoot : public settings::RootNode {
     CONFIG_SUBOBJECT(BarConfig, bar)
     CONFIG_SUBOBJECT(BorderConfig, border)
     CONFIG_SUBOBJECT(DashboardConfig, dashboard)
+    CONFIG_SUBOBJECT(DockConfig, dockPanel)
     CONFIG_SUBOBJECT(LauncherConfig, launcher)
     CONFIG_SUBOBJECT(LockConfig, lock)
     CONFIG_SUBOBJECT(NexusConfig, nexus)
@@ -64,7 +66,6 @@ public:
 private:
     // Binds the computed appearance values to the global token base values
     void bindTokens();
-    void bindFont();
 };
 
 class TokensRoot : public settings::RootNode {

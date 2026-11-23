@@ -20,15 +20,19 @@ StyledRect {
     property string authorNameText: ""
     property string iconText: "extension"
     property string iconImageUrl: ""
+    // Update indicator
+    property bool isUpdateAvailable: false
+    property string updateVersionText: ""
+    // true while this plugin is being installed (spinner state)
+    property bool updateBusy: false
 
     default property Component actionComponent
 
     property bool isExpanded: false
     property string mediaUrl: ""
 
+    signal updateRequested()
 
-
-    // Helper for video
     function isVideo(url) {
         if (!url) return false;
         let lower = url.toString().toLowerCase();
@@ -43,11 +47,10 @@ StyledRect {
     }
 
     implicitHeight: contentColumn.implicitHeight + Tokens.padding.large * 2
-    
+
     radius: Tokens.rounding.large
     color: Colours.layer(Colours.palette.m3surfaceContainerHigh, root.isExpanded ? 3 : 1)
 
-    // Automatically play/pause media when expanded
     onIsExpandedChanged: {
         if (isExpanded && isVideo(mediaUrl)) {
             mediaPlay.play()
@@ -79,18 +82,16 @@ StyledRect {
         anchors.margins: Tokens.padding.large
         spacing: Tokens.spacing.large
 
-        // --- Header Row ---
         RowLayout {
             Layout.fillWidth: true
             spacing: Tokens.spacing.medium
 
-            // Circular Icon
             StyledClippingRect {
                 Layout.preferredHeight: 48
                 Layout.preferredWidth: 48
                 radius: Tokens.rounding.full
                 color: Colours.palette.m3secondaryContainer
-                
+
                 AnimatedImage {
                     id: pluginIconImage
 
@@ -99,7 +100,7 @@ StyledRect {
                     visible: root.iconImageUrl !== ""
                     fillMode: Image.PreserveAspectCrop
                     playing: true
-                    
+
                     opacity: status === Image.Ready ? 1 : 0
 
                     Behavior on opacity { Anim { type: Anim.DefaultEffects } }
@@ -116,7 +117,6 @@ StyledRect {
                 }
             }
 
-            // Title & Version row + description
             ColumnLayout {
                 Layout.fillWidth: true
                 spacing: 2
@@ -124,38 +124,116 @@ StyledRect {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: Tokens.spacing.extraSmall
-                    
+
                     StyledText {
                         text: root.titleText
                         font: Tokens.font.body.medium
                         color: Colours.palette.m3onSurface
                         elide: Text.ElideRight
                     }
-                    
-                    StyledRect {
-                        color: Qt.lighter(Colours.palette.m3surfaceVariant, 1.5)
-                        radius: Tokens.rounding.small
-                        implicitWidth: versionBadge.implicitWidth + Tokens.padding.small * 2
-                        implicitHeight: versionBadge.implicitHeight + Tokens.padding.extraSmall
-                        Layout.alignment: Qt.AlignVCenter
-                        
-                        StyledText {
-                            id: versionBadge
 
-                            anchors.centerIn: parent
-                            text: "v" + root.versionText
-                            color: Colours.palette.m3onSurfaceVariant
-                            font: Tokens.font.label.small
+                    RowLayout {
+                        spacing: Tokens.spacing.medium
+
+                        StyledRect {
+                            color: Qt.lighter(Colours.palette.m3surfaceVariant, 1.5)
+                            radius: Tokens.rounding.small
+                            implicitWidth: versionBadge.implicitWidth + Tokens.padding.small * 2
+                            implicitHeight: versionBadge.implicitHeight + Tokens.padding.extraSmall
+                            Layout.alignment: Qt.AlignVCenter
+
+                            StyledText {
+                                id: versionBadge
+
+                                anchors.centerIn: parent
+                                text: "v" + root.versionText
+                                color: Colours.palette.m3onSurfaceVariant
+                                font: NexusStyle.secondaryFont
+                            }
+                        }
+
+                        // Option 1: opacity pulse
+                        StyledRect {
+                            id: updateBadgeA
+
+                            visible: root.isUpdateAvailable
+                            color: Colours.palette.m3primary
+                            radius: Tokens.rounding.full
+                            implicitWidth: updateBadgeRowA.implicitWidth + Tokens.padding.small * 2
+                            implicitHeight: updateBadgeRowA.implicitHeight + Tokens.padding.extraSmall
+                            Layout.alignment: Qt.AlignVCenter
+
+                            SequentialAnimation on opacity {
+                                loops: Animation.Infinite
+                                running: root.isUpdateAvailable && !root.updateBusy && Tokens.anim.enabled
+
+                                Anim {
+                                    duration: Tokens.anim.durations.extraLarge
+                                    easing: Tokens.anim.expressiveSlowEffects
+                                    from: 1
+                                    to: 0.55
+                                }
+                                Anim {
+                                    duration: Tokens.anim.durations.extraLarge
+                                    easing: Tokens.anim.expressiveSlowEffects
+                                    from: 0.55
+                                    to: 1
+                                }
+                            }
+
+                            RowLayout {
+                                id: updateBadgeRowA
+
+                                anchors.centerIn: parent
+                                spacing: Tokens.spacing.extraSmall
+
+                                MaterialIcon {
+                                    id: updateBadgeIconA
+
+                                    visible: !root.updateBusy
+                                    text: "system_update_alt"
+                                    color: Colours.palette.m3onPrimary
+                                    fontStyle: Tokens.font.icon.builders.medium.weight(Font.Medium).build()
+                                    fill: 1
+                                }
+
+                                CircularIndicator {
+                                    id: updateSpinnerA
+
+                                    visible: root.updateBusy
+                                    running: root.updateBusy
+                                    implicitSize: updateBadgeIconA.implicitHeight
+                                    strokeWidth: Tokens.padding.extraSmall
+                                    fgColour: Colours.palette.m3onPrimary
+                                    bgColour: Qt.alpha(Colours.palette.m3onPrimary, 0.3)
+                                }
+
+                                StyledText {
+                                    visible: root.updateVersionText !== ""
+                                    text: root.updateVersionText
+                                    color: Colours.palette.m3onPrimary
+                                    font: NexusStyle.secondaryFont
+                                }
+                            }
+
+                            // Clicking the badge updates the plugin in place
+                            MouseArea {
+                                anchors.fill: parent
+                                enabled: root.isUpdateAvailable && !root.updateBusy
+                                hoverEnabled: true
+                                cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                onClicked: root.updateRequested()
+                            }
                         }
                     }
 
-                    Item { Layout.fillWidth: true } // spacer
+                    Item { Layout.fillWidth: true }
                 }
 
                 StyledText {
                     Layout.fillWidth: true
                     text: root.descriptionText
-                    font: Tokens.font.label.small
+                    font: NexusStyle.secondaryFont
                     color: Colours.palette.m3onSurfaceVariant
                     elide: Text.ElideRight
                     wrapMode: root.isExpanded ? Text.Wrap : Text.NoWrap
@@ -164,7 +242,6 @@ StyledRect {
                 }
             }
 
-            // Action Item Loader
             Loader {
                 active: !!root.actionComponent
                 sourceComponent: root.actionComponent
@@ -179,18 +256,17 @@ StyledRect {
             }
         }
 
-        // --- Expanded Content Row ---
         ColumnLayout {
             id: expandedContent
             Layout.fillWidth: true
 
             spacing: Tokens.spacing.large
             visible: root.isExpanded
-            
+
             Item {
                 id: mediaItem
                 Layout.fillWidth: true
-                Layout.preferredHeight: root.mediaUrl ? 220 : 0
+                Layout.preferredHeight: (root.mediaUrl && root.isExpanded) ? 220 : 0
 
                 visible: true
                 clip: true
@@ -208,8 +284,8 @@ StyledRect {
 
                     anchors.fill: parent
                     anchors.margins: Tokens.padding.small
-                    source: root.mediaUrl
-                    visible: !root.isVideo(root.mediaUrl)
+                    source: (!root.isVideo(root.mediaUrl) && root.isExpanded) ? root.mediaUrl : ""
+                    visible: !root.isVideo(root.mediaUrl) && root.isExpanded
                     fillMode: Image.PreserveAspectFit
                     playing: visible
                 }
@@ -219,7 +295,7 @@ StyledRect {
 
                     anchors.fill: parent
                     anchors.margins: Tokens.padding.small
-                    visible: root.isVideo(root.mediaUrl)
+                    visible: root.isVideo(root.mediaUrl) && root.isExpanded
                     fillMode: VideoOutput.PreserveAspectFit
                 }
             }
@@ -236,29 +312,30 @@ StyledRect {
 
                     anchors.centerIn: parent
                     text: root.authorNameText ? "by " + root.authorNameText : ""
-                    font: Tokens.font.label.small
+                    font: NexusStyle.secondaryFont
                     color: Colours.palette.m3primary
                 }
             }
 
             AudioOutput {
-                    id: aOut
+                id: aOut
 
-                    muted: true
-                }
-                MediaPlayer {
-                    id: mediaPlay
+                muted: true
+            }
 
-                    videoOutput: vidOut
-                    audioOutput: aOut
-                    source: root.isVideo(root.mediaUrl) ? root.mediaUrl : ""
-                    loops: MediaPlayer.Infinite
-                    
-                    onSourceChanged: {
-                        if (root.isVideo(root.mediaUrl) && root.isExpanded) play()
-                        else pause()
-                    }
+            MediaPlayer {
+                id: mediaPlay
+
+                videoOutput: vidOut
+                audioOutput: aOut
+                source: (root.isVideo(root.mediaUrl) && root.isExpanded) ? root.mediaUrl : ""
+                loops: MediaPlayer.Infinite
+
+                onSourceChanged: {
+                    if (root.isVideo(root.mediaUrl) && root.isExpanded) play()
+                    else pause()
                 }
+            }
         }
     }
 }

@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
+import Caelestia
 import Caelestia.Config
 import qs.components
 import qs.components.controls
@@ -17,8 +18,11 @@ Item {
 
     readonly property bool isBarHorizontal: Config.bar.position === "top" || Config.bar.position === "bottom"
     readonly property bool showPopoutSeparator: isBarHorizontal && root.visibilities.sidebar && popouts && popouts.hasCurrent && popouts.currentName !== "dockhover" && popouts.currentName !== "dockcontext" && popouts.currentName !== "activewindow" && popouts.currentName !== "greeter" && popouts.currentName !== "greetercontext" && popouts.currentName !== "github"
-    readonly property bool aiBusy: aiLoader.item ? (aiLoader.item.isTyping || aiLoader.item.inAgentLoop) : false
-    readonly property bool aiEnabled: GlobalConfig.ai.enableAiAssistant && (GlobalConfig.ai.enableOllama || GlobalConfig.ai.enableClaudeCode || GlobalConfig.ai.enableClaude || GlobalConfig.ai.enableOpenai || GlobalConfig.ai.enableGemini || GlobalConfig.ai.enableOpenrouter || GlobalConfig.ai.enableOpencode || GlobalConfig.ai.enableOpencodeGo)
+    // Keeps the sidebar loaded after it is closed: the assistant is still replying,
+    // or one of the shell's file dialogs is open (clicking into a dialog can close
+    // the sidebar, and unloading it would destroy the dialog's owner with it).
+    readonly property bool keepLoaded: (aiLoader.item?.busy ?? false) || Visibilities.openDialogs > 0
+    readonly property bool aiEnabled: GlobalConfig.ai.enableAiAssistant && (GlobalConfig.ai.enableOllama || GlobalConfig.ai.enableClaudeCode || GlobalConfig.ai.enableClaude || GlobalConfig.ai.enableOpenai || GlobalConfig.ai.enableGemini || GlobalConfig.ai.enableOpenrouter || GlobalConfig.ai.enableOpencode || GlobalConfig.ai.enableOpencodeGo || GlobalConfig.ai.enableCheaperInference)
 
     function checkAiTab(): void {
         if (!root.aiEnabled && root.activeTab === "ai") {
@@ -29,7 +33,17 @@ Item {
         }
     }
 
-    Component.onCompleted: checkAiTab()
+    Component.onCompleted: {
+        if (root.visibilities.sidebar) {
+            root.activeTab = Visibilities.initialSidebarTab || Visibilities.sidebarOpenTab();
+            Visibilities.initialSidebarTab = "";
+        }
+        checkAiTab();
+    }
+    onActiveTabChanged: {
+        if (root.visibilities.sidebar)
+            Visibilities.lastSidebarTab = activeTab;
+    }
 
     Connections {
         function onEnableAiAssistantChanged(): void { checkAiTab(); }
@@ -41,6 +55,7 @@ Item {
         function onEnableOpenrouterChanged(): void { checkAiTab(); }
         function onEnableOpencodeChanged(): void { checkAiTab(); }
         function onEnableOpencodeGoChanged(): void { checkAiTab(); }
+        function onEnableCheaperInferenceChanged(): void { checkAiTab(); }
         function onShowNewsChanged(): void { checkAiTab(); }
 
         target: GlobalConfig.ai
@@ -49,7 +64,8 @@ Item {
     Connections {
         function onSidebarChanged(): void {
             if (root.visibilities.sidebar) {
-                root.activeTab = Visibilities.initialSidebarTab;
+                root.activeTab = Visibilities.initialSidebarTab || Visibilities.sidebarOpenTab();
+                Visibilities.initialSidebarTab = "";
                 checkAiTab();
             }
         }
@@ -76,7 +92,6 @@ Item {
                 anchors.fill: parent
                 spacing: 0
 
-                // Tab Switcher Header
                 Item {
                     id: headerContainer
 
@@ -137,6 +152,7 @@ Item {
                                         fontStyle: Tokens.font.icon.small
                                         fill: tabBtn.active ? 1 : 0
 
+                                        Behavior on color { CAnim {} }
                                         Behavior on fill { Anim { type: Anim.DefaultEffects } }
                                     }
 
@@ -145,13 +161,14 @@ Item {
                                         text: tabBtn.modelData.label
                                         color: tabBtn.active ? Colours.palette.m3primary : stateLayer.containsMouse ? Colours.palette.m3onSurface : Colours.palette.m3onSurfaceVariant
                                         font: Tokens.font.label.medium
+
+                                        Behavior on color { CAnim {} }
                                     }
                                 }
                             }
                         }
                     }
 
-                    // Sliding Indicator
                     Item {
                         id: indicator
 
@@ -180,9 +197,40 @@ Item {
                             Anim {}
                         }
                     }
+
+                    // Pin: keep the sidebar open until it is closed explicitly.
+                    Item {
+                        anchors.top: parent.top
+                        anchors.right: parent.right
+                        anchors.topMargin: 2
+                        anchors.rightMargin: 2
+                        z: 1
+                        implicitWidth: 26
+                        implicitHeight: 26
+
+                        StateLayer {
+                            id: pinStateLayer
+
+                            radius: Tokens.rounding.full
+                            color: Colours.palette.m3onSurface
+                            onClicked: GlobalConfig.sidebar.pinned = !GlobalConfig.sidebar.pinned
+                        }
+
+                        MaterialIcon {
+                            anchors.centerIn: parent
+                            text: "push_pin"
+                            rotation: Visibilities.sidebarPinned ? 0 : 45
+                            fill: Visibilities.sidebarPinned ? 1 : 0
+                            color: Visibilities.sidebarPinned ? Colours.palette.m3primary : pinStateLayer.containsMouse ? Colours.palette.m3onSurface : Colours.palette.m3outline
+                            fontStyle: Tokens.font.icon.small
+
+                            Behavior on rotation { Anim { type: Anim.DefaultEffects } }
+                            Behavior on fill { Anim { type: Anim.DefaultEffects } }
+                            Behavior on color { CAnim {} }
+                        }
+                    }
                 }
 
-                // Divider
                 StyledRect {
                     Layout.fillWidth: true
                     implicitHeight: 1
@@ -190,7 +238,6 @@ Item {
                     color: Colours.palette.m3outlineVariant
                 }
 
-                // Content Panel Stack
                 Item {
                     property int activeIndex: indicator.activeIndex
 
@@ -248,7 +295,6 @@ Item {
             }
         }
 
-        // Utilities Separator
         StyledRect {
             visible: utilities && utilities.offsetScale < 1
             Layout.row: Config.bar.position === "bottom" ? 0 : (Config.bar.position === "top" ? 2 : 1)
@@ -260,7 +306,6 @@ Item {
             color: Colours.tPalette.m3outlineVariant
         }
 
-        // Popout Separator
         StyledRect {
             visible: showPopoutSeparator
             Layout.row: Config.bar.position === "bottom" ? 2 : 0

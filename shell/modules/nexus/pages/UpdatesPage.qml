@@ -6,179 +6,186 @@ import QtQuick.Layouts
 import QtCore
 import Quickshell
 import Quickshell.Io
-import Caelestia
 import Caelestia.Config
 import qs.components
-import qs.components.containers
 import qs.components.controls
 import qs.services
 import qs.utils
-import qs.modules.nexus
 import qs.modules.nexus.common
+import "../common/updateModel.js" as UpdateModel
 
+// The status of the install, presented the way the pane this is modelled on does it:
+// one row that answers "am I safe, and what happens if I click" - a symbol, a title, a
+// subtitle and the one button that acts - with the settings that decide that answer in
+// the group under it and the version history kept below as reference.
 PageBase {
     id: root
 
-    // ── Branch menu items ──────────────────────────────────────────────────
     readonly property list<MenuItem> branchItems: branchVariants.instances
 
     readonly property var activeBranchItem: {
-        const found = branchItems.find(function(i) { return i.text === UpdateChecker.currentBranch; });
+        const found = branchItems.find(function(i) {
+            return i.text === UpdateChecker.currentBranch;
+        });
         return found || (branchItems.length > 0 ? branchItems[0] : null);
     }
 
-    // ── Update process state ───────────────────────────────────────────────
-    // Backed by the UpdateChecker singleton (not local properties) so the
-    // running update, its progress and logs survive navigating away from
-    // this page and back — see Pages.qml, which destroys/recreates the page
-    // Item on every top-level page switch.
-    readonly property bool updateRunning: UpdateChecker.updateRunning
-
-    readonly property real updateProgress: UpdateChecker.updateProgress
-
-    readonly property string updateStatus: UpdateChecker.updateStatus
-
-    readonly property string updateLogs: UpdateChecker.updateLogs
-
-    // ── Timeline selection state ───────────────────────────────────────────
     property string selectedVersionId: ""
-
     property string pendingBranch: ""
-    // Customize Installation is collapsed by default (see section 4 below)
-    // so the commit/version timeline stays the visual focus of the page.
+    property bool launchFailed: false
+    // Set when a run was started and has not yet shown a sign of life. The update has no
+    // terminal to fail visibly in, so this is what notices that it never began.
+    property bool awaitingStart: false
+    property string backupError: ""
+    property bool timelineExpanded: false
+    property bool showInternal: false
 
-    property bool installOptionsExpanded: false
+    property bool configuredTerminalAvailable: true
+    property bool konsoleAvailable: false
 
     readonly property bool branchDataLoading: root.pendingBranch !== "" && UpdateChecker.checkingUpdates
 
-    readonly property int updatesPageIdx: {
-        const idx = PageRegistry.indexForKey("updates");
-        if (idx >= 0) return idx;
-        return PageRegistry.pages.length > 0 ? Math.min(Math.max(nState.currentPageIdx, 0), PageRegistry.pages.length - 1) : 0;
+    readonly property var entries: UpdateModel.deriveEntries({
+        versionSummaryMode: UpdateChecker.versionSummaryMode,
+        availableVersions: UpdateChecker.availableVersions,
+        currentVersion: UpdateChecker.currentVersion,
+        commits: UpdateChecker.commits,
+        installedCommitHash: UpdateChecker.installedCommitHash
+    })
+
+    readonly property var shown: UpdateModel.disclosure(root.entries, root.timelineExpanded, root.showInternal, 1)
+
+    readonly property var selection: {
+        const entry = UpdateModel.entryById(root.entries, root.selectedVersionId);
+        return entry === null ? null : {
+            id: entry.id,
+            state: entry.state,
+            label: entry.label
+        };
     }
 
-    readonly property var selectedEntry: {
-        for (let i = 0; i < root.timelineEntries.length; i++) {
-            if (root.timelineEntries[i].id === root.selectedVersionId)
-                return root.timelineEntries[i];
+    readonly property var status: UpdateStatus.describe(root.selection, root.launchFailed)
+
+    readonly property var preview: UpdateModel.previewEntry(root.entries, root.selectedVersionId)
+    readonly property string notesText: root.preview !== null && root.preview.isRelease ? UpdateModel.formatNotes(root.preview.details) : ""
+    readonly property string releaseUrl: root.preview !== null && root.preview.isRelease ? root.preview.url : ""
+
+    // The configured terminal is a bare command and may not be installed - the
+    // default is foot, which a KDE box often does not have - so fall back to
+    // konsole, KDE's own terminal, instead of launching nothing.
+    readonly property list<string> terminalCommand: root.configuredTerminalAvailable ? GlobalConfig.general.apps.terminal : ["konsole"]
+    readonly property bool terminalAvailable: root.configuredTerminalAvailable || root.konsoleAvailable
+    readonly property bool busy: UpdateChecker.checkingUpdates && root.status.primary === null
+
+    readonly property int inset: Tokens.padding.largeIncreased
+
+    function runAction(key): void {
+        if (key === "check") {
+            root.checkNow();
+        } else if (key === "turnOn") {
+            GlobalConfig.general.checkUpdates = true;
+            root.checkNow();
+        } else if (key === "restore") {
+            confirmDialog.open();
+        } else if (key === "install" || key === "reinstall" || key === "reopen") {
+            root.launchUpdater();
+        } else if (key === "terminal") {
+            root.runInTerminal();
+        } else if (key === "stage") {
+            root.stageUpdate();
+        } else if (key === "copy") {
+            root.copyCommand();
+        } else if (key === "clear") {
+            root.selectedVersionId = "";
+        } else if (key === "dismiss") {
+            UpdateChecker.dismissHandoff();
+        } else if (key === "dismissResult") {
+            UpdateChecker.clearResult();
         }
-        return null;
     }
 
-    readonly property bool timelineSelectionEnabled: true
-
-    readonly property string selectedVersionState: root.selectedEntry ? root.selectedEntry.state : ""
-
-    readonly property bool selectionIsRevert: root.timelineSelectionEnabled && root.selectedVersionState === "past"
-
-    readonly property bool selectionIsFuture: root.timelineSelectionEnabled && root.selectedVersionState === "available"
-
-    readonly property bool selectionIsReinstall: root.timelineSelectionEnabled && root.selectedVersionState === "current"
-
-    // Drives both the primary button's visibility and the secondary button's
-    // width (it takes over as the sole, full-width action when the primary
-    // one isn't shown) — see the action row below.
-    readonly property bool primaryActionVisible: {
-        if (root.updateRunning) return false;
-        if (root.updateProgress === 1.0) return true;
-        if (root.selectionIsRevert) return true;
-        if (root.selectionIsReinstall) return true;
-        if (root.selectionIsFuture && root.selectedVersionId !== "") return true;
-        return UpdateChecker.hasUpdate;
+    function checkNow(): void {
+        root.launchFailed = false;
+        UpdateChecker.checkNow();
     }
 
-    // ── Timeline data ──────────────────────────────────────────────────────
-    readonly property var timelineEntries: {
-        if (UpdateChecker.versionSummaryMode && UpdateChecker.availableVersions.length > 0) {
-            // Version mode: full timeline with available + current + past
-            const versions = UpdateChecker.availableVersions;
-            const current = UpdateChecker.currentVersion;
-            const currentIdx = current === "unknown"
-                ? -2
-                : versions.findIndex(v => v === current || v.replace(/^v/i, "") === current.replace(/^v/i, ""));
-            const result = [];
-            for (let i = 0; i < versions.length; i++) {
-                let state;
-                if (currentIdx === -2) {
-                    // Unknown install: no release may be presented as the
-                    // installed one, and none counts as an available update.
-                    state = "past";
-                } else if (currentIdx === -1) {
-                    state = i === 0 ? "current" : "past";
-                } else if (i < currentIdx) {
-                    state = "available";
-                } else if (i === currentIdx) {
-                    state = "current";
-                } else {
-                    state = "past";
-                }
-                result.push({ id: versions[i], label: versions[i], state: state, subject: "", isRelease: true });
-            }
-            return result;
-        } else {
-            // Commit mode (dev branch): full git-log-style history (newest first).
-            // Commits ahead of the installed one are "available", the installed
-            // commit itself is "current", and older commits are "past" — mirroring
-            // how the version timeline treats releases.
-            const commits = UpdateChecker.commits;
-            const localHash = UpdateChecker.installedCommitHash;
-            const localIdx = localHash !== "" ? commits.findIndex(c => c.fullHash === localHash || c.hash === localHash) : -1;
-            const result = [];
-            for (let i = 0; i < commits.length; i++) {
-                const c = commits[i];
-                let state;
-                if (localHash === "") {
-                    // No installed commit on record: only mark the newest as current.
-                    state = i === 0 ? "current" : "past";
-                } else if (localIdx === -1) {
-                    // Installed commit is older than the displayed window — every
-                    // commit shown is ahead of it.
-                    state = "available";
-                } else if (i < localIdx) {
-                    state = "available";
-                } else if (i === localIdx) {
-                    state = "current";
-                } else {
-                    state = "past";
-                }
-                result.push({
-                    id: c.hash,
-                    label: c.hash,
-                    subject: c.subject || "",
-                    state: state,
-                    isMerge: !!c.isMerge,
-                    isRelease: false,
-                    author: c.author || "",
-                    date: c.date || ""
-                });
-            }
-            // Merges carry no user-facing change of their own and made up half the
-            // list. Drop them, except when the running shell is sitting on one:
-            // the timeline has to keep marking the commit it is installed at.
-            return result.filter(e => !e.isMerge || e.state === "current");
+    function copyCommand(): void {
+        // An empty selection is not a version: passing "" would suppress the version the
+        // card is about, so the copied command would not be the one on screen.
+        const version = root.selectedVersionId === "" ? undefined : root.selectedVersionId;
+        const command = UpdateChecker.updaterArgs(version).join(" ");
+        Quickshell.execDetached(["sh", "-c", "printf %s \"$1\" | wl-copy", "--", command]);
+    }
+
+    // The terminal holds its window open afterwards: the update restarts the shell and its
+    // output is what the user needs to read. The arguments are exec'd as they are - naming
+    // the program again would hand the updater "caelestia-update" as its first argument,
+    // which is not a branch, so it falls back to main and drops the version asked for.
+    function launchInTerminal(args): void {
+        if (!root.terminalAvailable) {
+            root.launchFailed = true;
+            return;
         }
+        const hold = '"$@"; s=$?; printf "\\n[update exited with status %s] Press Enter to close..." "$s"; read -r _';
+        Launch.exec([...root.terminalCommand, "sh", "-c", hold, "sh", ...args]);
+    }
+
+    // The update runs on its own, not in a terminal the user has to watch: it restarts the
+    // shell by the end, so its progress comes back through the record it writes, and the
+    // pane keeps working while it runs. The terminal stays available as the escape hatch
+    // for an escalation prompt or a failure worth reading.
+    function launchUpdater(): void {
+        root.launchFailed = false;
+        const version = root.selectedVersionId !== "" ? root.selectedVersionId : UpdateChecker.handoffVersion;
+        root.selectedVersionId = "";
+        Launch.exec(UpdateChecker.updaterArgs(version));
+        UpdateChecker.markHandoff(version);
+        root.awaitingStart = true;
+    }
+
+    function runInTerminal(): void {
+        root.launchFailed = false;
+        const version = UpdateChecker.handoffVersion;
+        root.launchInTerminal(UpdateChecker.updaterArgs(version));
+        UpdateChecker.markHandoff(version);
+    }
+
+    function stageUpdate(): void {
+        root.launchFailed = false;
+        const version = root.selectedVersionId === "" ? undefined : root.selectedVersionId;
+        root.launchInTerminal(UpdateChecker.stageArgs(version));
+        UpdateChecker.markStaged(version);
     }
 
     title: qsTr("Updates")
 
-    headerActions: [
-        IconTextButton {
-            text: qsTr("Help")
-            icon: "help"
-            type: TextButton.Tonal
-            scale: pressed ? 0.95 : 1.0
-            onClicked: Qt.openUrlExternally("https://github.com/ladybug-me/caelestia-kde/blob/main/docs/TROUBLESHOOTING.md#10-update-issues")
-
-            Behavior on scale {
-                Anim {
-                    type: Anim.DefaultEffects
-                }
-            }
-        }
-    ]
-
     Item {
         visible: false
+
+        // A run started from here has no terminal to fail in, so nothing would tell the
+        // reader that it never began. Eight seconds is enough for the process to reach its
+        // first stage; after that the pane offers the terminal and the command instead.
+        Timer {
+            interval: 8000
+            repeat: false
+            running: root.awaitingStart && UpdateChecker.handoff === UpdateChecker.Handoff.Pending && UpdateChecker.progressTotal === 0
+            onTriggered: {
+                root.awaitingStart = false;
+                root.launchFailed = true;
+            }
+        }
+
+        // pendingBranch describes one check: the one its channel pick started. Left set,
+        // every later check - the periodic one, a retry - re-shows "Switching to X…" and
+        // hides the settings below it while nothing is being switched.
+        Connections {
+            function onCheckingUpdatesChanged(): void {
+                if (!UpdateChecker.checkingUpdates)
+                    root.pendingBranch = "";
+            }
+
+            target: UpdateChecker
+        }
 
         Variants {
             id: branchVariants
@@ -192,552 +199,403 @@ PageBase {
                 icon: "call_split"
             }
         }
-
-        Connections {
-            function onCommitsChanged() { root.selectedVersionId = ""; }
-
-            function onVersionSummaryModeChanged() { root.selectedVersionId = ""; }
-
-            function onAvailableVersionsChanged() { root.selectedVersionId = ""; }
-
-            function onCurrentBranchChanged() { root.selectedVersionId = ""; }
-
-            function onCurrentVersionChanged() { root.selectedVersionId = ""; }
-
-            function onInstalledCommitHashChanged() { root.selectedVersionId = ""; }
-
-            function onCheckingUpdatesChanged() {
-                if (!UpdateChecker.checkingUpdates)
-                    root.pendingBranch = "";
-            }
-
-            target: UpdateChecker
-        }
     }
 
-    // ── UI ─────────────────────────────────────────────────────────────────
     ColumnLayout {
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.top: parent.top
         width: root.cappedWidth
-        spacing: Tokens.spacing.extraSmall / 2
+        spacing: Tokens.spacing.large
 
-        // 1 ── STATUS BANNER ───────────────────────────────────────────────
+        // ---- the row that is the whole task -------------------------------------
         ConnectedRect {
-            visible: !root.branchDataLoading
             first: true
             last: true
             Layout.fillWidth: true
-            implicitHeight: statusCol.implicitHeight + Tokens.padding.largeIncreased * 2
-
-            ColumnLayout {
-                id: statusCol
-                anchors {
-                    left: parent.left
-                    right: parent.right
-                    top: parent.top
-                    margins: Tokens.padding.largeIncreased
-                }
-
-                spacing: Tokens.spacing.small
-
-                MaterialIcon {
-                    Layout.alignment: Qt.AlignHCenter
-                    fontStyle: Tokens.font.icon.extraLarge
-                    text: {
-                        if (root.updateProgress === 1.0) return "done_all";
-                        if (root.updateRunning) return "sync";
-                        if (root.selectionIsRevert) return "history";
-                        if (root.selectionIsReinstall) return "replay";
-                        if (UpdateChecker.currentVersion === "unknown" && !UpdateChecker.hasUpdate) return "help";
-                        return UpdateChecker.hasUpdate ? "update" : "check_circle";
-                    }
-                    color: (UpdateChecker.hasUpdate || root.updateRunning || root.updateProgress === 1.0 || root.selectedVersionId !== "")
-                        ? Colours.palette.m3primary
-                        : Colours.palette.m3onSurfaceVariant
-                }
-
-                StyledText {
-                    Layout.alignment: Qt.AlignHCenter
-                    Layout.fillWidth: true
-                    font: Tokens.font.title.medium
-                    color: (UpdateChecker.hasUpdate || root.updateRunning || root.updateProgress === 1.0 || root.selectedVersionId !== "")
-                        ? Colours.palette.m3onSurface
-                        : Colours.palette.m3onSurfaceVariant
-                    horizontalAlignment: Text.AlignHCenter
-                    wrapMode: Text.Wrap
-                    maximumLineCount: 2
-                    elide: Text.ElideRight
-                    text: {
-                        if (root.updateProgress === 1.0) return qsTr("Update complete - log out to apply");
-                        if (root.updateRunning) return root.updateStatus || qsTr("Updating…");
-                        if (root.selectionIsRevert) return qsTr("Restore to %1?").arg(root.selectedVersionId);
-                        if (root.selectionIsReinstall) return qsTr("Reinstall %1?").arg(root.selectedVersionId);
-                        if (root.selectionIsFuture && root.selectedVersionId !== "")
-                            return qsTr("Install %1?").arg(root.selectedVersionId);
-                        if (UpdateChecker.hasUpdate) {
-                            return UpdateChecker.versionSummaryMode
-                                ? qsTr("New version available on %1").arg(UpdateChecker.currentBranch)
-                                : qsTr("%1 new commits on %2").arg(UpdateChecker.pendingCount).arg(UpdateChecker.currentBranch);
-                        }
-                        if (UpdateChecker.currentVersion === "unknown")
-                            return qsTr("Installed version unknown");
-                        return qsTr("You're up to date");
-                    }
-                }
-
-                StyledText {
-                    Layout.alignment: Qt.AlignHCenter
-                    visible: UpdateChecker.currentVersion !== "unknown" && !root.updateRunning && root.updateProgress !== 1.0 && root.selectedVersionId === ""
-                    text: UpdateChecker.versionSummaryMode
-                        ? qsTr("Installed: %1").arg(UpdateChecker.currentVersion)
-                        : qsTr("Channel: %1").arg(UpdateChecker.currentBranch)
-                    color: Colours.palette.m3onSurfaceVariant
-                    font: Tokens.font.label.medium
-                }
-
-                StyledProgressBar {
-                    Layout.fillWidth: true
-                    Layout.topMargin: Tokens.spacing.extraSmall
-                    visible: root.updateRunning
-                    value: root.updateProgress
-                    indeterminate: root.updateProgress === 0.0 && root.updateRunning
-                }
-
-                // Actions — the primary CTA always fills the remaining row
-                // width (and the whole row, when it's the only action shown)
-                // so it stays prominent and never overflows narrower windows.
-                RowLayout {
-                    Layout.fillWidth: true
-                    Layout.topMargin: Tokens.spacing.small
-                    spacing: Tokens.spacing.small
-
-                    // Primary action button
-                    IconTextButton {
-                        Layout.fillWidth: true
-                        visible: root.primaryActionVisible
-                        text: {
-                            if (root.updateProgress === 1.0) return qsTr("Log Out");
-                            if (root.selectionIsRevert) return qsTr("Restore");
-                            if (root.selectionIsReinstall) return qsTr("Reinstall");
-                            if (root.selectionIsFuture && root.selectedVersionId !== "")
-                                return qsTr("Install %1").arg(root.selectedVersionId);
-                            return qsTr("Install Update");
-                        }
-                        type: TextButton.Filled
-                        font: Tokens.font.body.medium
-                        horizontalPadding: Tokens.padding.large
-                        verticalPadding: Tokens.padding.medium
-                        icon: {
-                            if (root.updateProgress === 1.0) return "logout";
-                            if (root.selectionIsRevert) return "history";
-                            if (root.selectionIsReinstall) return "replay";
-                            return "system_update_alt";
-                        }
-                        onClicked: {
-                            if (root.updateProgress === 1.0) {
-                                logoutProcess.running = true;
-                            } else {
-                                const target = root.selectedVersionId;
-                                root.selectedVersionId = "";
-                                if (!nState.isWindow) {
-                                    WindowFactory.create(null, {
-                                        initialPageIdx: root.updatesPageIdx
-                                    });
-                                    nState.close();
-                                    Qt.callLater(() => UpdateChecker.startUpdate(target));
-                                    return;
-                                }
-                                UpdateChecker.startUpdate(target);
-                            }
-                        }
-                    }
-
-                    // Secondary: Stop / Check for updates / Cancel selection.
-                    // Takes over the full row width itself whenever the
-                    // primary action is hidden (e.g. while an update runs),
-                    // so there's always exactly one clear, prominent action.
-                    IconTextButton {
-                        id: secondaryActionButton
-
-                        readonly property bool isChecking: UpdateChecker.checkingUpdates && !root.updateRunning && root.selectedVersionId === ""
-
-                        Layout.fillWidth: !root.primaryActionVisible
-                        visible: root.updateProgress !== 1.0
-                        disabled: isChecking
-                        text: {
-                            if (root.updateRunning) return qsTr("Stop");
-                            if (root.selectedVersionId !== "") return qsTr("Cancel");
-                            if (isChecking) return qsTr("Checking…");
-                            return qsTr("Check");
-                        }
-                        type: TextButton.Tonal
-                        font: Tokens.font.body.medium
-                        horizontalPadding: Tokens.padding.large
-                        verticalPadding: Tokens.padding.medium
-                        icon: root.updateRunning ? "stop" : (root.selectedVersionId !== "" ? "close" : "refresh")
-                        onClicked: {
-                            if (root.updateRunning) {
-                                UpdateChecker.stopUpdate();
-                            } else if (root.selectedVersionId !== "") {
-                                root.selectedVersionId = "";
-                            } else {
-                                UpdateChecker.checkUpdates();
-                            }
-                        }
-
-                        // Spin the refresh icon while a check is in flight so
-                        // the button visibly reflects that something is
-                        // happening — previously it gave no feedback at all.
-                        RotationAnimation {
-                            target: secondaryActionButton.iconLabel
-                            property: "rotation"
-                            running: secondaryActionButton.isChecking
-                            loops: Animation.Infinite
-                            from: 0
-                            to: 360
-                            duration: 900
-                        }
-                    }
-                }
-            }
-        }
-
-        // 2 ── CHANNEL SELECTOR ────────────────────────────────────────────
-        SectionHeader { text: qsTr("General") }
-
-        SelectRow {
-            first: true
-            enabled: !root.branchDataLoading
-            label: qsTr("Update channel")
-            subtext: UpdateChecker.currentBranch === "main"
-                ? qsTr("Stable releases")
-                : qsTr("Development builds - may be unstable")
-            menuItems: root.branchItems
-            active: root.activeBranchItem
-            fallbackText: UpdateChecker.currentBranch
-            fallbackIcon: "call_split"
-            onSelected: function(item) {
-                root.selectedVersionId = "";
-                root.pendingBranch = item.text !== UpdateChecker.currentBranch ? item.text : "";
-                UpdateChecker.checkUpdates(item.text);
-            }
-        }
-
-        ToggleRow {
-            visible: !root.branchDataLoading
-            text: qsTr("Show Update Indicator")
-            subtext: qsTr("Show a notification icon in the taskbar when updates are available")
-            checked: {
-                const entries = GlobalConfig.bar.entries;
-                for (let i = 0; i < entries.length; i++) {
-                    if (entries[i].id === "updateIndicator") return entries[i].enabled;
-                }
-                return false;
-            }
-            onToggled: {
-                let entries = GlobalConfig.bar.entries;
-                let found = false;
-                for (let i = 0; i < entries.length; i++) {
-                    if (entries[i].id === "updateIndicator") {
-                        let entry = Object.assign({}, entries[i]);
-                        entry.enabled = checked;
-                        entries[i] = entry;
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found && checked) {
-                    let insertIdx = entries.length;
-                    for (let i = 0; i < entries.length; i++) {
-                        if (entries[i].id === "github" || entries[i].id === "clock") {
-                            insertIdx = i;
-                            break;
-                        } else if (entries[i].id === "tray") {
-                            insertIdx = i + 1;
-                        }
-                    }
-                    entries.splice(insertIdx, 0, { id: "updateIndicator", enabled: true, zone: "right" });
-                }
-                GlobalConfig.bar.entries = entries;
-            }
-        }
-
-        // 4 ── INSTALLATION SETTINGS ───────────────────────────────────────
-        // Collapsed by default and tucked below the timeline so these
-        // rarely-changed options don't compete with the commit/version
-        // history for space or attention.
-        ConnectedRect {
-            visible: !root.branchDataLoading
-            last: !root.installOptionsExpanded
-            Layout.fillWidth: true
-            implicitHeight: installHeaderRow.implicitHeight + Tokens.padding.medium * 2
-
-            StateLayer {
-                onClicked: root.installOptionsExpanded = !root.installOptionsExpanded
-            }
+            implicitHeight: statusRow.implicitHeight + Tokens.padding.medium * 2
 
             RowLayout {
-                id: installHeaderRow
+                id: statusRow
 
-                anchors.fill: parent
-                anchors.margins: Tokens.padding.medium
-                anchors.leftMargin: Tokens.padding.largeIncreased
-                anchors.rightMargin: Tokens.padding.largeIncreased
+                anchors {
+                    left: parent.left
+                    right: parent.right
+                    top: parent.top
+                    leftMargin: root.inset
+                    rightMargin: root.inset
+                    topMargin: Tokens.padding.medium
+                }
                 spacing: Tokens.spacing.medium
 
-                MaterialIcon {
-                    text: "tune"
-                    color: Colours.palette.m3onSurfaceVariant
-                    fontStyle: Tokens.font.icon.medium
-                }
+                StyledRect {
+                    Layout.alignment: Qt.AlignTop
+                    implicitWidth: Tokens.padding.largeIncreased * 2
+                    implicitHeight: implicitWidth
+                    radius: Tokens.rounding.large
+                    color: Qt.alpha(Colours.palette.m3primary, 0.22)
 
-                StyledText {
-                    Layout.fillWidth: true
-                    text: qsTr("Customize Installation")
-                    font: Tokens.font.body.small
-                }
-
-                MaterialIcon {
-                    text: root.installOptionsExpanded ? "expand_less" : "expand_more"
-                    color: Colours.palette.m3onSurfaceVariant
-                    fontStyle: Tokens.font.icon.medium
-                }
-            }
-        }
-
-        NavRow {
-            visible: !root.branchDataLoading && root.installOptionsExpanded
-            icon: "folder"
-            label: qsTr("Open Backup Folder")
-            status: qsTr("View your previously backed-up configuration files")
-            onClicked: {
-                backupFolderProcess.running = true;
-            }
-        }
-
-        ToggleRow {
-            visible: !root.branchDataLoading && root.installOptionsExpanded
-            text: qsTr("Deploy Configurations")
-            subtext: qsTr("Update your custom dotfiles in ~/.config")
-            checked: UpdateChecker.deployConfigs
-            onToggled: UpdateChecker.deployConfigs = checked
-        }
-
-        ToggleRow {
-            visible: !root.branchDataLoading && root.installOptionsExpanded
-            last: true
-            text: qsTr("Build Shell UI")
-            subtext: qsTr("Compile and install Quickshell UI updates")
-            checked: UpdateChecker.buildShell
-            onToggled: UpdateChecker.buildShell = checked
-        }
-
-        ConnectedRect {
-            visible: root.branchDataLoading
-            first: true
-            last: true
-            Layout.fillWidth: true
-            implicitHeight: loadingCol.implicitHeight + Tokens.padding.largeIncreased * 2
-
-            ColumnLayout {
-                id: loadingCol
-                anchors {
-                    left: parent.left
-                    right: parent.right
-                    top: parent.top
-                    margins: Tokens.padding.largeIncreased
-                }
-
-                spacing: Tokens.spacing.small
-
-                LoadingIndicator {
-                    Layout.alignment: Qt.AlignHCenter
-                    implicitSize: Math.round(Tokens.font.icon.extraLarge.pointSize * 1.6)
-                }
-
-                StyledText {
-                    Layout.fillWidth: true
-                    horizontalAlignment: Text.AlignHCenter
-                    color: Colours.palette.m3onSurfaceVariant
-                    font: Tokens.font.body.medium
-                    text: qsTr("Switching to %1…").arg(root.pendingBranch)
-                }
-            }
-        }
-
-        // 3 ── VERSION TIMELINE (focus of the page) ────────────────────────
-        SectionHeader {
-            visible: !root.branchDataLoading
-            text: UpdateChecker.versionSummaryMode ? qsTr("Version History") : qsTr("Commit History")
-        }
-
-        ConnectedRect {
-            id: timelineCard
-
-            // Dev branch can list up to 10 commits — cap the card height and
-            // let it scroll internally instead of pushing the log/actions
-            // below it far down the page. Commit rows are taller than plain
-            // release rows, so scale the cap with the timeline's own row
-            // height instead of a hard-coded constant.
-            readonly property real maxListHeight: 6 * timeline.rowHeight
-
-            visible: !root.branchDataLoading
-            first: true
-            last: true
-            Layout.fillWidth: true
-            implicitHeight: Math.min(timeline.implicitHeight, maxListHeight) + Tokens.padding.medium * 2
-
-            Flickable {
-                id: timelineFlickable
-                anchors {
-                    left: parent.left
-                    right: parent.right
-                    top: parent.top
-                    margins: Tokens.padding.medium
-                }
-
-                height: Math.min(timeline.implicitHeight, timelineCard.maxListHeight)
-                contentWidth: width
-                contentHeight: timeline.implicitHeight
-                clip: true
-                boundsBehavior: Flickable.StopAtBounds
-                flickableDirection: Flickable.VerticalFlick
-
-                ScrollBar.vertical: StyledScrollBar {
-                    flickable: timelineFlickable
-                }
-
-                UpdateTimeline {
-                    id: timeline
-
-                    width: parent.width
-                    entries: root.timelineEntries
-                    selectedId: root.timelineSelectionEnabled ? root.selectedVersionId : ""
-                    onEntryClicked: function(entryId, entryState) {
-                        if (root.updateRunning || !root.timelineSelectionEnabled) return;
-                        // Toggle: click same dot to deselect
-                        root.selectedVersionId = (root.selectedVersionId === entryId) ? "" : entryId;
-                        UpdateChecker.targetVersion = "";
+                    MaterialIcon {
+                        anchors.centerIn: parent
+                        fontStyle: Tokens.font.icon.medium
+                        text: root.status.icon
+                        color: root.status.highlight ? Colours.palette.m3primary : Colours.palette.m3onSurfaceVariant
                     }
                 }
-            }
-        }
 
-        // "Load more" pagination for the dev commit timeline — keeps the
-        // initial fetch light (10 commits) and pulls the next page on demand.
-        TextButton {
-            Layout.alignment: Qt.AlignHCenter
-            visible: !root.branchDataLoading
-                && !UpdateChecker.versionSummaryMode
-                && UpdateChecker.hasMoreCommits
-            text: UpdateChecker.loadingMoreCommits ? qsTr("Loading…") : qsTr("Load 10 More")
-            type: TextButton.Tonal
-            font: Tokens.font.body.medium
-            horizontalPadding: Tokens.padding.large
-            verticalPadding: Tokens.padding.medium
-            disabled: UpdateChecker.loadingMoreCommits
-            onClicked: UpdateChecker.loadMoreCommits()
-        }
-
-        // 5 ── UPDATE LOG (appears after update runs) ──────────────────────
-        SectionHeader {
-            visible: !root.branchDataLoading && (root.updateRunning || root.updateLogs !== "")
-            text: qsTr("Update Log")
-        }
-
-        ConnectedRect {
-            first: true
-            last: true
-            Layout.fillWidth: true
-            visible: !root.branchDataLoading && (root.updateRunning || root.updateLogs !== "")
-            implicitHeight: logContent.implicitHeight + Tokens.padding.medium * 2
-
-            ColumnLayout {
-                id: logContent
-                anchors {
-                    left: parent.left
-                    right: parent.right
-                    top: parent.top
-                    margins: Tokens.padding.medium
-                }
-
-                spacing: Tokens.spacing.small
-
-                RowLayout {
+                ColumnLayout {
                     Layout.fillWidth: true
-                    spacing: Tokens.spacing.medium
+                    Layout.alignment: Qt.AlignTop
+                    spacing: Tokens.spacing.extraSmall
 
                     StyledText {
                         Layout.fillWidth: true
-                        text: root.updateStatus
-                        color: Colours.palette.m3onSurfaceVariant
-                        font: Tokens.font.body.medium
-                        wrapMode: Text.NoWrap
+                        text: root.status.title
+                        font: Tokens.font.body.builders.medium.weight(Font.DemiBold).build()
+                        color: Colours.palette.m3onSurface
+                        wrapMode: Text.Wrap
+                        maximumLineCount: 2
                         elide: Text.ElideRight
-                        maximumLineCount: 1
                     }
 
-                    IconButton {
-                        icon: UpdateChecker.logsExpanded ? "expand_less" : "expand_more"
-                        onClicked: UpdateChecker.logsExpanded = !UpdateChecker.logsExpanded
+                    StyledText {
+                        Layout.fillWidth: true
+                        visible: text !== ""
+                        text: root.status.detail
+                        font: NexusStyle.secondaryFont
+                        color: Colours.palette.m3onSurfaceVariant
+                        wrapMode: Text.Wrap
+                        maximumLineCount: 2
+                        elide: Text.ElideRight
+                    }
+
+                    // The run's own report, in the row it belongs to: a thin bar and the
+                    // stage it names, rather than a sentence claiming an update is under way.
+                    StyledRect {
+                        Layout.fillWidth: true
+                        Layout.topMargin: Tokens.spacing.extraSmall
+                        implicitHeight: Tokens.padding.small
+                        visible: root.status.progress !== undefined && root.status.progress > 0
+                        radius: Tokens.rounding.full
+                        color: Colours.layer(Colours.palette.m3surfaceContainerHighest, 2)
+
+                        StyledRect {
+                            anchors {
+                                left: parent.left
+                                top: parent.top
+                                bottom: parent.bottom
+                            }
+                            width: parent.width * Math.max(0, Math.min(1, root.status.progress))
+                            radius: Tokens.rounding.full
+                            color: Colours.palette.m3primary
+
+                            Behavior on width {
+                                Anim {
+                                    type: Anim.FastEffects
+                                }
+                            }
+                        }
                     }
                 }
 
-                StyledRect {
-                    Layout.fillWidth: true
-                    implicitHeight: 240
-                    visible: UpdateChecker.logsExpanded && (root.updateLogs !== "" || root.updateRunning)
-                    color: Colours.tPalette.m3surfaceContainerLowest
-                    radius: Tokens.rounding.small
-                    clip: true
+                TextButton {
+                    Layout.alignment: Qt.AlignVCenter
+                    visible: root.status.dismissible
+                    text: qsTr("Dismiss")
+                    type: TextButton.Text
+                    font: Tokens.font.body.small
+                    horizontalPadding: Tokens.padding.medium
+                    verticalPadding: Tokens.padding.small
+                    onClicked: root.runAction("dismiss")
+                }
 
-                    Flickable {
-                        id: logFlickable
+                TextButton {
+                    Layout.alignment: Qt.AlignVCenter
+                    visible: root.status.secondary !== null
+                    text: root.status.secondary !== null ? root.status.secondary.label : ""
+                    type: TextButton.Text
+                    font: Tokens.font.body.small
+                    horizontalPadding: Tokens.padding.medium
+                    verticalPadding: Tokens.padding.small
+                    onClicked: root.runAction(root.status.secondary.key)
+                }
 
-                        anchors.fill: parent
-                        anchors.margins: Tokens.padding.medium
-                        contentHeight: logText.implicitHeight
-                        contentWidth: width
-                        flickableDirection: Flickable.VerticalFlick
-                        onContentHeightChanged: {
-                            if (contentHeight > height) contentY = contentHeight - height;
-                        }
-
-                        StyledText {
-                            id: logText
-
-                            width: logFlickable.width
-                            text: root.updateLogs
-                            color: Colours.palette.m3onSurfaceVariant
-                            font: Tokens.font.body.small
-                            wrapMode: Text.Wrap
-                        }
+                IconTextButton {
+                    Layout.alignment: Qt.AlignVCenter
+                    visible: root.busy || root.status.primary !== null
+                    disabled: root.busy
+                    text: root.busy ? qsTr("Checking…") : (root.status.primary !== null ? root.status.primary.label : "")
+                    icon: root.busy ? "refresh" : (root.status.primary !== null ? root.status.primary.icon : "")
+                    type: TextButton.Filled
+                    font: Tokens.font.body.small
+                    horizontalPadding: Tokens.padding.large
+                    verticalPadding: Tokens.padding.small
+                    onClicked: {
+                        if (root.status.primary !== null)
+                            root.runAction(root.status.primary.key);
                     }
                 }
             }
         }
 
-        // ── PROCESSES ─────────────────────────────────────────────────────
-        // Note: the actual update Process now lives on the UpdateChecker
-        // singleton so it (and its progress/logs) survives this page being
-        // destroyed/recreated on navigation. Only the one-off logout process
-        // stays local since it doesn't need to persist.
-        Process {
-            id: logoutProcess
+        // What the version you picked would do. It appears only once there is a version to
+        // describe, so the pane opens on one row rather than a wall of release notes.
+        ConnectedRect {
+            first: true
+            last: true
+            visible: root.selectedVersionId !== "" && root.notesText !== ""
+            Layout.fillWidth: true
+            implicitHeight: notesBlock.implicitHeight + root.inset * 2
 
-            command: ["qdbus6", "org.kde.Shutdown", "/Shutdown", "org.kde.Shutdown.logout"]
+            ColumnLayout {
+                id: notesBlock
+
+                anchors {
+                    left: parent.left
+                    right: parent.right
+                    top: parent.top
+                    leftMargin: root.inset
+                    rightMargin: root.inset
+                    topMargin: root.inset
+                }
+                spacing: Tokens.spacing.small
+
+                StyledText {
+                    Layout.fillWidth: true
+                    text: qsTr("Release notes")
+                    font: Tokens.font.body.small
+                    color: Colours.palette.m3onSurface
+                }
+
+                StyledText {
+                    Layout.fillWidth: true
+                    text: root.notesText
+                    font: NexusStyle.secondaryFont
+                    color: Colours.palette.m3onSurfaceVariant
+                    wrapMode: Text.Wrap
+                }
+
+                TextButton {
+                    visible: root.releaseUrl !== ""
+                    text: qsTr("Open on GitHub")
+                    type: TextButton.Text
+                    font: NexusStyle.secondaryFont
+                    horizontalPadding: Tokens.padding.medium
+                    verticalPadding: Tokens.padding.extraSmall
+                    onClicked: Qt.openUrlExternally(root.releaseUrl)
+                }
+            }
+        }
+
+        // ---- what an automatic update means, in the group that sets it ----------
+        // The rows sit 2px apart so they read as one group rather than three cards:
+        // proximity is what says they belong to the same decision.
+        ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 2
+
+            // No reset: the row keeps no room for a reset affordance the setting does not
+            // need, which is what puts the switch on the trailing edge.
+            ToggleRow {
+                first: true
+                last: !GlobalConfig.general.checkUpdates
+                text: qsTr("Automatic Updates")
+                subtext: qsTr("Checked every 30 minutes, and once when the shell starts")
+                checked: GlobalConfig.general.checkUpdates
+                onToggled: GlobalConfig.general.checkUpdates = checked
+            }
+
+            SelectRow {
+                visible: GlobalConfig.general.checkUpdates
+                enabled: !root.branchDataLoading
+                label: qsTr("Update channel")
+                subtext: UpdateChecker.currentBranch === "main" ? qsTr("Stable releases") : qsTr("Development builds (may be unstable)")
+                menuItems: root.branchItems
+                active: root.activeBranchItem
+                fallbackText: UpdateChecker.currentBranch
+                fallbackIcon: "call_split"
+                onSelected: function(item) {
+                    // SelectRow emits this when the menu is cancelled and on every arrow
+                    // key, so a pick that matches the channel already followed must not
+                    // start a check, let alone write that channel to the state again.
+                    if (item.text === UpdateChecker.currentBranch)
+                        return;
+                    root.selectedVersionId = "";
+                    root.pendingBranch = item.text;
+                    UpdateChecker.checkNow(item.text);
+                }
+            }
+
+            NavRow {
+                last: true
+                visible: GlobalConfig.general.checkUpdates
+                icon: "folder"
+                label: qsTr("Backup folder")
+                status: root.backupError !== "" ? root.backupError : qsTr("Your settings are saved here before each update")
+                onClicked: {
+                    root.backupError = "";
+                    backupFolderProcess.running = true;
+                }
+            }
+        }
+
+        // ---- reference material, not the task ----------------------------------
+        ConnectedRect {
+            first: true
+            last: true
+            Layout.fillWidth: true
+            implicitHeight: historyBlock.implicitHeight + Tokens.padding.medium * 2
+
+            ColumnLayout {
+                id: historyBlock
+
+                anchors {
+                    left: parent.left
+                    right: parent.right
+                    top: parent.top
+                    leftMargin: root.inset
+                    rightMargin: root.inset
+                    topMargin: Tokens.padding.medium
+                }
+                spacing: Tokens.spacing.small
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Tokens.spacing.extraSmall
+
+                    StyledText {
+                        Layout.fillWidth: true
+                        text: root.shown.isCommitList ? qsTr("Commit history") : qsTr("Version history")
+                        font: Tokens.font.body.small
+                        color: Colours.palette.m3onSurface
+                    }
+
+                    TextButton {
+                        visible: !root.timelineExpanded && root.shown.hiddenByCap > 0
+                        text: qsTr("More…")
+                        type: TextButton.Text
+                        font: NexusStyle.secondaryFont
+                        horizontalPadding: Tokens.padding.medium
+                        verticalPadding: Tokens.padding.extraSmall
+                        onClicked: root.timelineExpanded = true
+                    }
+
+                    TextButton {
+                        visible: root.timelineExpanded && root.shown.capped
+                        text: qsTr("Less")
+                        type: TextButton.Text
+                        font: NexusStyle.secondaryFont
+                        horizontalPadding: Tokens.padding.medium
+                        verticalPadding: Tokens.padding.extraSmall
+                        onClicked: root.timelineExpanded = false
+                    }
+
+                    TextButton {
+                        visible: root.shown.internalCount > 0
+                        text: root.showInternal ? qsTr("Hide internal") : qsTr("Internal (%1)").arg(root.shown.internalCount)
+                        type: TextButton.Text
+                        font: NexusStyle.secondaryFont
+                        horizontalPadding: Tokens.padding.medium
+                        verticalPadding: Tokens.padding.extraSmall
+                        onClicked: root.showInternal = !root.showInternal
+                    }
+                }
+
+                UpdateTimeline {
+                    Layout.fillWidth: true
+                    visible: root.shown.entries.length > 0
+                    entries: root.shown.entries
+                    selectedId: root.selectedVersionId
+                    selectAction: root.selection !== null ? UpdateStatus.selectionAction(root.selection.state, root.selection.label) : null
+                    onEntryClicked: (entryId, entryState) => {
+                        root.selectedVersionId = root.selectedVersionId === entryId ? "" : entryId;
+                    }
+                    onActionRequested: key => root.runAction(key)
+                }
+
+                StyledText {
+                    Layout.fillWidth: true
+                    visible: !root.branchDataLoading && root.entries.length === 0
+                    text: qsTr("No history yet.")
+                    font: NexusStyle.secondaryFont
+                    color: Colours.palette.m3onSurfaceVariant
+                    wrapMode: Text.Wrap
+                }
+
+                TextButton {
+                    visible: root.shown.isCommitList && UpdateChecker.hasMoreCommits
+                    text: UpdateChecker.loadingMoreCommits ? qsTr("Loading…") : qsTr("Load older commits")
+                    type: TextButton.Text
+                    font: NexusStyle.secondaryFont
+                    horizontalPadding: Tokens.padding.medium
+                    verticalPadding: Tokens.padding.extraSmall
+                    disabled: UpdateChecker.loadingMoreCommits
+                    onClicked: UpdateChecker.loadMoreCommits()
+                }
+            }
+        }
+
+        // The footnote this pane keeps under its groups.
+        RowLayout {
+            Layout.fillWidth: true
+            Layout.leftMargin: root.inset
+            Layout.rightMargin: root.inset
+            spacing: Tokens.spacing.small
+
+            Item {
+                Layout.fillWidth: true
+            }
+
+            TextButton {
+                text: qsTr("Troubleshooting")
+                type: TextButton.Text
+                font: NexusStyle.secondaryFont
+                horizontalPadding: Tokens.padding.medium
+                verticalPadding: Tokens.padding.extraSmall
+                onClicked: Qt.openUrlExternally("https://github.com/caelestia-kde/caelestia/blob/main/docs/TROUBLESHOOTING.md#10-update-issues")
+            }
+        }
+
+        Process {
+            id: terminalCheck
+
+            command: ["bash", "-c", "command -v \"$1\" >/dev/null 2>&1", "--", GlobalConfig.general.apps.terminal[0] || ""]
+            running: true
+            onExited: code => {
+                root.configuredTerminalAvailable = code === 0;
+                if (code === 0)
+                    root.launchFailed = false;
+            }
+        }
+
+        Process {
+            id: konsoleCheck
+
+            command: ["bash", "-c", "command -v konsole >/dev/null 2>&1"]
+            running: true
+            onExited: code => root.konsoleAvailable = code === 0
         }
 
         Process {
             id: backupFolderProcess
-            // Create the backups dir if missing so the file manager opens cleanly.
 
+            // One shot: the binding on `running` is spent the first time it starts.
             command: ["sh", "-c",
                 'dir="$1"; shift; mkdir -p "$dir" && exec "$@" "$dir"',
                 "--",
                 Paths.absolutePath("~/.config/caelestia-update/backups")
             ].concat(GlobalConfig.general.apps.explorer)
+            onExited: code => {
+                if (code !== 0)
+                    root.backupError = qsTr("Couldn't open the folder — it is at ~/.config/caelestia-update/backups");
+            }
+        }
+
+        UpdateConfirmDialog {
+            id: confirmDialog
+
+            toVersion: root.selection !== null ? root.selection.label : ""
+            fromVersion: UpdateChecker.currentVersion !== "unknown" ? UpdateChecker.currentVersion : ""
+            onConfirmed: root.launchUpdater()
         }
     }
 }

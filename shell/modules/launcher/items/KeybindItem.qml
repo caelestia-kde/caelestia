@@ -12,21 +12,15 @@ Item {
     required property var list
     required property var modelData
 
-    function clicked() {
+    function activate() {
         if (!root.modelData || !root.modelData.action)
             return;
         root.list.visibilities.launcher = false;
 
-        const isKDE = typeof KWinActiveWindowBridge !== "undefined";
-        let actionStr = root.modelData.action;
+        const actionStr = root.modelData.action;
 
         if (actionStr.startsWith("command(") && actionStr.endsWith(")")) {
-            actionStr = actionStr.substring(8, actionStr.length - 1);
-            Quickshell.execDetached(["sh", "-c", actionStr]);
-        } else if (isKDE) {
-            // Shortcut already active via kglobalaccel — nothing to dispatch.
-        } else {
-            Quickshell.execDetached(["sh", "-c", "hyprctl dispatch " + actionStr]);
+            Quickshell.execDetached(["sh", "-c", actionStr.substring(8, actionStr.length - 1)]);
         }
     }
 
@@ -37,7 +31,7 @@ Item {
 
     StateLayer {
         radius: Tokens.rounding.large
-        onClicked: root.clicked()
+        onClicked: root.activate()
     }
 
     Item {

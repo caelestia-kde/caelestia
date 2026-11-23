@@ -6,7 +6,6 @@ import Quickshell.Widgets
 import Caelestia
 import Caelestia.Config
 import Caelestia.Models
-import Caelestia.Services
 import qs.components
 import qs.components.controls
 import qs.components.images
@@ -20,12 +19,12 @@ Item {
     required property var modelData
     required property var list
 
-    function clicked(): void {
-        KWinActiveWindowBridge.focusWindow(root.modelData.address);
+    function activate(): void {
+        Kwin.focusWindow(root.modelData.address);
         root.list.visibilities.launcher = false;
     }
 
-    // Unlike clicked(), stays in the switcher rather than closing the launcher —
+    // Unlike activate(), stays in the switcher rather than closing the launcher —
     // the point is closing several windows in a row without re-opening it each time.
     function closeWindow(): void {
         Windows.closeWindow(root.modelData.address);
@@ -52,7 +51,7 @@ Item {
         anchors.leftMargin: -Tokens.padding.large
         anchors.rightMargin: -Tokens.padding.large
         radius: Tokens.rounding.medium
-        onClicked: root.clicked()
+        onClicked: root.activate()
     }
 
     StyledRect {
@@ -101,12 +100,10 @@ Item {
         WindowPreview {
             anchors.fill: parent
             address: root.modelData?.address ?? ""
-            fallbackIcon: root.modelData ? WinIcons.sourceFor(null, root.modelData.class, root.modelData.iconName, root.modelData.pid ?? 0) : ""
+            fallbackIcon: root.modelData ? WinIcons.sourceForClient(root.modelData) : ""
             sourceAspect: previewBox.windowAspect
         }
 
-        // Close button — only revealed while hovering this tile, same convention as
-        // the taskbar's own preview popup (DockHover.qml).
         StyledRect {
             anchors.top: parent.top
             anchors.right: parent.right
@@ -146,7 +143,6 @@ Item {
         width: previewBox.maxW - Tokens.padding.medium * 2
         horizontalAlignment: Text.AlignHCenter
         elide: Text.ElideRight
-        renderType: Text.QtRendering
         text: {
             const title = root.modelData?.title || "";
             if (root.modelData?.minimized) return `(${title})`;

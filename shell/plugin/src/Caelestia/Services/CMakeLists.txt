@@ -14,6 +14,19 @@ if(Cava_FOUND)
     list(APPEND CAVA_LIBRARIES PkgConfig::Cava)
 endif()
 
+# KRunner powers the launcher's system-wide search: files, recent documents,
+# places, bookmarks, web shortcuts, the dictionary, unit and currency conversion
+# and settings modules. Optional on purpose — KRunner's D-Bus service exposes only
+# UI control, so this needs the library, and a distribution without libKF6Runner
+# should still build a shell whose launcher simply lacks that one mode.
+find_package(KF6Runner QUIET)
+if(NOT KF6Runner_FOUND)
+    # Say it out loud: the installers' package lists are the only thing keeping this
+    # from happening quietly, and a distro they do not know about would lose the
+    # launcher's search mode with nothing in the build output to show for it.
+    message(STATUS "KF6Runner not found: the launcher will build without system search")
+endif()
+
 qml_module(caelestia-services
     URI Caelestia.Services
     SOURCES
@@ -27,7 +40,6 @@ qml_module(caelestia-services
         ${CAVA_SOURCES}
         tickingservice.cpp
         sensorslib.cpp
-        usagefmt.cpp
         networkusage.cpp
         networkusage.hpp
         cpu.cpp
@@ -43,8 +55,6 @@ qml_module(caelestia-services
         sessionmanager.hpp
         discordipc.cpp
         discordipc.hpp
-        hyprlandstate.cpp
-        hyprlandstate.hpp
         hyprdevices.cpp
         hyprdevices.hpp
         hyprextras.cpp
@@ -55,8 +65,12 @@ qml_module(caelestia-services
         emojidb.hpp
         brightnesswatcher.cpp
         brightnesswatcher.hpp
+        pipewirestreamwatcher.cpp
+        pipewirestreamwatcher.hpp
         clipboardmanager.cpp
         clipboardmanager.hpp
+        krunnerbridge.cpp
+        krunnerbridge.hpp
         schemeloader.cpp
         schemeloader.hpp
         palettemanager.cpp
@@ -74,6 +88,8 @@ qml_module(caelestia-services
         globalshortcut.hpp
         krohnkiteconfig.cpp
         krohnkiteconfig.hpp
+        launcherentry.cpp
+        launcherentry.hpp
         windowscreencast.cpp
         windowscreencast.hpp
         windowstream.cpp
@@ -89,7 +105,10 @@ qml_module(caelestia-services
         screenedges.hpp
         NmQt.cpp
         NmQt.hpp
+        HotspotController.cpp
+        HotspotController.hpp
     LIBRARIES
+        Qt::Concurrent
         Qt::DBus
         Qt::Network
         Qt::Gui
@@ -109,7 +128,10 @@ qml_module(caelestia-services
         caelestia-config
 )
 
-
+if(KF6Runner_FOUND)
+    target_link_libraries(caelestia-services PRIVATE KF6::Runner)
+    target_compile_definitions(caelestia-services PRIVATE CAELESTIA_HAVE_KRUNNER)
+endif()
 
 qt6_generate_wayland_protocol_client_sources(caelestia-services FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/../protocols/zkde-screencast-unstable-v1.xml
@@ -124,3 +146,32 @@ set_source_files_properties(
     ${CMAKE_CURRENT_BINARY_DIR}/wayland-kde-output-management-v2-protocol.c
     PROPERTIES SKIP_PRECOMPILE_HEADERS ON
 )
+
+add_subdirectory(QuickShare)
+
+if(CAELESTIA_BUILD_LYRICS_TESTS)
+    qt_add_executable(caelestia-lyrics-test ../../../tests/lyrics-test.cpp)
+    target_include_directories(caelestia-lyrics-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_link_libraries(caelestia-lyrics-test PRIVATE caelestia-services caelestia-config Qt6::Test Qt6::Network Qt6::Qml)
+    add_test(NAME lyrics-regressions COMMAND caelestia-lyrics-test)
+    set_tests_properties(lyrics-regressions PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+endif()
+
+# Optional: playback and original-script lyrics remain available without ICU.
+find_package(ICU QUIET COMPONENTS uc i18n)
+if(ICU_FOUND)
+    target_compile_definitions(caelestia-services PRIVATE CAELESTIA_HAVE_ICU)
+    target_link_libraries(caelestia-services PRIVATE ICU::uc ICU::i18n)
+    if(CAELESTIA_BUILD_LYRICS_TESTS)
+        target_compile_definitions(caelestia-lyrics-test PRIVATE CAELESTIA_HAVE_ICU)
+        target_link_libraries(caelestia-lyrics-test PRIVATE ICU::uc ICU::i18n)
+    endif()
+endif()
+
+if(CAELESTIA_BUILD_DINO_TESTS)
+    qt_add_executable(caelestia-dinogame-test ../../../tests/dinogame-test.cpp)
+    target_include_directories(caelestia-dinogame-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_link_libraries(caelestia-dinogame-test PRIVATE caelestia-services Qt6::Test Qt6::Qml)
+    add_test(NAME dinogame-loop COMMAND caelestia-dinogame-test)
+    set_tests_properties(dinogame-loop PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+endif()

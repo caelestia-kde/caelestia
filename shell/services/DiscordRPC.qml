@@ -69,8 +69,6 @@ Item {
     }
 
     IdleMonitor {
-        // A timeout of 0 means the feature is off, and IdleMonitor would treat
-        // it as "idle immediately".
         enabled: root.active && root.idleTimeout > 0
         timeout: root.idleTimeout
         onIsIdleChanged: root.userIdle = isIdle
@@ -96,38 +94,8 @@ Item {
         }
     }
 
-    function testRegexList(list, str) {
-        if (!list || !str) return false;
-        let arr = Array.from(list);
-        for (let i = 0; i < arr.length; i++) {
-            let pattern = arr[i];
-            if (pattern.startsWith("^") && pattern.endsWith("$")) {
-                let re = new RegExp(pattern);
-                if (re.test(str)) return true;
-            } else if (pattern === str) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    function findMatchingIndex(list, str) {
-        if (!list || !str) return -1;
-        let arr = Array.from(list);
-        for (let i = 0; i < arr.length; i++) {
-            let pattern = arr[i];
-            if (pattern.startsWith("^") && pattern.endsWith("$")) {
-                let re = new RegExp(pattern);
-                if (re.test(str)) return i;
-            } else if (pattern === str) {
-                return i;
-            }
-        }
-        return -1;
-    }
-
     Connections {
-        target: KWinActiveWindowBridge
+        target: Kwin
         enabled: root.active
         ignoreUnknownSignals: true
 
@@ -182,12 +150,9 @@ Item {
 
     function updatePresence() {
         if (!active || !DiscordIpc.connected) return;
-        if (fetchingSteam) return; // Prevent loop during async fetch
-        // Any of the triggers below can fire while away; none of them should
-        // put the presence back until the user actually returns.
+        if (fetchingSteam) return;
         if (userIdle) return;
 
-        // Priority 0: Manual Override
         if (GlobalConfig.services.arpcManualOverride && (GlobalConfig.services.arpcAppName || GlobalConfig.services.arpcDetails || GlobalConfig.services.arpcState)) {
             root.currentSteamAppId = "";
             root.sendActivity({
@@ -206,27 +171,23 @@ Item {
         let topTargetTitle = "";
         let topTargetMatchIdx = -1;
 
-        // Priority 2 prefers the focused window: a background app that happens
-        // to match the regex shouldn't describe you better than what you're
-        // actually looking at. Seeding the values here means the scan below
-        // only fills them in when nothing focused matched.
-        const activeClass = KWinActiveWindowBridge.activeWindow.class ?? "";
+        const activeClass = Kwin.activeWindow?.class ?? "";
         if (activeClass !== "") {
-            const activeIdx = root.findMatchingIndex(GlobalConfig.services.arpcTargetWindows, activeClass);
+            const activeIdx = Strings.findMatchingIndex(GlobalConfig.services.arpcTargetWindows, activeClass);
             if (activeIdx >= 0) {
                 topTargetClass = activeClass;
-                topTargetTitle = KWinActiveWindowBridge.activeWindow.title ?? "";
+                topTargetTitle = Kwin.activeWindow?.title ?? "";
                 topTargetMatchIdx = activeIdx;
             }
         }
 
-        for (const toplevel of KWinActiveWindowBridge.windowList) {
+        for (const toplevel of Kwin.windowList) {
             let winClass = toplevel.class ?? "";
             let winTitle = toplevel.title ?? "";
 
             if (GlobalConfig.services.arpcSteamAutoDetect && winClass.startsWith("steam_app_")) {
                 let appId = winClass.replace("steam_app_", "");
-                let isBlacklisted = root.testRegexList(GlobalConfig.services.arpcSteamBlacklist, appId) || root.testRegexList(GlobalConfig.services.arpcSteamBlacklist, "steam_app_" + appId);
+                let isBlacklisted = Strings.testRegexList(GlobalConfig.services.arpcSteamBlacklist, appId) || Strings.testRegexList(GlobalConfig.services.arpcSteamBlacklist, "steam_app_" + appId);
                 if (!isBlacklisted) {
                     topSteamClass = winClass;
                     topSteamTitle = winTitle;
@@ -235,7 +196,7 @@ Item {
             }
 
             if (topTargetClass === "") {
-                let matchIdx = root.findMatchingIndex(GlobalConfig.services.arpcTargetWindows, winClass);
+                let matchIdx = Strings.findMatchingIndex(GlobalConfig.services.arpcTargetWindows, winClass);
                 if (matchIdx >= 0) {
                     topTargetClass = winClass;
                     topTargetTitle = winTitle;
@@ -244,18 +205,17 @@ Item {
             }
         }
 
-        // Priority 1: Steam Games
         if (topSteamClass !== "") {
             let appId = topSteamClass.replace("steam_app_", "");
             if (appId !== root.currentSteamAppId || !root.currentSteamData) {
                 root.currentSteamAppId = appId;
                 root.fetchSteamData(appId);
-                return; 
+                return;
             }
             if (root.currentSteamData) {
                 root.sendActivity({
                     details: root.currentSteamData.name,
-                    state: root.currentSteamData.state || "Playing via Steam",
+                    state: root.currentSteamData.state || qsTr("Playing via Steam"),
                     large_image: root.currentSteamData.icon || "steam",
                     small_image: "",
                     startTimestamp: root.shellStartTime
@@ -266,7 +226,6 @@ Item {
             root.currentSteamAppId = "";
         }
 
-        // Priority 2: Custom Apps (Target Windows)
         if (topTargetClass !== "") {
             let displayDetails = topTargetTitle;
             let labels = GlobalConfig.services.arpcTargetWindowLabels;
@@ -288,16 +247,15 @@ Item {
             return;
         }
 
-        // Priority 3: Caelestia Info
         if (GlobalConfig.services.arpcCaelestiaInfo) {
             let os = SysInfo.osPrettyName || SysInfo.osName || "Linux";
             let kernel = SysInfo.kernel ? SysInfo.kernel : "";
             let qsVersion = CUtils.version ? " (v" + CUtils.version + ")" : "";
-            
+
             let detailsStr = os;
             if (kernel) detailsStr += " • " + kernel;
 
-            let schemeName = Colours.scheme || (Colours.light ? "Light Mode" : "Dark Mode");
+            let schemeName = Colours.scheme || (Colours.light ? qsTr("Light Mode") : qsTr("Dark Mode"));
             let stateStr = "Scheme: " + schemeName;
             if (Colours.variant) stateStr += " | Variant: " + Colours.variant;
 
@@ -309,8 +267,8 @@ Item {
                 small_image: "",
                 startTimestamp: root.shellStartTime,
                 buttons: [
-                    { label: "Website", url: "https://caelestiashell.com" },
-                    { label: "GitHub", url: "https://github.com/caelestia-dots/" }
+                    { label: qsTr("Website"), url: "https://caelestiashell.com" },
+                    { label: qsTr("GitHub"), url: "https://github.com/caelestia-kde/caelestia" }
                 ]
             });
             return;
@@ -322,16 +280,16 @@ Item {
     function fetchSteamData(appId) {
         root.fetchingSteam = true;
         Requests.get("https://store.steampowered.com/api/appdetails?appids=" + appId, function(steamRes) {
-            let steamData = JSON.parse(steamRes);
+            let steamData = Requests.parseJson(steamRes);
             let gameName = "Unknown Steam Game (" + appId + ")";
             if (steamData && steamData[appId] && steamData[appId].success) {
                 gameName = steamData[appId].data.name;
             }
-                
+
             Requests.get("https://store.steampowered.com/appreviews/" + appId + "?json=1", function(revRes) {
                 let revData = null;
                 try { revData = JSON.parse(revRes); } catch(e) {}
-                let reviewText = "Playing via Steam";
+                let reviewText = qsTr("Playing via Steam");
                 if (revData && revData.query_summary && revData.query_summary.total_reviews > 0) {
                     let score = Math.round((revData.query_summary.total_positive / revData.query_summary.total_reviews) * 100);
                     let desc = revData.query_summary.review_score_desc || "Mixed";
@@ -382,7 +340,7 @@ Item {
                     root.updatePresence();
                 }
             }, function() {
-                root.currentSteamData = { name: gameName, icon: "", state: "Playing via Steam" };
+                root.currentSteamData = { name: gameName, icon: "", state: qsTr("Playing via Steam") };
                 root.fetchingSteam = false;
                 root.updatePresence();
             });
@@ -398,7 +356,7 @@ Item {
         if (data.name && data.name !== "") activity.name = data.name;
         if (data.state && data.state !== "") activity.state = data.state;
         if (data.details && data.details !== "") activity.details = data.details;
-        
+
         const assets = {};
         if (data.large_image && data.large_image !== "") assets.large_image = data.large_image;
         if (data.large_text && data.large_text !== "") assets.large_text = data.large_text;

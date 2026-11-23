@@ -32,7 +32,6 @@ ProgressBar {
         startFrac = CUtils.clamp(startFrac, 0, 1);
         endFrac = CUtils.clamp(endFrac, 0, 1);
 
-        // Ramp down gap size
         const GAP_RAMP_DOWN_THRESHOLD = 0.01;
         gapSize += height / 2;
         const startGapSize = (gapSize * CUtils.clamp(startFrac, 0, GAP_RAMP_DOWN_THRESHOLD) / GAP_RAMP_DOWN_THRESHOLD);
@@ -70,7 +69,7 @@ ProgressBar {
         gap: root.Tokens.spacing.extraSmall
 
         Anim on progress {
-            running: root.indeterminateAnimState !== StyledProgressBar.Stopped
+            running: root.indeterminateAnimState !== StyledProgressBar.Stopped && Tokens.anim.enabled
             from: 0
             to: 1
             duration: manager.duration
@@ -116,6 +115,8 @@ ProgressBar {
                 color: root.fgColour
 
                 Behavior on implicitSize {
+                    enabled: root.visible
+
                     Anim {
                         type: Anim.FastSpatial
                     }
@@ -129,6 +130,8 @@ ProgressBar {
                 Component.onCompleted: implicitWidth = Qt.binding(() => parent.width * root.visualPosition)
 
                 Behavior on implicitWidth {
+                    enabled: root.visible
+
                     Anim {}
                 }
             }
@@ -225,7 +228,7 @@ ProgressBar {
 
         Anim on waveProgress {
             running: true
-            paused: wave.amplitudeMultiplier === 0 || root.wavePaused
+            paused: wave.amplitudeMultiplier === 0 || root.wavePaused || !root.visible || !Tokens.anim.enabled
             from: 0
             to: 1
             duration: root.waveDuration

@@ -18,7 +18,6 @@ ColumnLayout {
 
     spacing: Tokens.spacing.extraSmall / 2
 
-    // Keep ethernet state fresh while the page is visible.
     Timer {
         running: root.visible
         repeat: true
@@ -62,7 +61,7 @@ ColumnLayout {
                     Layout.alignment: Qt.AlignRight
                     text: Nmcli.activeEthernet ? qsTr("Connected") : qsTr("Not connected")
                     color: Nmcli.activeEthernet ? Colours.palette.m3primary : Colours.palette.m3onSurfaceVariant
-                    font: Tokens.font.label.small
+                    font: NexusStyle.secondaryFont
                 }
 
                 StyledText {
@@ -70,7 +69,7 @@ ColumnLayout {
                     visible: Nmcli.activeEthernet && Nmcli.ethernetDataUsage.length > 0
                     text: qsTr("Data usage: %1").arg(Nmcli.ethernetDataUsage)
                     color: Colours.palette.m3onSurfaceVariant
-                    font: Tokens.font.label.small
+                    font: NexusStyle.secondaryFont
                 }
             }
         }
@@ -90,19 +89,16 @@ ColumnLayout {
             required property int index
 
             readonly property bool isConnected: modelData.connected
-            // IP/MAC/DNS come from the parsed device details, not the basic
-            // device list (which leaves those fields blank).
             readonly property var details: ethRow.isConnected ? Nmcli.ethernetDeviceDetails : null
 
             Layout.fillWidth: true
             last: index === ethRepeater.count - 1
             implicitHeight: ethLayout.implicitHeight + Tokens.padding.medium * 2
 
-            // Tap opens the detail page for this interface.
             StateLayer {
                 onClicked: {
                     root.nState.selectedEthernetInterface = ethRow.modelData.iface;
-                    root.nState.openSubPage(1);
+                    root.nState.openSubPage("ethernetDetail");
                 }
             }
 
@@ -133,7 +129,6 @@ ColumnLayout {
                     }
                 }
 
-                // Name + interface
                 ColumnLayout {
                     Layout.fillWidth: true
                     spacing: 0
@@ -150,7 +145,7 @@ ColumnLayout {
                         Layout.fillWidth: true
                         text: ethRow.isConnected ? ethRow.modelData.iface : qsTr("Not connected • %1").arg(ethRow.modelData.iface)
                         color: ethRow.isConnected ? Colours.palette.m3primary : Colours.palette.m3onSurfaceVariant
-                        font: Tokens.font.label.small
+                        font: NexusStyle.secondaryFont
                         elide: Text.ElideRight
                         animate: true
                     }
@@ -203,7 +198,6 @@ ColumnLayout {
                     }
                 }
 
-                // Connect / disconnect
                 IconButton {
                     type: IconButton.Tonal
                     isToggle: true
@@ -240,7 +234,7 @@ ColumnLayout {
             Layout.alignment: Qt.AlignRight
             text: ethDetail.label
             color: Colours.palette.m3onSurfaceVariant
-            font: Tokens.font.label.small
+            font: NexusStyle.secondaryFont
             elide: Text.ElideRight
             horizontalAlignment: Text.AlignRight
         }
@@ -249,7 +243,7 @@ ColumnLayout {
             Layout.alignment: Qt.AlignRight
             text: ethDetail.value
             color: Colours.palette.m3onSurfaceVariant
-            font: Tokens.font.label.small
+            font: NexusStyle.secondaryFont
             elide: Text.ElideRight
             horizontalAlignment: Text.AlignRight
         }

@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/logo.svg" width="64" alt="Caelestia logo" />
+<img src="assets/caelestia.svg" width="80" alt="Caelestia logo" />
 
 # caelestia-kde
 
@@ -10,22 +10,30 @@
 [![KDE Plasma](https://img.shields.io/badge/Plasma_6-1D99F3?logo=kde&logoColor=white&style=for-the-badge&labelColor=101418)](https://kde.org/plasma-desktop)
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/License-GPL--3.0--or--later-9bd0cc?style=for-the-badge&labelColor=101418)](LICENSE)
 
+[![Discord](https://img.shields.io/badge/Discord-5865F2?logo=discord&logoColor=white&style=for-the-badge&labelColor=101418)](https://discord.gg/qTkpHrHp5H)
+
 </div>
 
 <!-- markdownlint-disable-next-line MD034 -- a bare URL is what GitHub turns into an inline video player -->
-https://github.com/user-attachments/assets/4c3e20c9-5050-4cc8-8e9c-32fd0594ac8b
+https://github.com/user-attachments/assets/38b24e7f-fdd9-43db-872b-8c0ac23a44fd
 
 > [!NOTE]
 > This repo is the KDE Plasma port of [`caelestia-dots/shell`](https://github.com/caelestia-dots/shell).
-> Upstream runs on Hyprland; the port runs the same shell on KWin and Plasma. For the original
+> For the original
 > Hyprland dotfiles, see [`caelestia-dots/caelestia`](https://github.com/caelestia-dots/caelestia).
+
+> Please do not contact the official Caelestia hyprland developers with questions regarding this KDE port.
+
+
+> [!TIP]
+> Questions, setups, or want to contribute? Join the [Discord](https://discord.gg/qTkpHrHp5H).
 
 ## Installation
 
-**Requirements:** Arch-based, Fedora, or Debian/Ubuntu - KDE Plasma 6 on Wayland
+**Requirements:** Arch-based, Fedora, or Debian/Ubuntu - KDE Plasma 6 on Wayland, Qt 6.9+
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ladybug-me/caelestia-kde/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/caelestia-kde/caelestia/main/install.sh | sh
 ```
 
 ### Updating
@@ -38,33 +46,41 @@ Shell settings are preserved across updates.
 
 ### Uninstalling
 
-Choose *Uninstall* from the installer TUI, or run:
+Open *Settings*, go to the *About* page, and choose *Uninstall Caelestia*. That opens
+the uninstaller in a terminal, where it asks for confirmation of its own.
+
+You can also choose *Uninstall* from the installer TUI, or run the script from the
+checkout directly:
 
 ```bash
-bash ./uninstall.sh
+bash ./uninstall.sh      # or: bash install.sh --uninstall
 ```
+
+A packaged install has no script to run: the row names the package manager's command
+instead.
 
 ## Keybinds
 
 | Shortcut | Action |
 | --- | --- |
-| `Super` | App launcher |
-| `Super + /` | Keybind cheatsheet |
-| `Super + Enter` | Terminal |
-| `Super + Tab` | Overview |
-| `Super + 1-5` | Switch workspace |
-| `Super + B` | Notification sidebar |
-| `Super + V` | Clipboard history |
-| `Super + Shift + S` | Screenshot |
-| `Super + Shift + A` | Google Lens |
-| `Super + Shift + D` | Text recognition |
-| `Super + Ctrl + S` | Screen recorder |
-| `Super + Shift + C` | Color picker |
-| `Super + Shift + V` | Emoji selector |
+| `Meta` | App launcher |
+| `Meta + /` | Keybind cheatsheet |
+| `Meta + X` | Wallpaper Switcher |
+| `Meta + Enter` | Terminal |
+| `Meta + Tab` | Overview |
+| `Meta + 1-5` | Switch workspace |
+| `Meta + B` | Notification sidebar |
+| `Meta + V` | Clipboard history |
+| `Meta + Shift + S` | Screenshot |
+| `Meta + Shift + A` | Google Lens |
+| `Meta + Shift + D` | Text recognition |
+| `Meta + Ctrl + S` | Screen recorder |
+| `Meta + Shift + C` | Color picker |
+| `Meta + Shift + V` | Emoji selector |
 
 ## Configuring
 
-Open Nexus (`Super`, then `>Settings`).
+Open Nexus (`Meta`, then `>Settings`).
 
 - Appearance: wallpaper, colors, fonts, and the wallpaper slideshow
 - Panels: every bar element, dashboard, launcher, sidebar and overview
@@ -82,13 +98,13 @@ Settings are written to `~/.config/caelestia/shell.json`.
 | Problem | Fix |
 | --- | --- |
 | Widgets not appearing | Log out and back in, or run `caelestia shell -d` |
-| Colors not applying | Run `systemctl --user status kde-material-you-colors.service`, then re-run the installer |
+| Colors not applying | Run `caelestia scheme set -n dynamic`, or `caelestia wallpaper -f <image>`. See [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#34-colors-not-applying) |
 | Install failed mid-way | Re-run `bash ./scripts/setup.sh` |
 | Full reset needed | See [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) |
 
 For detailed logs, enable Debug Mode in Nexus -> About -> Advanced, then run
 `caelestia shell -l`. Bug reports and questions go to
-[GitHub Issues](https://github.com/ladybug-me/caelestia-kde/issues).
+[GitHub Issues](https://github.com/caelestia-kde/caelestia/issues).
 
 ## Repository layout
 
@@ -107,11 +123,11 @@ assets/        the logo and screenshots used by the docs
 .github/       workflows, issue and PR templates, CI checks
 ```
 
-<a href="https://www.star-history.com/?repos=ladybug-me%2Fcaelestia-kde&type=date&legend=top-left">
+<a href="https://www.star-history.com/?repos=caelestia-kde%2Fcaelestia&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=ladybug-me/caelestia-kde&type=date&theme=dark&legend=top-left&sealed_token=NFI4jXcoZAI26MlGX2jEasHMRd1PIS09clm_CVDS7SFGajH3wiHlN72P8WzuOQT2k2F71ZOCGl_xoy8eVpWlWtA0ACY3koK0NIS1-vLecN0vbvYgrZDN9kp8sQn7NT2xPNeilgrmzYWTzgdQYgskaDMGophAKmy6r6LUfQj8iFjy-Gunuqnte3EY14fX" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=ladybug-me/caelestia-kde&type=date&legend=top-left&sealed_token=NFI4jXcoZAI26MlGX2jEasHMRd1PIS09clm_CVDS7SFGajH3wiHlN72P8WzuOQT2k2F71ZOCGl_xoy8eVpWlWtA0ACY3koK0NIS1-vLecN0vbvYgrZDN9kp8sQn7NT2xPNeilgrmzYWTzgdQYgskaDMGophAKmy6r6LUfQj8iFjy-Gunuqnte3EY14fX" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=ladybug-me/caelestia-kde&type=date&legend=top-left&sealed_token=NFI4jXcoZAI26MlGX2jEasHMRd1PIS09clm_CVDS7SFGajH3wiHlN72P8WzuOQT2k2F71ZOCGl_xoy8eVpWlWtA0ACY3koK0NIS1-vLecN0vbvYgrZDN9kp8sQn7NT2xPNeilgrmzYWTzgdQYgskaDMGophAKmy6r6LUfQj8iFjy-Gunuqnte3EY14fX" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=caelestia-kde/caelestia&type=date&theme=dark&legend=top-left&sealed_token=NFI4jXcoZAI26MlGX2jEasHMRd1PIS09clm_CVDS7SFGajH3wiHlN72P8WzuOQT2k2F71ZOCGl_xoy8eVpWlWtA0ACY3koK0NIS1-vLecN0vbvYgrZDN9kp8sQn7NT2xPNeilgrmzYWTzgdQYgskaDMGophAKmy6r6LUfQj8iFjy-Gunuqnte3EY14fX" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=caelestia-kde/caelestia&type=date&legend=top-left&sealed_token=NFI4jXcoZAI26MlGX2jEasHMRd1PIS09clm_CVDS7SFGajH3wiHlN72P8WzuOQT2k2F71ZOCGl_xoy8eVpWlWtA0ACY3koK0NIS1-vLecN0vbvYgrZDN9kp8sQn7NT2xPNeilgrmzYWTzgdQYgskaDMGophAKmy6r6LUfQj8iFjy-Gunuqnte3EY14fX" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=caelestia-kde/caelestia&type=date&legend=top-left&sealed_token=NFI4jXcoZAI26MlGX2jEasHMRd1PIS09clm_CVDS7SFGajH3wiHlN72P8WzuOQT2k2F71ZOCGl_xoy8eVpWlWtA0ACY3koK0NIS1-vLecN0vbvYgrZDN9kp8sQn7NT2xPNeilgrmzYWTzgdQYgskaDMGophAKmy6r6LUfQj8iFjy-Gunuqnte3EY14fX" />
  </picture>
 </a>
 
@@ -123,6 +139,10 @@ assets/        the logo and screenshots used by the docs
 - [Bali10050](https://github.com/Bali10050/Darkly) - Darkly Qt
 - [wrymt](https://github.com/wrymt/darkly-gtk) - Darkly GTK
 - [Haidir](https://bitbucket.org/dirn-typo/yet-another-monochrome-icon-set) - icon set
+- [liixini](https://github.com/liixini/skwd-wall) - skwd-wall
+- [luisbocanegra](https://github.com/luisbocanegra/plasma-audio-visualizer) - plasma-audio-visualizer
+- [dim-ghub](https://github.com/dim-ghub/caelestia-shell) - v2.0.0 features
+- [dharmx](https://github.com/dharmx/walls) - default wallpapers
 
 ## License
 

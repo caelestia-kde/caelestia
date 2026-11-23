@@ -6,12 +6,15 @@ import "components/workspaces"
 import "components/performance"
 import QtQuick
 import QtQuick.Layouts
+import QtQuick.Window
 import Quickshell
 import Quickshell.Services.UPower
 import Caelestia.Config
 import Caelestia.Services
 import qs.components
 import qs.services
+import qs.utils
+import qs.modules.bar
 
 Item {
     id: root
@@ -22,6 +25,9 @@ Item {
     required property BarPopouts.Wrapper popouts
     required property bool fullscreen
     property Item currentHoveredItem: null
+    // The tray loader that owns the item under the pointer, when that item is
+    // nested inside the unified right-zone tray.
+    property Item hoveredTray: null
 
     readonly property int vPadding: Tokens.padding.large
 
@@ -35,163 +41,152 @@ Item {
     readonly property real middleZoneSize: isHorizontal ? middleLayout.implicitWidth : middleLayout.implicitHeight
     readonly property real rightZoneSize: isHorizontal ? rightLayout.implicitWidth : rightLayout.implicitHeight
 
-    property var leftEntries: {
-        let entries = Config.bar.entries || [];
-        return entries.filter(e => e.enabled && (!e.zone || e.zone === "left") && e.id !== "spacer");
-    }
-
-    property var middleEntries: {
-        let entries = Config.bar.entries || [];
-        return entries.filter(e => e.enabled && e.zone === "middle" && e.id !== "spacer");
-    }
-
-    property var rightEntries: {
-        let entries = Config.bar.entries || [];
-        return entries.filter(e => e.enabled && e.zone === "right" && e.id !== "spacer");
-    }
+    property var leftEntries: BarWidgets.normalizedZoneEntries({ entries: Config.bar.entries }, "left")
+    property var middleEntries: BarWidgets.normalizedZoneEntries({ entries: Config.bar.entries }, "middle")
+    // The right layout is the unified tray plus the clock. The widgets that go
+    // inside the tray come from systemTrayEntries; they are not drawn a second
+    // time by this layout.
+    property var rightEntries: BarWidgets.rightLayoutEntries({ entries: Config.bar.entries })
+    readonly property var systemTrayEntries: BarWidgets.systemTrayEntries({ entries: Config.bar.entries })
+    readonly property bool systemTrayShowsIcons: BarWidgets.systemTrayShowsIcons({ entries: Config.bar.entries })
 
     function resetHover(): void {
-        if (currentHoveredItem) {
-            if (currentHoveredItem.hasOwnProperty("hoverPos"))
-                currentHoveredItem.hoverPos = -1;
+        if (currentHoveredItem)
             currentHoveredItem = null;
-        }
     }
 
     function getLoaderAt(x, y) {
+        root.hoveredTray = null;
+
         let items = [leftLayout, middleLayout, rightLayout];
         for (let i = 0; i < items.length; i++) {
             let layout = items[i];
             let localPos = mapToItem(layout, x, y);
             if (localPos.x >= 0 && localPos.x <= layout.width && localPos.y >= 0 && localPos.y <= layout.height) {
                 let ch = layout.childAt(localPos.x, localPos.y);
-                if (ch && ch.hasOwnProperty("id")) return ch; 
+                if (ch && ch.hasOwnProperty("id")) {
+                    if (ch.id === "tray" && ch.item && typeof ch.item.widgetAt === "function") {
+                        const inner = ch.item.widgetAt(root, x, y);
+                        if (inner) {
+                            root.hoveredTray = ch;
+                            return inner;
+                        }
+                    }
+                    if (ch.id === "tray")
+                        root.hoveredTray = ch;
+                    return ch;
+                }
             }
         }
         return null;
     }
 
     function closeTray(): void {
-        if (!Config.bar.tray.compact)
+        if (popouts.currentName !== "trayOverflow")
             return;
+        // A box the user opened stays until they dismiss it.
+        if (popouts.staysOpen)
+            return;
+        popouts.hasCurrent = false;
+    }
 
-        let repeaters = [leftRepeater, middleRepeater, rightRepeater];
-        for (let r = 0; r < 3; r++) {
-            let rep = repeaters[r];
-            for (let i = 0; i < rep.count; i++) {
-                const loader = rep.itemAt(i) as WrappedLoader;
-                if (loader?.enabled && loader.id === "tray") {
-                    const tray = loader.item as Tray;
-                    if (Config.bar.popouts.tray || !tray.pinned) {
-                        tray.expanded = false;
-                        tray.pinned = false;
-                    }
-                }
-            }
+    // Icons tell you what they are on hover, and that is all: the panel behind one of
+    // them opens on a click, or on a right-click when it is a menu.
+    function isInfoOnlyOnHover(id: string): bool {
+        switch (id) {
+        case "appmenu":
+        case "keepawake":
+        case "shortcuts":
+        case "screencapture":
+        case "updateIndicator":
+            return true;
+        default:
+            return BarWidgets.statusIconId(id).length > 0;
         }
     }
 
     function checkPopout(pos: real): void {
-        const ch = getLoaderAt(isHorizontal ? pos : width / 2, isHorizontal ? height / 2 : pos) as WrappedLoader;
+        // The launcher owns hover while it is open. Nothing on the bar takes it
+        // over, and nothing here closes what the launcher's dismissal owns.
+        if (popouts.hoverSuppressed)
+            return;
 
-        if (currentHoveredItem && currentHoveredItem !== ch?.item) {
-            if (currentHoveredItem.hasOwnProperty("hoverPos"))
-                currentHoveredItem.hoverPos = -1;
-        }
+        // A context menu stays open while the pointer moves over the bar, so
+        // the hover routing below must not take it over or close it.
+        if (popouts.isContextPopout)
+            return;
+
+        // A box the user opened is theirs to dismiss: hovering the bar must not swap
+        // it for another panel or take it away.
+        if (popouts.staysOpen && popouts.hasCurrent)
+            return;
+
+        // Dragging a widget between the tray and its overflow panel must not let
+        // the hover routing swap the panel out from under the pointer.
+        if (TrayDrag.active)
+            return;
+
+        const ch = getLoaderAt(isHorizontal ? pos : width / 2, isHorizontal ? height / 2 : pos);
+
         currentHoveredItem = ch ? ch.item : null;
 
-        if (ch?.id !== "tray")
-            closeTray();
+        if (root.hoveredTray) {
+            closeTrayTimer.stop();
+        } else if (!popouts.hasCurrent || !TrayRegistry.isTrayPopout(popouts.currentName)) {
+            if (!closeTrayTimer.running)
+                closeTrayTimer.restart();
+        }
 
         if (!ch) {
-            if (popouts.hasCurrent && (popouts.currentName === "dockcontext" || popouts.currentName === "dockhover" || popouts.currentName === "greeter" || popouts.currentName === "greetercontext" || popouts.currentName === "activewindow")) return;
-            if (!Config.bar.popouts.tray && popouts.currentName.startsWith("traymenu")) return;
-            // skip hover-driven tray recalculation in click mode
+            if (popouts.hasCurrent && (popouts.currentName === "dockhover" || popouts.currentName === "greeter" || popouts.currentName === "greetercontext")) return;
+            if (!Config.bar.popouts.tray && TrayRegistry.isTrayPopout(popouts.currentName)) return;
             popouts.hasCurrent = false;
             return;
         }
 
         const id = ch.id;
-        // top is absolute pos
         let mappedChPos = mapFromItem(ch, 0, 0);
         const top = isHorizontal ? mappedChPos.x : mappedChPos.y;
 
         if (id === "tray" && !Config.bar.popouts.tray) {
             return;
         } else if (id === "tray" && Config.bar.popouts.tray && !visibilities.sidebar) {
-            const tray = ch.item as Tray;
-            const mouseMap = mapToItem(tray.expandIcon, isHorizontal ? pos : tray.implicitWidth / 2, isHorizontal ? tray.implicitHeight / 2 : pos);
-            if (!Config.bar.tray.compact || (tray.expanded && !tray.expandIcon.contains(mouseMap))) {
-                const traySize = isHorizontal ? tray.layout.implicitWidth : tray.layout.implicitHeight;
-                const localX = isHorizontal ? tray.layout.mapFromItem(null, pos, 0).x : tray.layout.mapFromItem(null, 0, pos).y;
-                const index = Math.floor((localX / (traySize + Tokens.spacing.small)) * tray.items.count);
-                const trayItem = tray.items.itemAt(index);
-                if (trayItem && localX >= 0 && localX <= traySize) {
-                    popouts.currentName = `traymenu${index}`;
-                    popouts.currentCenter = isHorizontal ? trayItem.mapToItem(null, trayItem.implicitWidth / 2, 0).x : trayItem.mapToItem(null, 0, trayItem.implicitHeight / 2).y;
-                    popouts.hasCurrent = true;
+            // The arrow opens the overflow panel, and the bar's hover routing must not
+            // close that panel the moment the pointer reaches it. Reaching an icon
+            // only names it: the menu behind one is the right button's job.
+            if ((ch.item as Tray).arrowHit(root, pos) && popouts.currentName !== "trayOverflow")
+                popouts.hasCurrent = false;
+        } else if (root.isInfoOnlyOnHover(id)) {
+            // Hovering an icon says what it is. Its panel opens on a click, or on a
+            // right-click for an icon with a menu, so nothing opens here.
+            return;
+        } else if (id === "greeter") {
+            if (Config.bar.popouts.greeter && Config.bar.greeter.showOnHover) {
+                const item = ch.item as Item;
+                if (item) {
+                    const relPos = pos - top;
+                    const inside = isHorizontal ? (relPos >= 0 && relPos <= item.implicitWidth) : (relPos >= 0 && relPos <= item.implicitHeight);
+                    if (inside) {
+                        if (!popouts.hasCurrent || popouts.currentName !== "greetercontext") {
+                            popouts.currentName = "greeter";
+                            popouts.currentCenter = isHorizontal ? item.mapToItem(null, item.implicitWidth / 2, 0).x : (item.mapToItem(null, 0, item.implicitHeight / 2).y ?? 0);
+                            popouts.hasCurrent = true;
+                        }
+                    } else {
+                        if (popouts.currentName !== "greetercontext") {
+                            popouts.hasCurrent = false;
+                        }
+                    }
                 } else {
                     popouts.hasCurrent = false;
                 }
             } else {
-                popouts.hasCurrent = false;
-                tray.expanded = true;
-            }
-        } else if (id === "statusIcons") {
-            const statusIcons = ch.item as StatusIcons;
-            const items = statusIcons.items;
-            const localX = isHorizontal ? items.mapFromItem(null, pos, 0).x : items.width / 2;
-            const localY = isHorizontal ? items.height / 2 : items.mapFromItem(null, 0, pos).y;
-            statusIcons.hoverPos = isHorizontal ? localX : localY;
-
-            if (!Config.bar.popouts.statusIcons) return;
-
-            let icon = items.childAt(localX, localY);
-            if (!icon) {
-                // Find nearest visible child by center distance
-                let bestDist = 1e9;
-                for (let i = 0; i < items.children.length; i++) {
-                    const child = items.children[i];
-                    if (!child.visible || !child.name) continue;
-                    const center = isHorizontal
-                        ? child.mapToItem(items, child.width / 2, 0).x
-                        : child.mapToItem(items, 0, child.height / 2).y;
-                    const dist = Math.abs((isHorizontal ? localX : localY) - center);
-                    if (dist < bestDist) {
-                        bestDist = dist;
-                        icon = child;
-                    }
-                }
-            }
-            if (icon) {
-                popouts.currentName = icon.name;
-                popouts.currentCenter = isHorizontal ? icon.mapToItem(null, icon.width / 2, 0).x : icon.mapToItem(null, 0, icon.height / 2).y;
-                popouts.hasCurrent = true;
-            } else {
-                popouts.hasCurrent = false;
-            }
-        } else if ((id === "greeter" || id === "activeWindow") && (Config.bar.popouts.greeter ?? Config.bar.popouts.activeWindow) && (Config.bar.greeter.showOnHover ?? Config.bar.activeWindow.showOnHover)) {
-            const item = ch.item as Item;
-            if (item) {
-                const relPos = pos - top;
-                const inside = isHorizontal ? (relPos >= 0 && relPos <= item.implicitWidth) : (relPos >= 0 && relPos <= item.implicitHeight);
-                if (inside) {
-                    if (!popouts.hasCurrent || popouts.currentName !== "greetercontext") {
-                        popouts.currentName = "greeter";
-                        popouts.currentCenter = isHorizontal ? item.mapToItem(null, item.implicitWidth / 2, 0).x : (item.mapToItem(null, 0, item.implicitHeight / 2).y ?? 0);
-                        popouts.hasCurrent = true;
-                    }
-                } else {
-                    if (popouts.currentName !== "greetercontext") {
-                        popouts.hasCurrent = false;
-                    }
-                }
-            } else {
-                popouts.hasCurrent = false;
+                if (popouts.hasCurrent && popouts.currentName !== "greeter" && popouts.currentName !== "greetercontext")
+                    popouts.hasCurrent = false;
             }
         } else if (id === "dock") {
-            if (popouts.hasCurrent && (popouts.currentName === "dockcontext" || popouts.currentName === "greeter" || popouts.currentName === "greetercontext" || popouts.currentName === "activewindow")) return;
-            
+            if (popouts.hasCurrent && (popouts.currentName === "dockcontext" || popouts.currentName === "dockbgcontext" || popouts.currentName === "greeter" || popouts.currentName === "greetercontext" || popouts.currentName === "statusiconscontext")) return;
+
             const item = ch.item;
             if (item && typeof item.handleHover === "function") {
                 const relPos = pos - top;
@@ -214,13 +209,13 @@ Item {
             } else {
                 popouts.hasCurrent = false;
             }
-        } else if (id === "updateIndicator") {
+        } else if (id === "weather") {
             const item = ch.item as Item;
             if (item) {
                 const relPos = pos - top;
                 const inside = isHorizontal ? (relPos >= 0 && relPos <= item.implicitWidth) : (relPos >= 0 && relPos <= item.implicitHeight);
                 if (inside) {
-                    popouts.currentName = "updateIndicator";
+                    popouts.currentName = id;
                     popouts.currentCenter = isHorizontal ? item.mapToItem(null, item.implicitWidth / 2, 0).x : (item.mapToItem(null, 0, item.implicitHeight / 2).y ?? 0);
                     popouts.hasCurrent = true;
                 } else {
@@ -229,14 +224,42 @@ Item {
             } else {
                 popouts.hasCurrent = false;
             }
+        } else if (id === "media") {
+            const item = ch.item as Item;
+            if (item) {
+                const relPos = pos - top;
+                const inside = isHorizontal ? (relPos >= 0 && relPos <= item.implicitWidth) : (relPos >= 0 && relPos <= item.implicitHeight);
+                if (inside) {
+                    popouts.currentName = "media";
+                    popouts.currentCenter = isHorizontal ? item.mapToItem(null, item.implicitWidth / 2, 0).x : (item.mapToItem(null, 0, item.implicitHeight / 2).y ?? 0);
+                    popouts.hasCurrent = true;
+                } else {
+                    popouts.hasCurrent = false;
+                }
+            } else {
+                popouts.hasCurrent = false;
+            }
+        } else if (id === "clock") {
+            // The calendar is a panel-sized popout and opens on a click. Hovering the clock
+            // only dismisses whatever else was open, so crossing it on the way to the tray
+            // does not throw a calendar up under the pointer.
+            if (popouts.hasCurrent && popouts.currentName !== "clock")
+                popouts.hasCurrent = false;
         } else {
+            // Plugin widgets (and any widget without a bespoke branch) opt into
+            // hover popouts by exposing handleHover(pos, isHorizontal, popouts).
+            const item = ch.item;
+            if (item && typeof item.handleHover === "function") {
+                item.handleHover(pos - top, isHorizontal, popouts);
+                return;
+            }
             popouts.hasCurrent = false;
         }
     }
 
     function handleWheel(pos: real, angleDelta: point): void {
-        const ch = getLoaderAt(isHorizontal ? pos : width / 2, isHorizontal ? height / 2 : pos) as WrappedLoader;
-        
+        const ch = getLoaderAt(isHorizontal ? pos : width / 2, isHorizontal ? height / 2 : pos);
+
         if (ch?.id === "dock") {
             if (ch.item && typeof ch.item.handleWheel === "function") {
                 ch.item.handleWheel(angleDelta);
@@ -244,17 +267,24 @@ Item {
             return;
         }
 
+        // Plugin widgets (and any widget without a bespoke branch) opt into
+        // scroll handling by exposing handleWheel(pos, isHorizontal, angleDelta).
+        const item = ch?.item;
+        if (item && typeof item.handleWheel === "function") {
+            const mappedChPos = mapFromItem(ch, 0, 0);
+            item.handleWheel(pos - (isHorizontal ? mappedChPos.x : mappedChPos.y), isHorizontal, angleDelta);
+            return;
+        }
+
         if (ch?.id === "workspaces" && Config.bar.scrollActions.workspaces) {
-            const mon = (GlobalConfig.bar.workspaces.perMonitorWorkspaces ? Hypr.monitorFor(screen) : Hypr.focusedMonitor);
+            const mon = (Config.bar.workspaces.perMonitor ? Kwin.monitorFor(screen) : Kwin.focusedMonitor);
             const specialWs = mon?.lastIpcObject.specialWorkspace.name;
             if (specialWs?.length > 0)
-                Hypr.dispatch(Hypr.usingLua ? `hl.dsp.workspace.toggle_special("${specialWs.slice(8)}")` : `togglespecialworkspace ${specialWs.slice(8)}`);
+                Kwin.dispatch(Kwin.usingLua ? `hl.dsp.workspace.toggle_special("${specialWs.slice(8)}")` : `togglespecialworkspace ${specialWs.slice(8)}`);
             else {
-                const activeId = typeof KWinWorkspaceState !== "undefined"
-                    ? KWinWorkspaceState.activeId
-                    : Hypr.activeWsId;
+                const activeId = Kwin.activeWsId;
                 if (angleDelta.y < 0 || activeId > 1)
-                    Hypr.dispatch(Hypr.usingLua ? `hl.dsp.focus({ workspace = "r${angleDelta.y > 0 ? "-" : "+"}1" })` : `workspace r${angleDelta.y > 0 ? "-" : "+"}1`);
+                    Kwin.dispatch(Kwin.usingLua ? `hl.dsp.focus({ workspace = "r${angleDelta.y > 0 ? "-" : "+"}1" })` : `workspace r${angleDelta.y > 0 ? "-" : "+"}1`);
             }
         } else if ((isHorizontal ? pos < screen.width / 2 : pos < screen.height / 2) && Config.bar.scrollActions.volume) {
             if (angleDelta.y > 0)
@@ -264,13 +294,43 @@ Item {
         } else if (Config.bar.scrollActions.brightness) {
             const monitor = Brightness.getMonitorForScreen(screen);
             if (angleDelta.y > 0)
-                monitor.setBrightness(monitor.brightness + GlobalConfig.services.brightnessIncrement);
+                monitor.stepBrightness(GlobalConfig.services.brightnessIncrement);
             else if (angleDelta.y < 0)
-                monitor.setBrightness(monitor.brightness - GlobalConfig.services.brightnessIncrement);
+                monitor.stepBrightness(-GlobalConfig.services.brightnessIncrement);
         }
     }
 
+    // Built-in widgets are handed the ambient values one by one in their own
+    // delegate choice. Plugin widgets are plain components, so the values they
+    // declare are filled in here instead and the rest are left alone.
+    function applyWidgetContext(widget: var): void {
+        if (!widget)
+            return;
+
+        const context = {
+            bar: root,
+            screen: root.screen,
+            popouts: root.popouts,
+            visibilities: root.visibilities
+        };
+
+        for (const name in context)
+            if (widget.hasOwnProperty(name))
+                widget[name] = context[name];
+    }
+
+    Component.onCompleted: {
+        Logger.mark("bar-ready");
+    }
+
     clip: true
+
+    Timer {
+        id: closeTrayTimer
+
+        interval: 400
+        onTriggered: root.closeTray()
+    }
 
     GridLayout {
         id: leftLayout
@@ -279,7 +339,7 @@ Item {
         anchors.top: !isHorizontal ? parent.top : undefined
         anchors.verticalCenter: isHorizontal ? parent.verticalCenter : undefined
         anchors.horizontalCenter: !isHorizontal ? parent.horizontalCenter : undefined
-        
+
         anchors.leftMargin: isHorizontal ? root.vPadding : 0
         anchors.topMargin: !isHorizontal ? root.vPadding : 0
 
@@ -315,10 +375,6 @@ Item {
         columnSpacing: Tokens.spacing.medium
         rowSpacing: Tokens.spacing.medium
 
-        // Plain ternaries assigning `undefined` to x/y (a real-typed property)
-        // trigger "Unable to assign [undefined] to y/x" warnings even though
-        // the other branch is unreachable at the same time. Bindings with a
-        // `when` guard simply don't apply instead of assigning undefined.
         Binding on x {
             when: isHorizontal
             value: Math.max(middleLayout.minX, Math.min(middleLayout.idealX, middleLayout.maxX))
@@ -344,9 +400,9 @@ Item {
         anchors.bottom: !isHorizontal ? parent.bottom : undefined
         anchors.verticalCenter: isHorizontal ? parent.verticalCenter : undefined
         anchors.horizontalCenter: !isHorizontal ? parent.horizontalCenter : undefined
-        
-        anchors.rightMargin: isHorizontal ? root.vPadding : 0
-        anchors.bottomMargin: !isHorizontal ? root.vPadding : 0
+
+        anchors.rightMargin: isHorizontal ? root.vPadding + showDesktop.implicitWidth : 0
+        anchors.bottomMargin: !isHorizontal ? root.vPadding + showDesktop.implicitHeight : 0
 
         columns: isHorizontal ? -1 : 1
         rows: isHorizontal ? 1 : -1
@@ -362,183 +418,25 @@ Item {
         }
     }
 
-    DelegateChooser {
+    // Show desktop stays on the bar's edge instead of in the tray, where Windows puts
+    // it: one strip at the far right, anchored to the bar so no layout can move it in.
+    ShowDesktop {
+        id: showDesktop
+
+        isHorizontal: root.isHorizontal
+        thickness: root.thickness
+
+        anchors.right: root.isHorizontal ? parent.right : undefined
+        anchors.bottom: !root.isHorizontal ? parent.bottom : undefined
+        anchors.verticalCenter: root.isHorizontal ? parent.verticalCenter : undefined
+        anchors.horizontalCenter: !root.isHorizontal ? parent.horizontalCenter : undefined
+    }
+
+    // Every entry of the bar is drawn by one chooser, which the tray's box shares so
+    // the widgets it holds stay live rather than becoming a copy of an icon.
+    BarWidgetDelegate {
         id: barDelegate
 
-        role: "id"
-
-            DelegateChoice {
-                roleValue: "logo"
-                delegate: WrappedLoader {
-                    sourceComponent: OsIcon {}
-                }
-            }
-            DelegateChoice {
-                roleValue: "workspaces"
-                delegate: WrappedLoader {
-                    sourceComponent: Workspaces {
-                        bar: root
-                        screen: root.screen
-                        fullscreen: root.fullscreen
-                    }
-                }
-            }
-            DelegateChoice {
-                roleValue: "dock"
-                delegate: WrappedLoader {
-                    sourceComponent: Dock {
-                        bar: root
-                    }
-                }
-            }
-            DelegateChoice {
-                roleValue: "greeter"
-                delegate: WrappedLoader {
-                    sourceComponent: Greeter {
-                        bar: root
-                        monitor: Brightness.getMonitorForScreen(root.screen)
-                    }
-                }
-            }
-            DelegateChoice {
-                roleValue: "activeWindow"
-                delegate: WrappedLoader {
-                    sourceComponent: Greeter {
-                        bar: root
-                        monitor: Brightness.getMonitorForScreen(root.screen)
-                    }
-                }
-            }
-            DelegateChoice {
-                roleValue: "tray"
-                delegate: WrappedLoader {
-                    sourceComponent: Tray {
-                        popouts: root.popouts
-                    }
-                }
-            }
-            DelegateChoice {
-                roleValue: "clock"
-                delegate: WrappedLoader {
-                    sourceComponent: Clock {}
-                }
-            }
-            DelegateChoice {
-                roleValue: "statusIcons"
-                delegate: WrappedLoader {
-                    sourceComponent: StatusIcons {}
-                }
-            }
-            DelegateChoice {
-                roleValue: "kbLayoutIndicator"
-                delegate: WrappedLoader {
-                    visible: enabled && (Hypr.kbLayout || "").length > 0
-                    sourceComponent: KbLayoutIndicator {}
-                }
-            }
-            DelegateChoice {
-                roleValue: "notificationsIndicator"
-                delegate: WrappedLoader {
-                    sourceComponent: NotificationsIndicator {}
-                }
-            }
-            DelegateChoice {
-                roleValue: "updateIndicator"
-                delegate: WrappedLoader {
-                    visible: enabled && GlobalConfig.general.checkUpdates
-                    sourceComponent: UpdateIndicator {}
-                }
-            }
-            DelegateChoice {
-                roleValue: "perfCpu"
-                delegate: WrappedLoader {
-                    visible: enabled && Cpu.name.length > 0
-                    sourceComponent: PerfCpu {}
-                }
-            }
-            DelegateChoice {
-                roleValue: "perfMemory"
-                delegate: WrappedLoader {
-                    visible: enabled && Memory.total > 1
-                    sourceComponent: PerfMemory {}
-                }
-            }
-            DelegateChoice {
-                roleValue: "perfStorage"
-                delegate: WrappedLoader {
-                    visible: enabled && Storage.disks.length > 0
-                    sourceComponent: PerfStorage {}
-                }
-            }
-            DelegateChoice {
-                roleValue: "perfNetwork"
-                delegate: WrappedLoader {
-                    sourceComponent: PerfNetwork {}
-                }
-            }
-            DelegateChoice {
-                roleValue: "perfGpu"
-                delegate: WrappedLoader {
-                    visible: enabled && Gpu.type !== Gpu.None
-                    sourceComponent: PerfGpu {}
-                }
-            }
-            DelegateChoice {
-                roleValue: "perfBattery"
-                delegate: WrappedLoader {
-                    visible: enabled && UPower.displayDevice.isLaptopBattery
-                    sourceComponent: PerfBattery {}
-                }
-            }
-            DelegateChoice {
-                roleValue: "github"
-                delegate: WrappedLoader {
-                    visible: enabled && GithubStore.available
-                    sourceComponent: GithubActivity {
-                        popouts: root.popouts
-                    }
-                }
-            }
-            DelegateChoice {
-                roleValue: "showDesktop"
-                delegate: WrappedLoader {
-                    sourceComponent: ShowDesktop {}
-                }
-            }
-            DelegateChoice {
-                roleValue: "power"
-                delegate: WrappedLoader {
-                    sourceComponent: Power {
-                        visibilities: root.visibilities
-                    }
-                }
-            }
-        }
-
-    component WrappedLoader: Loader {
-        required enabled
-        required property string id
-        required property int index
-
-        asynchronous: false
-        Layout.alignment: root.isHorizontal ? Qt.AlignVCenter : Qt.AlignHCenter
-
-        
-        
-        
-        
-        
-        
-        
-
-        Layout.preferredWidth: implicitWidth
-        Layout.preferredHeight: implicitHeight
-        Layout.maximumWidth: implicitWidth
-        Layout.maximumHeight: implicitHeight
-        Layout.minimumWidth: implicitWidth
-        Layout.minimumHeight: implicitHeight
-
-        visible: enabled
-        active: enabled
+        bar: root
     }
 }

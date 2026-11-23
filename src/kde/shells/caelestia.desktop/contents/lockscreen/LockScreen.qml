@@ -1,10 +1,3 @@
-/*
-    SPDX-FileCopyrightText: 2024 ladybug-me
-    SPDX-License-Identifier: GPL-3.0-or-later
-
-    Caelestia lock screen entry point.
-    This is the root Item that kscreenlocker expects.
-*/
 
 import QtQuick
 import Caelestia.Services
@@ -13,7 +6,6 @@ import M3Shapes
 Item {
     id: root
 
-    // kscreenlocker sets and reads this property to track the lock state
     property bool locked: true
     property bool viewVisible: false
     property string notification
@@ -22,8 +14,14 @@ Item {
     signal notificationRepeated()
 
     onViewVisibleChanged: {
-        if (viewVisible && lockScreenUi && typeof lockScreenUi.ensureAuthenticating === "function") {
+        if (!viewVisible) {
+            root.clearPassword();
+            return;
+        }
+        if (viewVisible && lockScreenUi && lockScreenUi.ready && typeof lockScreenUi.ensureAuthenticating === "function") {
             lockScreenUi.ensureAuthenticating();
+            if (lockScreenUi.activePasswordPill)
+                lockScreenUi.activePasswordPill.forceActiveFocus();
         }
     }
 
@@ -36,5 +34,6 @@ Item {
         id: lockScreenUi
 
         anchors.fill: parent
+        viewVisible: root.viewVisible
     }
 }

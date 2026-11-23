@@ -4,7 +4,6 @@ import QtCore
 import Quickshell
 import Quickshell.Hyprland
 import Quickshell.Io
-import Caelestia.Services
 import qs.components.misc
 import qs.services
 
@@ -21,7 +20,6 @@ Scope {
 
     property var selectionMode: RegionSelection.SelectionMode.RectCorners
 
-    // Persisted across screenshot sessions — written to disk via Settings below
     property bool showWindowOutlines: false
 
     Settings {
@@ -37,7 +35,7 @@ Scope {
 
             required property var modelData
 
-            active: root.screenshotActive && modelData.name === KWinActiveWindowBridge.cursorOutputName()
+            active: root.screenshotActive && modelData.name === Kwin.cursorOutputName()
 
             sourceComponent: RegionSelection {
                 screen: regionSelectorLoader.modelData
@@ -58,8 +56,6 @@ Scope {
 
     function search() {
         root.action = ScreenshotAction.SnipAction.Search
-        // Circle selection stays dormant: no UI path selects it yet, so
-        // rect-corners is the only entry point.
         root.selectionMode = RegionSelection.SelectionMode.RectCorners
         root.screenshotActive = true
     }
@@ -73,7 +69,6 @@ Scope {
     function record() {
         root.action = ScreenshotAction.SnipAction.Record
         root.selectionMode = RegionSelection.SelectionMode.RectCorners
-        // If already open then re-trigger to stop recording
         if (root.screenshotActive) root.screenshotActive = false
         root.screenshotActive = true
     }
@@ -81,7 +76,6 @@ Scope {
     function recordWithSound() {
         root.action = ScreenshotAction.SnipAction.RecordWithSound
         root.selectionMode = RegionSelection.SelectionMode.RectCorners
-        // If already open then re-trigger to stop recording
         if (root.screenshotActive) root.screenshotActive = false
         root.screenshotActive = true
     }

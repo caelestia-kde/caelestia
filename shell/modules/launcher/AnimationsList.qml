@@ -41,19 +41,22 @@ StyledListView {
 
     onVisibleChanged: {
         if (visible) {
+            Animations.refresh();
             refreshModel();
         }
     }
 
     onStateChanged: {
         if (state === "animations") {
+            Animations.refresh();
             refreshModel();
         }
     }
 
     add: Transition {
         Anim {
-            properties: "opacity,scale"
+            type: Anim.DefaultEffects
+            property: "opacity"
             from: 0
             to: 1
         }
@@ -61,7 +64,8 @@ StyledListView {
 
     remove: Transition {
         Anim {
-            properties: "opacity,scale"
+            type: Anim.DefaultEffects
+            property: "opacity"
             from: 1
             to: 0
         }
@@ -97,18 +101,18 @@ StyledListView {
 
         required property var modelData
 
-        implicitHeight: Tokens.sizes.launcher.itemHeight
-        width: root.width
-
-        function clicked() {
+        function activate(): void {
             if (!modelData || !modelData.onClicked)
                 return;
             modelData.onClicked(root);
         }
 
+        implicitHeight: Tokens.sizes.launcher.itemHeight
+        width: root.width
+
         StateLayer {
             radius: Tokens.rounding.large
-            onClicked: delegateRoot.clicked()
+            onClicked: delegateRoot.activate()
         }
 
         Item {
@@ -141,7 +145,7 @@ StyledListView {
                 }
 
                 StyledText {
-                    text: modelData ? (modelData.path === "default" ? qsTr("Use default shell animations") : qsTr("Click to apply animation")) : ""
+                    text: modelData ? (modelData.description || (modelData.path === "default" ? qsTr("Use default shell animations") : qsTr("Click to apply animation"))) : ""
                     font: Tokens.font.body.small
                     color: Colours.palette.m3onSurfaceVariant
                     elide: Text.ElideRight

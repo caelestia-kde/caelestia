@@ -1,18 +1,27 @@
 #pragma once
 
+#include <qmetatype.h>
 #include <qobject.h>
 #include <qvariant.h>
 
-#include "listnode.hpp" // IWYU pragma: keep
-#include "schema.hpp"   // IWYU pragma: keep
+#include "listnode.hpp"
+#include "schema.hpp"
 
 namespace caelestia::settings {
 
 inline QVariantMap vmap(std::initializer_list<std::pair<QString, QVariant>> entries) {
     QVariantMap map;
     for (const auto& [key, value] : entries)
-        map.insert(std::move(key), std::move(value));
+        map.insert(key, value);
     return map;
+}
+
+template <typename... Ts> inline QList<QMetaType> unionTypes() {
+    static_assert(sizeof...(Ts) >= 2, "A union needs at least two types");
+    static_assert(sizeof...(Ts) <= 4, "A union cannot have more than 4 types");
+    static_assert((!std::is_same_v<Ts, QVariant> && ...), "A union cannot contain QVariant");
+
+    return { QMetaType::fromType<Ts>()... };
 }
 
 namespace detail {
@@ -39,10 +48,8 @@ template <std::floating_point T> bool compare(const QList<T>& a, const QList<T>&
 
 } // namespace caelestia::settings
 
-// Helper macro to prevent splitting initialiser lists
 #define DEFAULT_ARG(...) __VA_ARGS__
 
-// Declares a class to be a node class. This replaces the Q_OBJECT call at the top of the class.
 #define SETTINGS_NODE_NO_CTOR(Class, Base)                                                                             \
     Q_OBJECT                                                                                                           \
                                                                                                                        \
@@ -54,7 +61,7 @@ public:                                                                         
     }                                                                                                                  \
                                                                                                                        \
 private:                                                                                                               \
-    using Self = Class; // For use in the below macros
+    using Self = Class;
 
 #define SETTINGS_NODE(Class, Base)                                                                                     \
     SETTINGS_NODE_NO_CTOR(Class, Base)                                                                                 \
@@ -66,21 +73,22 @@ public:                                                                         
                                                                                                                        \
 private:
 
-// Defines a property on a node.
-#define SETTINGS_PROPERTY(Type, name, defaultVal, ...)                                                                 \
+#define SETTINGS_PROPERTY_IMPL(Type, name, global, defaultVal, ...)                                                    \
     Q_PROPERTY(Type name READ name WRITE set_##name NOTIFY name##Changed)                                              \
                                                                                                                        \
 public:                                                                                                                \
     [[nodiscard]] Type name() const {                                                                                  \
+        if (global || m_globalOnly)                                                                                    \
+            warnGlobalRead(QStringLiteral(#name));                                                                     \
         return m_##name;                                                                                               \
     }                                                                                                                  \
                                                                                                                        \
     void set_##name(const Type& value) {                                                                               \
-        if (!true /* TODO: validation */)                                                                              \
-            return;                                                                                                    \
+        if (rejectInvalidWrite(QStringLiteral(#name), value))                                                          \
+            return; /* Skip writes of the wrong type */                                                                \
                                                                                                                        \
-        if (forwardGlobalWrite(QStringLiteral(#name), QVariant::fromValue(value)))                                     \
-            return; /* Skip writes to global only keys, they are forwarded to the global layer */                      \
+        if (rejectGlobalWrite(QStringLiteral(#name)))                                                                  \
+            return; /* Skip writes to global only keys, they belong to the global layer */                             \
                                                                                                                        \
         const auto needsNotify = !caelestia::settings::detail::compare(value, m_##name);                               \
         m_##name = value;                                                                                              \
@@ -91,22 +99,25 @@ public:                                                                         
     Q_SIGNAL void name##Changed();                                                                                     \
                                                                                                                        \
 private:                                                                                                               \
-    Type m_##name = fallbackValue(&Self::m_##name, caelestia::settings::DefaultSpec::resolve<Type>(this, defaultVal)); \
+    Type m_##name = fallbackValue(&Self::m_##name, defaultVal);                                                        \
     inline static const bool s_register_##name =                                                                       \
         (caelestia::settings::Schema::annotate(&staticMetaObject, QStringLiteral(#name),                               \
-             { .defaultValue = caelestia::settings::DefaultSpec::create<Type>(defaultVal), __VA_ARGS__ }),             \
+             { .defaultValue = QVariant::fromValue<Type>(defaultVal), .globalOnly = global, __VA_ARGS__ }),            \
             true);
 
-// Defines a global property on a node. Shorthand for .globalOnly = true.
-#define SETTINGS_GLOBAL_PROPERTY(Type, name, defaultVal, ...)                                                          \
-    SETTINGS_PROPERTY(Type, name, DEFAULT_ARG(defaultVal), .globalOnly = true, __VA_ARGS__)
+#define SETTINGS_PROPERTY(Type, name, defaultVal, ...)                                                                 \
+    SETTINGS_PROPERTY_IMPL(Type, name, false, DEFAULT_ARG(defaultVal), __VA_ARGS__)
 
-// Defines a subobject property on a node. Subobject properties are CONSTANT.
+#define SETTINGS_GLOBAL_PROPERTY(Type, name, defaultVal, ...)                                                          \
+    SETTINGS_PROPERTY_IMPL(Type, name, true, DEFAULT_ARG(defaultVal), __VA_ARGS__)
+
 #define SETTINGS_SUBOBJECT_IMPL(Type, name, global)                                                                    \
     Q_PROPERTY(Type* name READ name CONSTANT)                                                                          \
                                                                                                                        \
 public:                                                                                                                \
     [[nodiscard]] Type* name() const {                                                                                 \
+        if (global || m_globalOnly)                                                                                    \
+            warnGlobalRead(QStringLiteral(#name));                                                                     \
         return m_##name;                                                                                               \
     }                                                                                                                  \
                                                                                                                        \
@@ -119,10 +130,8 @@ private:                                                                        
 
 #define SETTINGS_SUBOBJECT(Type, name) SETTINGS_SUBOBJECT_IMPL(Type, name, false)
 
-// Defines a global subobject on a node. Everything inside it is global only.
 #define SETTINGS_GLOBAL_SUBOBJECT(Type, name) SETTINGS_SUBOBJECT_IMPL(Type, name, true)
 
-// Defines a list type for use with SETTINGS_LIST.
 #define SETTINGS_LIST_TYPE(Element, Name)                                                                              \
     class Name : public caelestia::settings::ListNode {                                                                \
         Q_OBJECT                                                                                                       \
@@ -145,12 +154,13 @@ private:                                                                        
         }                                                                                                              \
     };
 
-// Defines a list property on a node. List properties are CONSTANT.
 #define SETTINGS_LIST_IMPL(Type, name, global, defaultVal, ...)                                                        \
     Q_PROPERTY(Type* name READ name CONSTANT)                                                                          \
                                                                                                                        \
 public:                                                                                                                \
     [[nodiscard]] Type* name() const {                                                                                 \
+        if (global || m_globalOnly)                                                                                    \
+            warnGlobalRead(QStringLiteral(#name));                                                                     \
         return m_##name;                                                                                               \
     }                                                                                                                  \
                                                                                                                        \
@@ -158,7 +168,7 @@ private:                                                                        
     Type* m_##name = new Type(fallbackValue(&Self::m_##name, nullptr), this, global);                                  \
     inline static const bool s_register_##name =                                                                       \
         (caelestia::settings::Schema::annotate(&staticMetaObject, QStringLiteral(#name),                               \
-             { .defaultValue = caelestia::settings::DefaultSpec::create<QList<QVariantMap>>(defaultVal),               \
+             { .defaultValue = QVariant::fromValue<QList<QVariantMap>>(defaultVal),                                    \
                  .globalOnly = global,                                                                                 \
                  __VA_ARGS__ }),                                                                                       \
             true);
@@ -166,6 +176,5 @@ private:                                                                        
 #define SETTINGS_LIST(Type, name, defaultVal, ...)                                                                     \
     SETTINGS_LIST_IMPL(Type, name, false, DEFAULT_ARG(defaultVal), __VA_ARGS__)
 
-// Defines a global list on a node. Everything inside it is global only.
 #define SETTINGS_GLOBAL_LIST(Type, name, defaultVal, ...)                                                              \
     SETTINGS_LIST_IMPL(Type, name, true, DEFAULT_ARG(defaultVal), __VA_ARGS__)

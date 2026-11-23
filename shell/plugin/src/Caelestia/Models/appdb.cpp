@@ -12,6 +12,7 @@ namespace caelestia::models {
 AppEntry::AppEntry(QObject* entry, unsigned int frequency, QObject* parent)
     : QObject(parent)
     , m_entry(entry)
+    , m_id(entry->property("id").toString())
     , m_frequency(frequency) {
     const auto mo = m_entry->metaObject();
     const auto tmo = &AppEntry::staticMetaObject;
@@ -23,14 +24,17 @@ AppEntry::AppEntry(QObject* entry, unsigned int frequency, QObject* parent)
         QObject::connect(m_entry, metaProp.notifySignal(), this, thisMetaProp.notifySignal());
     }
 
-    QObject::connect(m_entry, &QObject::destroyed, this, [this]() {
-        m_entry = nullptr;
-        deleteLater();
-    });
+    QObject::connect(m_entry, &QObject::destroyed, this, &AppEntry::onEntryDestroyed);
+}
+
+void AppEntry::onEntryDestroyed() {
+    m_entry = nullptr;
+    emit removed();
+    deleteLater();
 }
 
 QObject* AppEntry::entry() const {
-    return m_entry;
+    return m_entry.data();
 }
 
 quint32 AppEntry::frequency() const {
@@ -50,59 +54,56 @@ void AppEntry::incrementFrequency() {
 }
 
 QString AppEntry::id() const {
-    if (!m_entry) {
-        return "";
-    }
-    return m_entry->property("id").toString();
+    return m_id;
 }
 
 QString AppEntry::name() const {
     if (!m_entry) {
-        return "";
+        return {};
     }
     return m_entry->property("name").toString();
 }
 
 QString AppEntry::comment() const {
     if (!m_entry) {
-        return "";
+        return {};
     }
     return m_entry->property("comment").toString();
 }
 
 QString AppEntry::execString() const {
     if (!m_entry) {
-        return "";
+        return {};
     }
     return m_entry->property("execString").toString();
 }
 
 QString AppEntry::startupClass() const {
     if (!m_entry) {
-        return "";
+        return {};
     }
     return m_entry->property("startupClass").toString();
 }
 
 QString AppEntry::genericName() const {
     if (!m_entry) {
-        return "";
+        return {};
     }
     return m_entry->property("genericName").toString();
 }
 
 QString AppEntry::categories() const {
     if (!m_entry) {
-        return "";
+        return {};
     }
-    return m_entry->property("categories").toStringList().join(" ");
+    return m_entry->property("categories").toStringList().join(QStringLiteral(" "));
 }
 
 QString AppEntry::keywords() const {
     if (!m_entry) {
-        return "";
+        return {};
     }
-    return m_entry->property("keywords").toStringList().join(" ");
+    return m_entry->property("keywords").toStringList().join(QStringLiteral(" "));
 }
 
 AppDb::AppDb(QObject* parent)
@@ -113,12 +114,12 @@ AppDb::AppDb(QObject* parent)
     m_timer->setInterval(300);
     QObject::connect(m_timer, &QTimer::timeout, this, &AppDb::updateApps);
 
-    auto db = QSqlDatabase::addDatabase("QSQLITE", m_uuid);
-    db.setDatabaseName(":memory:");
+    auto db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), m_uuid);
+    db.setDatabaseName(QStringLiteral(":memory:"));
     db.open();
 
     QSqlQuery query(db);
-    query.exec("CREATE TABLE IF NOT EXISTS frequencies (id TEXT PRIMARY KEY, frequency INTEGER)");
+    query.exec(QStringLiteral("CREATE TABLE IF NOT EXISTS frequencies (id TEXT PRIMARY KEY, frequency INTEGER)"));
 }
 
 QString AppDb::uuid() const {
@@ -130,7 +131,7 @@ QString AppDb::path() const {
 }
 
 void AppDb::setPath(const QString& path) {
-    auto newPath = path.isEmpty() ? ":memory:" : path;
+    auto newPath = path.isEmpty() ? QStringLiteral(":memory:") : path;
 
     if (m_path == newPath) {
         return;
@@ -145,21 +146,32 @@ void AppDb::setPath(const QString& path) {
     db.open();
 
     QSqlQuery query(db);
-    query.exec("CREATE TABLE IF NOT EXISTS frequencies (id TEXT PRIMARY KEY, frequency INTEGER)");
+    query.exec(QStringLiteral("CREATE TABLE IF NOT EXISTS frequencies (id TEXT PRIMARY KEY, frequency INTEGER)"));
 
     updateAppFrequencies();
 }
 
 QObjectList AppDb::entries() const {
-    return m_entries;
+    QObjectList result;
+    result.reserve(m_entries.size());
+    for (const auto& entry : m_entries) {
+        if (entry) {
+            result.append(entry.data());
+        }
+    }
+    return result;
 }
 
 void AppDb::setEntries(const QObjectList& entries) {
-    if (m_entries == entries) {
+    if (m_entries.size() == entries.size() && std::equal(m_entries.cbegin(), m_entries.cend(), entries.cbegin())) {
         return;
     }
 
-    m_entries = entries;
+    m_entries.clear();
+    m_entries.reserve(entries.size());
+    for (auto* entry : entries) {
+        m_entries.append(entry);
+    }
     emit entriesChanged();
 
     m_timer->start();
@@ -191,7 +203,7 @@ void AppDb::setFavouriteApps(const QStringList& favApps) {
 }
 
 QString AppDb::regexifyString(const QString& original) const {
-    if (original.startsWith('^') && original.endsWith('$'))
+    if (original.startsWith(QLatin1Char('^')) && original.endsWith(QLatin1Char('$')))
         return original;
 
     const QString escaped = QRegularExpression::escape(original);
@@ -199,53 +211,81 @@ QString AppDb::regexifyString(const QString& original) const {
 }
 
 QQmlListProperty<AppEntry> AppDb::apps() {
-    return QQmlListProperty<AppEntry>(this, &getSortedApps());
+    reorderCachedSorted();
+    return QQmlListProperty<AppEntry>(this, &m_cachedSorted);
+}
+
+void AppDb::reorderCachedSorted() {
+    m_cachedSorted.clear();
+    m_cachedSorted.reserve(static_cast<qsizetype>(m_rankTree.size()));
+    for (const auto& [key, entry] : m_rankTree) {
+        m_cachedSorted.append(entry);
+    }
+}
+
+QVariantList AppDb::alphaApps() const {
+    return m_cachedAlphaApps;
 }
 
 void AppDb::incrementFrequency(const QString& id) {
     auto db = QSqlDatabase::database(m_uuid);
     QSqlQuery query(db);
 
-    query.prepare("INSERT INTO frequencies (id, frequency) "
-                  "VALUES (:id, 1) "
-                  "ON CONFLICT (id) DO UPDATE SET frequency = frequency + 1");
-    query.bindValue(":id", id);
+    query.prepare(QStringLiteral("INSERT INTO frequencies (id, frequency) "
+                                 "VALUES (:id, 1) "
+                                 "ON CONFLICT (id) DO UPDATE SET frequency = frequency + 1"));
+    query.bindValue(QStringLiteral(":id"), id);
     query.exec();
 
     auto* app = m_apps.value(id);
     if (app) {
-        const auto before = getSortedApps();
+        m_rankTree.erase(app->key);
         app->incrementFrequency();
-        getSortedApps();
-        if (before != m_sortedApps) {
-            emit appsChanged();
-        }
+        app->key = makeKey(app);
+        m_rankTree.insert({ app->key, app });
+        reorderCachedSorted();
+        emit appsChanged();
     } else {
         qCWarning(lcAppDb) << "incrementFrequency: could not find app with id" << id;
     }
 }
 
-QList<AppEntry*>& AppDb::getSortedApps() const {
-    m_sortedApps = m_apps.values();
+AppRankKey AppDb::makeKey(const AppEntry* app) const {
+    return AppRankKey{
+        isFavourite(app) ? 0 : 1,
+        -static_cast<int>(app->frequency()),
+        app->name(),
+    };
+}
 
-    // Pre-compute favourite status to avoid repeated regex matching during sort
-    QSet<QString> favSet;
-    favSet.reserve(m_sortedApps.size());
-    for (const auto* app : std::as_const(m_sortedApps)) {
-        if (isFavourite(app))
-            favSet.insert(app->id());
+void AppDb::rebuildRankTree() {
+    m_rankTree.clear();
+    for (auto* app : std::as_const(m_apps)) {
+        app->key = makeKey(app);
+        m_rankTree.insert({ app->key, app });
     }
+}
 
-    std::sort(m_sortedApps.begin(), m_sortedApps.end(), [&favSet](AppEntry* a, AppEntry* b) {
-        const bool aIsFav = favSet.contains(a->id());
-        const bool bIsFav = favSet.contains(b->id());
-        if (aIsFav != bIsFav)
-            return aIsFav;
-        if (a->frequency() != b->frequency())
-            return a->frequency() > b->frequency();
+void AppDb::rebuildAlphaApps() {
+    QList<AppEntry*> alphaList = m_apps.values();
+    std::sort(alphaList.begin(), alphaList.end(), [](AppEntry* a, AppEntry* b) {
         return a->name().localeAwareCompare(b->name()) < 0;
     });
-    return m_sortedApps;
+
+    m_cachedAlphaApps.clear();
+    m_cachedAlphaApps.reserve(alphaList.size());
+    for (auto* a : std::as_const(alphaList)) {
+        m_cachedAlphaApps.append(QVariant::fromValue(a->entry()));
+    }
+}
+
+QList<AppEntry*> AppDb::getSortedApps() const {
+    QList<AppEntry*> result;
+    result.reserve(static_cast<qsizetype>(m_rankTree.size()));
+    for (const auto& [key, entry] : m_rankTree) {
+        result.append(entry);
+    }
+    return result;
 }
 
 bool AppDb::isFavourite(const AppEntry* app) const {
@@ -261,8 +301,8 @@ quint32 AppDb::getFrequency(const QString& id) const {
     auto db = QSqlDatabase::database(m_uuid);
     QSqlQuery query(db);
 
-    query.prepare("SELECT frequency FROM frequencies WHERE id = :id");
-    query.bindValue(":id", id);
+    query.prepare(QStringLiteral("SELECT frequency FROM frequencies WHERE id = :id"));
+    query.bindValue(QStringLiteral(":id"), id);
 
     if (query.exec() && query.next()) {
         return query.value(0).toUInt();
@@ -272,16 +312,12 @@ quint32 AppDb::getFrequency(const QString& id) const {
 }
 
 void AppDb::updateAppFrequencies() {
-    const auto before = getSortedApps();
-
     for (auto* app : std::as_const(m_apps)) {
         app->setFrequency(getFrequency(app->id()));
     }
-
-    getSortedApps();
-    if (before != m_sortedApps) {
-        emit appsChanged();
-    }
+    rebuildRankTree();
+    reorderCachedSorted();
+    emit appsChanged();
 }
 
 void AppDb::updateApps() {
@@ -291,9 +327,11 @@ void AppDb::updateApps() {
         const auto id = entry->property("id").toString();
         if (!m_apps.contains(id)) {
             dirty = true;
-            auto* const newEntry = new AppEntry(entry, getFrequency(id), this);
-            QObject::connect(newEntry, &QObject::destroyed, this, [id, this]() {
-                if (m_apps.remove(id)) {
+            auto* const newEntry = new AppEntry(entry.data(), getFrequency(id), this);
+            newEntry->key = makeKey(newEntry);
+            QObject::connect(newEntry, &AppEntry::removed, this, [id, this]() {
+                if (auto* taken = m_apps.take(id)) {
+                    m_rankTree.erase(taken->key);
                     emit appsChanged();
                 }
             });
@@ -317,6 +355,9 @@ void AppDb::updateApps() {
     }
 
     if (dirty) {
+        rebuildRankTree();
+        reorderCachedSorted();
+        rebuildAlphaApps();
         emit appsChanged();
     }
 }

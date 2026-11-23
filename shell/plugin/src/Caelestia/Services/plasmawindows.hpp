@@ -1,16 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
-// Shared access to KWin's taskbar-side window handles.
-//
-// org_kde_plasma_window is what a taskbar uses to talk about a window it did
-// not create: publishing where its entry sits, asking for its icon, and so on.
-// More than one service here needs the same handle for the same window, so the
-// handles live in one place rather than each service opening its own.
-//
-// The shell already requests org_kde_plasma_window_management in its desktop
-// file, which is what makes KWin advertise this restricted interface to it.
-
 #include <QHash>
 #include <QObject>
 #include <QtWaylandClient/QWaylandClientExtension>
@@ -32,21 +22,50 @@ public:
     void setUuid(const QString& uuid);
 
     QString title() const { return m_title; }
+
     QString appId() const { return m_appId; }
+
     uint32_t pid() const { return m_pid; }
+
     int x() const { return m_x; }
+
     int y() const { return m_y; }
+
     uint32_t width() const { return m_width; }
+
     uint32_t height() const { return m_height; }
 
     bool isActive() const { return m_isActive; }
+
     bool isMinimized() const { return m_isMinimized; }
+
     bool isMaximized() const { return m_isMaximized; }
+
     bool isFullscreen() const { return m_isFullscreen; }
+
     bool demandsAttention() const { return m_demandsAttention; }
+
     bool skipTaskbar() const { return m_skipTaskbar; }
 
     QStringList desktops() const { return m_desktops; }
+
+    QString menuServiceName() const { return m_menuServiceName; }
+
+    QString menuObjectPath() const { return m_menuObjectPath; }
+
+    QStringList activities() const { return m_activities; }
+
+    /// Whether KWin has sent this window's state. Until then it reads as an
+    /// unminimised, empty window at the origin.
+    bool hasInitialState() const { return m_hasInitialState; }
+
+    /// Sets or clears one window state flag.
+    ///
+    /// The protocol request carries a flags bitfield (which states are being
+    /// touched) and a state bitfield (their new values), so clearing a flag is
+    /// flags=flag, state=0. Passing flags=0 matches no state at all and does
+    /// nothing, which is what made the "restore" paths silently no-op.
+    void setState(uint32_t flag, bool set) { set_state(flag, set ? flag : 0); }
 
 signals:
     void titleChanged();
@@ -55,8 +74,9 @@ signals:
     void geometryChanged();
     void stateChanged();
     void desktopsChanged();
+    void appMenuChanged();
+    void activitiesChanged();
 
-    /// The compositor dropped the window; the handle is spent after this.
     void unmapped();
 
 protected:
@@ -64,9 +84,15 @@ protected:
     void org_kde_plasma_window_app_id_changed(const QString& app_id) override;
     void org_kde_plasma_window_state_changed(uint32_t flags) override;
     void org_kde_plasma_window_geometry(int32_t x, int32_t y, uint32_t width, uint32_t height) override;
+    void org_kde_plasma_window_client_geometry(int32_t x, int32_t y, uint32_t width, uint32_t height) override;
+    void org_kde_plasma_window_initial_state() override;
+    void org_kde_plasma_window_virtual_desktop_changed(int32_t number) override;
     void org_kde_plasma_window_pid_changed(uint32_t pid) override;
     void org_kde_plasma_window_virtual_desktop_entered(const QString& id) override;
     void org_kde_plasma_window_virtual_desktop_left(const QString& id) override;
+    void org_kde_plasma_window_application_menu(const QString& service_name, const QString& object_path) override;
+    void org_kde_plasma_window_activity_entered(const QString& id) override;
+    void org_kde_plasma_window_activity_left(const QString& id) override;
     void org_kde_plasma_window_unmapped() override;
 
 private:
@@ -84,7 +110,11 @@ private:
     bool m_isFullscreen = false;
     bool m_demandsAttention = false;
     bool m_skipTaskbar = false;
+    bool m_hasInitialState = false;
     QStringList m_desktops;
+    QString m_menuServiceName;
+    QString m_menuObjectPath;
+    QStringList m_activities;
 };
 
 class PlasmaWindowManagement : public QWaylandClientExtensionTemplate<PlasmaWindowManagement>,
@@ -95,9 +125,12 @@ public:
     explicit PlasmaWindowManagement(QObject* parent = nullptr);
     ~PlasmaWindowManagement() override;
 
+    void requestStackingOrder();
+
 signals:
     void windowWithUuid(uint32_t id, const QString& uuid);
     void windowMapped(uint32_t id);
+    void stackingOrderReceived(const QStringList& uuids);
 
 protected:
     void org_kde_plasma_window_management_window_with_uuid(uint32_t id, const QString& uuid) override;
@@ -109,54 +142,52 @@ protected:
 
 class PlasmaStackingOrder : public QObject, public QtWayland::org_kde_plasma_stacking_order {
     Q_OBJECT
+
 public:
     explicit PlasmaStackingOrder(struct ::org_kde_plasma_stacking_order* object, QObject* parent = nullptr);
     ~PlasmaStackingOrder() override;
 
 protected:
-    void org_kde_plasma_stacking_order_window(const QString &uuid) override;
+    void org_kde_plasma_stacking_order_window(const QString& uuid) override;
     void org_kde_plasma_stacking_order_done() override;
 
 signals:
-    void window(const QString& uuid);
-    void done();
+    void done(const QStringList& uuids);
+
+private:
+    QStringList m_uuids;
 };
 
-/**
- * Hands out one handle per window, keyed on KWin's internal window id — the
- * same value the KWin bridge reports as a window's address.
- *
- * Deliberately leaked rather than held in a destructible static. Releasing a
- * Wayland proxy is itself a request, and a static is torn down from an exit
- * handler, long after Qt has closed the display; marshalling there segfaults
- * the shell on its way out. Handles are released early, from aboutToQuit,
- * while the connection is still live.
- */
 class PlasmaWindows : public QObject {
     Q_OBJECT
 
 public:
     static PlasmaWindows* instance();
 
-    /// Whether the compositor actually gave us the interface.
     bool available();
+    void refresh();
 
     /// The handle for @p uuid, or nullptr if the interface is unavailable or
     /// the connection is already gone. Uuids are normalised, so callers need
     /// not care whether theirs arrived brace-wrapped.
     PlasmaWindowHandle* handleFor(const QString& uuid);
-    
+
+    /// The handle for @p uuid if there already is one. Unlike handleFor, it
+    /// never asks KWin for a window, which may have closed.
+    PlasmaWindowHandle* existingHandle(const QString& uuid) const { return m_handles.value(normaliseUuid(uuid)); }
+
     QList<QString> windowUuids() const { return m_handles.keys(); }
+
+    /// Window uuids from the bottom of KWin's stack to the top.
+    QStringList stackingOrder() const { return m_stackingOrder; }
 
     /// KWin hands out window ids as QUuid::toString(), i.e. brace-wrapped.
     static QString normaliseUuid(const QString& uuid);
 
 signals:
-    /// A new window appeared. The uuid is the normalised form.
     void windowAdded(const QString& uuid);
+    void stackingOrderChanged();
 
-    /// A handle went away, so anything a service cached against @p uuid is
-    /// stale. The uuid is the normalised form.
     void handleLost(const QString& uuid);
 
 private slots:
@@ -171,6 +202,7 @@ private:
 
     PlasmaWindowManagement* m_management = nullptr;
     QHash<QString, PlasmaWindowHandle*> m_handles;
+    QStringList m_stackingOrder;
 };
 
 } // namespace caelestia::services

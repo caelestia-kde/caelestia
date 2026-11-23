@@ -4,6 +4,7 @@ import Caelestia.Config
 import qs.components.controls
 import qs.services
 import qs.modules.nexus.common
+import "../../../utilities/toasts/corner.js" as Corner
 
 PageBase {
     id: root
@@ -23,6 +24,32 @@ PageBase {
         }
     ]
     readonly property list<string> fullscreenValues: ["off", "important", "all"]
+
+    readonly property list<MenuItem> cornerItems: [
+        MenuItem {
+            text: qsTr("Automatic")
+            icon: "settings_suggest"
+        },
+        MenuItem {
+            text: qsTr("Top left")
+            icon: "north_west"
+        },
+        MenuItem {
+            text: qsTr("Top right")
+            icon: "north_east"
+        },
+        MenuItem {
+            text: qsTr("Bottom left")
+            icon: "south_west"
+        },
+        MenuItem {
+            text: qsTr("Bottom right")
+            icon: "south_east"
+        }
+    ]
+    /// The stored names come from corner.js, which is also what resolves them, so the row
+    /// and the layout cannot disagree about what a corner is called.
+    readonly property list<string> cornerValues: Corner.VALUES
 
     title: qsTr("Toasts")
     isSubPage: true
@@ -57,6 +84,14 @@ PageBase {
             onMoved: value => GlobalConfig.utilities.maxToasts = Math.round(value)
         }
 
+        SelectRow {
+            label: qsTr("Corner")
+            subtext: qsTr("Where the stack grows from. Automatic keeps the corner the shell has always used")
+            menuItems: root.cornerItems
+            active: root.cornerItems[Corner.index(GlobalConfig.utilities.toasts.position)]
+            onSelected: item => GlobalConfig.utilities.toasts.position = root.cornerValues[root.cornerItems.indexOf(item)]
+        }
+
         ToggleRow {
             text: qsTr("Transparency")
             subtext: qsTr("Apply transparency and blur")
@@ -77,16 +112,13 @@ PageBase {
             text: qsTr("Sound")
         }
 
-        SliderRow {
+        NavRow {
             first: true
             last: true
-            icon: "notifications"
-            label: qsTr("Notification volume")
-            valueLabel: Math.round(value * 100) + "%"
-            value: GlobalConfig.audio.sounds.notificationVolume
-            enabled: GlobalConfig.audio.sounds.enabled
-            onMoved: value => GlobalConfig.audio.sounds.notificationVolume = value
-            onReleased: value => Audio.playNotification()
+            icon: "volume_up"
+            label: qsTr("Notification sounds")
+            status: qsTr("Volume and sound selector")
+            onClicked: root.nState.openSubPage("soundEffects")
         }
     }
 }

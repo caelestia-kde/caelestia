@@ -5,8 +5,8 @@ import QtQuick.Layouts
 import Quickshell
 import Quickshell.Widgets
 import Caelestia.Config
-import Caelestia.Services
 import qs.components
+import qs.components.effects
 import qs.components.images
 import qs.services
 
@@ -27,6 +27,19 @@ Item {
         anchors.right: parent.right
         anchors.topMargin: Tokens.padding.large
         anchors.bottomMargin: Tokens.spacing.medium
+
+        AmbientGlow {
+            anchors.fill: preview
+            address: root.client?.address ?? ""
+            fallbackIcon: root.client ? WinIcons.sourceFor(null, root.client.class, root.client.iconName, root.client.pid ?? 0) : ""
+            sourceAspect: preview.windowAspect
+            deform: true
+            active: Config.overview.ambientColor && !Colours.light
+            glowOpacity: Config.overview.ambientOpacity
+            radius: Tokens.rounding.medium
+            visible: !!root.client && opacity > 0.01
+            z: -1
+        }
 
         StyledClippingRect {
             id: preview
@@ -83,10 +96,6 @@ Item {
                         }
                     }
                 }
-                // A window that exists but has no stream -- minimised, or KWin
-                // refusing another one -- still shows its icon. The empty state
-                // above is not the right answer there: it says there is no client
-                // at all, which is a different thing.
                 WindowPreview {
                     anchors.fill: parent
                     address: root.client?.address ?? ""

@@ -1,3 +1,5 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Layouts
 import Quickshell
@@ -14,17 +16,13 @@ PageBase {
     readonly property DesktopEntry app: nState.selectedApp
     readonly property bool favouriteByRegex: app && matchedByRegex(GlobalConfig.launcher.favouriteApps, app.id)
     readonly property bool hiddenByRegex: app && matchedByRegex(GlobalConfig.launcher.hiddenApps, app.id)
+    readonly property bool pinnedToDockByRegex: app && matchedByRegex(DockManager.effectivePinnedApps, app.id)
 
-    function isRegexEntry(s: string): bool {
-        return /^\^.*\$$/.test(s);
-    }
-
-    function matchedByRegex(filterList: list<string>, id: string): bool {
-        return filterList.some(f => isRegexEntry(f) && new RegExp(f).test(id));
+    function matchedByRegex(filterList: var, id: string): bool {
+        return Array.from(filterList).some(f => Strings.isRegex(f) && Strings.testRegex(f, id));
     }
 
     onAppChanged: {
-        // Auto close when app lost
         if (!app)
             nState.closeSubPage();
     }
@@ -38,7 +36,6 @@ PageBase {
         width: root.cappedWidth
         spacing: Tokens.spacing.extraSmall / 2
 
-        // Header
         RowLayout {
             Layout.fillWidth: true
             Layout.leftMargin: Tokens.padding.small
@@ -48,7 +45,7 @@ PageBase {
             IconImage {
                 asynchronous: true
                 implicitSize: Math.round(Tokens.font.icon.large.pointSize * 3)
-                source: Quickshell.iconPath(root.app?.icon, "image-missing")
+                source: WinIcons.sourceFor(root.app, "", root.app?.id ?? "", 0)
             }
 
             ColumnLayout {
@@ -73,9 +70,29 @@ PageBase {
             }
         }
 
-        // Launcher
         SectionHeader {
             first: true
+            text: qsTr("Taskbar & Dock")
+        }
+
+        ToggleRow {
+            first: true
+            last: true
+            text: qsTr("Pin to dock")
+            subtext: root.pinnedToDockByRegex ? qsTr("Matched by a regex in pinnedApps - edit the config file to change") : qsTr("Show on the dock even when not running")
+            enabled: !root.pinnedToDockByRegex
+            checked: root.app && DockManager.isPinned(root.app.id)
+            onToggled: {
+                if (!root.app?.id)
+                    return;
+                if (checked)
+                    DockManager.pinApp(root.app.id);
+                else
+                    DockManager.unpinApp(root.app.id);
+            }
+        }
+
+        SectionHeader {
             text: qsTr("Launcher")
         }
 
@@ -103,7 +120,6 @@ PageBase {
             }
         }
 
-        // Details
         SectionHeader {
             text: qsTr("Details")
         }
@@ -161,7 +177,7 @@ PageBase {
                 id: value
 
                 Layout.fillWidth: true
-                Layout.maximumWidth: implicitWidth + 1 // Whyyyyyyyyy
+                Layout.maximumWidth: implicitWidth + 1
                 color: Colours.palette.m3onSurfaceVariant
                 font: Tokens.font.body.small
                 wrapMode: Text.WrapAtWordBoundaryOrAnywhere

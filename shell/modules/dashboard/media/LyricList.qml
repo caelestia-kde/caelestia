@@ -1,8 +1,9 @@
 pragma ComponentBehavior: Bound
 
 import QtQuick
-import QtQuick.Effects
 import QtQuick.Layouts
+import QtQuick.Effects
+import Caelestia
 import Caelestia.Config
 import Caelestia.Services
 import qs.components
@@ -15,7 +16,6 @@ Item {
     id: root
 
     readonly property real fadeAmount: 0.1
-    property bool flag
     property list<string> lyricList: Lyrics.lyrics
 
     function reloadTrack() {
@@ -67,7 +67,6 @@ Item {
     }
 
     state: {
-        flag; // For some reason it doesn't update sometimes, so use this to force an update
         if (Lyrics.hasLyrics)
             return "hasLyrics";
         if (Lyrics.loading)
@@ -169,16 +168,14 @@ Item {
             root.reloadTrack();
         }
 
+        // Browser track fields may arrive after the track-change notification.
+        function onTrackTitleChanged() { root.reloadTrack(); }
+        function onTrackArtistChanged() { root.reloadTrack(); }
+        function onTrackAlbumChanged() { root.reloadTrack(); }
+        function onLengthChanged() { root.reloadTrack(); }
+
         target: Players.active
         ignoreUnknownSignals: true
-    }
-
-    Connections {
-        function onHasLyricsChanged() {
-            root.flag = !root.flag;
-        }
-
-        target: Lyrics
     }
 
     Loader {
@@ -204,7 +201,7 @@ Item {
 
                     anchors.centerIn: parent
                     implicitSize: Math.round(Tokens.sizes.dashboard.mediaSectionWidth / 5)
-                    containsIcon: true // This removes the pentagon, which is not centered
+                    containsIcon: true
                 }
             }
 
@@ -261,7 +258,7 @@ Item {
         model: root.lyricList
         Component.onCompleted: {
             currentIndex = Qt.binding(() => {
-                model; // Force update when lyrics change
+                model;
                 return Lyrics.indexForTime(Players.active?.position ?? 0);
             });
             positionViewAtIndex(currentIndex, ListView.Center);
@@ -289,7 +286,7 @@ Item {
 
             text: modelData || ". . ."
             color: ListView.isCurrentItem ? Colours.palette.m3primary : mouse.containsMouse ? Colours.palette.m3onSurface : Colours.palette.m3outline
-            font: Tokens.font.body.medium
+            font: Qt.font({ family: LyricFonts.familyForText(text, Tokens.font.body.medium.family), pointSize: Tokens.font.body.medium.pointSize, weight: Tokens.font.body.medium.weight })
             wrapMode: Text.WrapAtWordBoundaryOrAnywhere
 
             layer.enabled: effectScale > 0
@@ -302,11 +299,14 @@ Item {
             }
 
             MouseArea {
+                id: mouse
+
                 anchors.fill: parent
+                hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
                 onClicked: {
                     if (Players.active) {
-                        let time = Lyrics.timeForIndex(index);
+                        const time = Lyrics.timeForIndex(lyric.index);
                         if (time >= 0) {
                             Players.active.position = time + Lyrics.offset + 0.01;
                         }
@@ -314,22 +314,13 @@ Item {
                 }
             }
 
+            Behavior on color {
+                CAnim {}
+            }
+
             Behavior on effectScale {
                 Anim {
                     type: Anim.SlowEffects
-                }
-            }
-
-            MouseArea {
-                id: mouse
-
-                anchors.fill: parent
-                cursorShape: Qt.PointingHandCursor
-                hoverEnabled: true
-                onClicked: {
-                    const p = Players.active;
-                    if (p)
-                        p.position = Lyrics.timeForIndex(lyric.index);
                 }
             }
         }

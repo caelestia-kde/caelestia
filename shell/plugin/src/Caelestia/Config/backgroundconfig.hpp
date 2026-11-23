@@ -26,9 +26,6 @@ class DesktopClockShadow : public settings::ObjectNode {
 class DesktopClock : public settings::ObjectNode {
     CONFIG_NODE(DesktopClock, settings::ObjectNode)
 
-    CONFIG_PROPERTY(bool, enabled, true)
-    CONFIG_PROPERTY(qreal, scale, 1.0)
-    CONFIG_PROPERTY(QString, position, QStringLiteral("bottom-right"))
     CONFIG_PROPERTY(bool, invertColors, false)
     CONFIG_SUBOBJECT(DesktopClockBackground, background)
     CONFIG_SUBOBJECT(DesktopClockShadow, shadow)
@@ -38,11 +35,9 @@ class BackgroundVisualiser : public settings::ObjectNode {
     CONFIG_NODE(BackgroundVisualiser, settings::ObjectNode)
 
     CONFIG_PROPERTY(bool, enabled, true)
+    CONFIG_PROPERTY(QString, profile, QStringLiteral("user"))
     CONFIG_PROPERTY(bool, autoHide, true)
     CONFIG_PROPERTY(bool, hideOnAllMonitors, false)
-    CONFIG_PROPERTY(bool, blur, false)
-    CONFIG_PROPERTY(qreal, rounding, 1)
-    CONFIG_PROPERTY(qreal, spacing, 1)
 };
 
 class DesktopLyricsBackground : public settings::ObjectNode {
@@ -64,11 +59,8 @@ class DesktopLyricsShadow : public settings::ObjectNode {
 class DesktopLyrics : public settings::ObjectNode {
     CONFIG_NODE(DesktopLyrics, settings::ObjectNode)
 
-    CONFIG_PROPERTY(bool, enabled, false)
     CONFIG_PROPERTY(bool, autoHide, true)
-    CONFIG_PROPERTY(qreal, scale, 1.0)
-    CONFIG_PROPERTY(QString, position, QStringLiteral("bottom-center"))
-    CONFIG_PROPERTY(int, alignment, 1)
+    CONFIG_PROPERTY(int, alignment, 0)
     CONFIG_PROPERTY(bool, invertColors, false)
     CONFIG_SUBOBJECT(DesktopLyricsBackground, background)
     CONFIG_SUBOBJECT(DesktopLyricsShadow, shadow)
@@ -77,17 +69,15 @@ class DesktopLyrics : public settings::ObjectNode {
 class DesktopShapes : public settings::ObjectNode {
     CONFIG_NODE(DesktopShapes, settings::ObjectNode)
 
-    CONFIG_PROPERTY(bool, enabled, true)
     CONFIG_PROPERTY(bool, autoHide, true)
-    CONFIG_PROPERTY(qreal, scale, 1.0)
-    CONFIG_PROPERTY(QString, position, QStringLiteral("bottom-center"))
 };
 
 class BackgroundConfig : public settings::ObjectNode {
     CONFIG_NODE(BackgroundConfig, settings::ObjectNode)
 
     CONFIG_PROPERTY(bool, enabled, true)
-    CONFIG_PROPERTY(bool, wallpaperEnabled, true)
+    CONFIG_PROPERTY(bool, wallpaperEnabled, false)
+    CONFIG_PROPERTY(QString, wallpaperEngine, QStringLiteral("auto"))
     CONFIG_PROPERTY(int, wallpaperFillMode, 2)
     CONFIG_PROPERTY(bool, wallpaperRecolor, false)
     CONFIG_PROPERTY(qreal, wallpaperRecolorStrength, 0.5)
@@ -103,6 +93,8 @@ class BackgroundConfig : public settings::ObjectNode {
     CONFIG_PROPERTY(bool, desktopIconsEnabled, true)
     CONFIG_PROPERTY(bool, materialYouIconsEnabled, true)
     CONFIG_PROPERTY(bool, materialYouIconsVibrant, true)
+    CONFIG_PROPERTY(qreal, materialYouIconsVibrancy, 1.0)
+    CONFIG_PROPERTY(bool, disableQuickshellDesktop, false)
     CONFIG_SUBOBJECT(DesktopClock, desktopClock)
     CONFIG_SUBOBJECT(DesktopLyrics, desktopLyrics)
     CONFIG_SUBOBJECT(DesktopShapes, desktopShapes)

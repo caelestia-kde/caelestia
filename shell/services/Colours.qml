@@ -18,9 +18,13 @@ Singleton {
     property string scheme: "dynamic"
     property string flavour: "default"
     property string variant: "default"
+    property real intensity: 1.0
+    readonly property real maxIntensity: 2.0
+    readonly property real intensityFraction: intensity / maxIntensity
     property string previewScheme: ""
     property string previewFlavour: ""
     property string previewVariant: ""
+    readonly property list<string> smartArg: GlobalConfig.services.smartScheme ? [] : ["--no-smart"]
     readonly property bool light: showPreview ? previewLight : currentLight
     property bool currentLight
     property bool previewLight
@@ -31,8 +35,19 @@ Singleton {
     readonly property Transparency transparency: Transparency {}
     readonly property alias wallLuminance: analyser.luminance
 
+    /// The disabled state, in one place. A control that cannot be used dims its container
+    /// and its content to these two rather than deriving a pair of its own, so what
+    /// disabled looks like is one decision instead of one per control.
+    readonly property color disabledContainer: Qt.alpha(palette.m3onSurface, 0.1)
+    readonly property color disabledContent: Qt.alpha(palette.m3onSurface, 0.38)
+
+    /// True for a frame or so while a palette lands. CAnim lands every colour while it is
+    /// set; see holdColourTransitions.
+    property bool switchingTheme: false
+
+    signal schemeApplied
+
     function updatePaletteManager(): void {
-        // Collect all palette colors into a map for C++ processing
         const p = root.palette;
         PaletteManager.update(
             {
@@ -172,53 +187,64 @@ Singleton {
         return harmonizeWith(designColor, root.palette.m3primary);
     }
 
-    function load(data: string, isPreview: bool): void {
-        const raw = (data || "").trim();
-        if (raw === "") {
-            if (!isPreview)
-                scheduleSchemeReload();
+    function load(data: string): void {
+        const scheme = parseScheme(data);
+        if (!scheme) {
+            scheduleSchemeReload();
             return;
         }
 
-        const colours = isPreview ? preview : current;
+        root.scheme = (scheme.name || "").trim();
+        root.flavour = (scheme.flavour || "").trim();
+        root.variant = (scheme.variant || "").trim();
+        root.currentLight = scheme.mode === "light";
+
+        root.showPreview = false;
+
+        // Absent, null, and a value the range does not take all mean the same thing here:
+        // what is in effect is the palette the engine produced. 0 is a real setting (a grey
+        // palette), so this cannot lean on falsiness either.
+        const intensity = Number(scheme.intensity ?? NaN);
+        root.intensity = Number.isFinite(intensity) ? Math.min(root.maxIntensity, Math.max(0, intensity)) : 1.0;
+
+        applyColours(root.current, scheme.colours);
+
+        root.schemeLoaded = true;
+        root.schemeRetryCount = 0;
+
+        root.schemeApplied();
+    }
+
+    function loadPreview(data: string): void {
+        const scheme = parseScheme(data);
+        if (scheme)
+            applyPreview(scheme);
+    }
+
+    function applyPreview(scheme: var): void {
+        root.previewScheme = (scheme.name || "").trim();
+        root.previewFlavour = (scheme.flavour || "").trim();
+        root.previewVariant = (scheme.variant || "").trim();
+        root.previewLight = scheme.mode === "light";
+
+        applyColours(root.preview, scheme.colours);
+
+        root.showPreview = true;
+    }
+
+    function parseScheme(data: string): var {
+        const raw = (data || "").trim();
+        if (raw === "")
+            return null;
+
         let scheme = null;
         try {
             scheme = JSON.parse(raw);
         } catch (e) {
-            if (!isPreview)
-                scheduleSchemeReload();
-            return;
+            return null;
         }
 
-        if (!scheme || !scheme.colours) {
-            if (!isPreview)
-                scheduleSchemeReload();
-            return;
-        }
-
-        if (!isPreview) {
-            root.scheme = (scheme.name || "").trim();
-            root.flavour = (scheme.flavour || "").trim();
-            root.variant = (scheme.variant || "").trim();
-            root.currentLight = scheme.mode === "light";
-        } else {
-            root.previewScheme = (scheme.name || "").trim();
-            root.previewFlavour = (scheme.flavour || "").trim();
-            root.previewVariant = (scheme.variant || "").trim();
-            root.previewLight = scheme.mode === "light";
-        }
-
-        for (const [name, colour] of Object.entries(scheme.colours)) {
-            const propName = name.startsWith("term") ? name : `m3${name}`;
-            if (colours.hasOwnProperty(propName))
-                colours[propName] = `#${colour}`;
-        }
-
-        if (!isPreview) {
-            root.schemeLoaded = true;
-            root.schemeRetryCount = 0;
-            Qt.callLater(root.syncKMYC);
-        }
+        return scheme && scheme.colours ? scheme : null;
     }
 
     function scheduleSchemeReload(): void {
@@ -230,54 +256,59 @@ Singleton {
             schemeRetryTimer.start();
     }
 
+    /// Fold a scheme's `colours` into a palette. A file leaves the leading `#` off and names a
+    /// terminal role plainly, so the role a palette holds is not the key the file uses.
+    function applyColours(palette: M3Palette, colours: var): void {
+        holdColourTransitions();
+        for (const [role, colour] of Object.entries(colours)) {
+            const propName = role.startsWith("term") ? role : `m3${role}`;
+            if (palette.hasOwnProperty(propName))
+                palette[propName] = colour.startsWith("#") ? colour : `#${colour}`;
+        }
+    }
+
+    /// Hold every colour transition still while a palette replaces the old one, so the
+    /// shell switches rather than cross-fading a few hundred colours at once. CAnim reads
+    /// `switchingTheme`; the release is queued once the writes have landed.
+    function holdColourTransitions(): void {
+        root.switchingTheme = true;
+        Qt.callLater(() => (root.switchingTheme = false));
+    }
+
+    function previewNamed(name: string, flavour: string, colours: var, light: bool): void {
+        if (colours)
+            applyPreview({ name, flavour, variant: root.variant, mode: light ? "light" : "dark", colours });
+    }
+
+    function clearPreview(): void {
+        root.showPreview = false;
+    }
+
     function setMode(mode: string): void {
-        Quickshell.execDetached(["caelestia", "scheme", "set", "--notify", "-m", mode]);
+        Quickshell.execDetached(["caelestia", "scheme", "set", "--notify", "-m", mode, ...root.smartArg]);
     }
 
-    function syncKMYC(): void {
-        const variantMap = {
-            "content": 0,
-            "expressive": 1,
-            "fidelity": 2,
-            "monochrome": 3,
-            "neutral": 4,
-            "tonal-spot": 5,
-            "vibrant": 6,
-            "rainbow": 7,
-            "fruit-salad": 8
-        };
-        const varNum = variantMap[root.variant] ?? 5;
-        const color = String(root.palette.m3primary_paletteKeyColor);
-        const lightMode = root.currentLight ? "True" : "False";
-
-        const scriptPath = Quickshell.shellPath("scripts/sync-kmyc.sh");
-        Quickshell.execDetached(["bash", scriptPath, color, varNum, lightMode]);
+    function setIntensity(fraction: real): void {
+        Quickshell.execDetached(["caelestia", "scheme", "set", "-i", (fraction * maxIntensity).toFixed(2), ...root.smartArg]);
     }
 
-    // The CLI derives dynamic colours from the wallpaper it was last told
-    // about, and a scheme it cannot derive leaves the palette on the built-in
-    // default, which is then pushed into kde-material-you-colors and keeps the
-    // whole desktop on it. Re-derive from the wallpaper on screen once per
-    // start. Delivery is the scheme.json write the loader already watches, so
-    // nothing here waits for the result.
     function reseedScheme(): void {
-        Quickshell.execDetached(["bash", Quickshell.shellPath("scripts/reseed-scheme.sh")]);
+        Quickshell.execDetached(["bash", Quickshell.shellPath("scripts/reseed-scheme.sh"), ...root.smartArg]);
     }
 
     function reloadHyprRules(): void {
         // Layer rules are Hyprland-only; KWin handles blur via effects.
-        if (typeof KWinActiveWindowBridge !== "undefined")
-            return;
+                    return;
 
         let rule, trEnabled;
-        if (Hypr.usingLua) {
+        if (Kwin.usingLua) {
             rule = `eval hl.layer_rule({ match = { namespace = "caelestia-drawers" }, %1 = %2 })`;
             trEnabled = transparency.enabled;
         } else {
             rule = "keyword layerrule %1 %2, match:namespace caelestia-drawers";
             trEnabled = transparency.enabled ? 1 : 0;
         }
-        Hypr.extras.batchMessage([rule.arg("blur").arg(trEnabled), rule.arg("ignore_alpha").arg(Math.max(0, transparency.base - 0.03))]);
+        Kwin.extras.batchMessage([rule.arg("blur").arg(trEnabled), rule.arg("ignore_alpha").arg(Math.max(0, transparency.base - 0.03))]);
     }
 
     function requestReloadHyprRules(): void {
@@ -302,7 +333,7 @@ Singleton {
             root.reloadHyprRules();
         }
 
-        target: Hypr
+        target: Kwin
     }
 
 
@@ -313,13 +344,9 @@ Singleton {
         path: `${Paths.state}/scheme.json`
         watchChanges: true
         onFileChanged: reload()
-        onLoaded: root.load(text(), false)
+        onLoaded: root.load(text())
     }
 
-    // The external caelestia CLI rewrites scheme.json atomically (os.replace),
-    // which the FileView's watcher can miss after the first replacement. The
-    // C++ SchemeLoader re-arms its own watcher for exactly this case, so reload
-    // the palette from its signal as the authoritative trigger.
     Connections {
         target: SchemeLoader
 
@@ -328,8 +355,6 @@ Singleton {
         }
     }
 
-    // Slightly after start, so the wallpaper this session restored is on disk
-    // and can be handed to the CLI.
     Timer {
         id: reseedTimer
 
@@ -381,7 +406,6 @@ Singleton {
         onLuminanceChanged: Qt.callLater(root.updatePaletteManager)
     }
 
-    // Trigger PaletteManager update when palette, light mode, or transparency changes
     Connections {
         target: root.palette
 
@@ -393,8 +417,6 @@ Singleton {
     onLightChanged: Qt.callLater(updatePaletteManager)
 
     onShowPreviewChanged: Qt.callLater(updatePaletteManager)
-
-
 
     Timer {
         id: cooldownTimer
@@ -437,8 +459,6 @@ Singleton {
     }
 
     component M3TPalette: QtObject {
-        // Reads from C++ PaletteManager.tPalette (QVariantMap) — one C++ update() per theme change
-        // instead of 44 individual JS property binding re-evaluations.
         readonly property color m3primary_paletteKeyColor:         PaletteManager.tPalette["m3primary_paletteKeyColor"] ?? root.palette.m3primary_paletteKeyColor
         readonly property color m3secondary_paletteKeyColor:       PaletteManager.tPalette["m3secondary_paletteKeyColor"] ?? root.palette.m3secondary_paletteKeyColor
         readonly property color m3tertiary_paletteKeyColor:        PaletteManager.tPalette["m3tertiary_paletteKeyColor"] ?? root.palette.m3tertiary_paletteKeyColor

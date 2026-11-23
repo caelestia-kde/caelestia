@@ -6,20 +6,50 @@ import Quickshell
 import Quickshell.Services.SystemTray
 import Caelestia.Config
 import qs.components
+import qs.services as QsServices
 
+// Aliased on purpose: qs.services declares singletons named after some of the
+// popouts this file instantiates (Weather, Audio), and an unqualified import
+// would make those names resolve to the services instead of the local
+// components.
 Item {
     id: root
 
     required property PopoutState popouts
+    required property DrawerVisibilities visibilities
     readonly property Popout currentPopout: content.children.find(c => c.shouldBeActive) ?? null
     readonly property Item current: currentPopout?.item ?? null
+    readonly property bool currentIsContext: currentPopout?.isContext ?? false
+    // A popout that draws its own surface asks the drawer for nothing behind it: the
+    // plate and the blur a panel would have been given would only show around its edges.
+    readonly property bool currentOwnsSurface: currentPopout?.item?.popoutOwnSurface ?? false
 
-    readonly property real contentMargin: Tokens.padding.large * (currentPopout?.item?.scaleOffset ?? 1.0)
-    readonly property real availableWidth: Math.max(0, ((QsWindow.window as QsWindow)?.screen?.width ?? 0) - contentMargin * 2 - Tokens.padding.extraLargeIncreased * (currentPopout?.item?.scaleOffset ?? 1.0))
-    readonly property real availableHeight: Math.max(0, ((QsWindow.window as QsWindow)?.screen?.height ?? 0) - contentMargin * 2 - Tokens.padding.extraLargeIncreased * (currentPopout?.item?.scaleOffset ?? 1.0))
+    // A popout can ask for a tighter frame than the default: the hidden-icons box is
+    // a grid of glyphs, and needs less room around it than a panel of text does.
+    readonly property real contentMargin: (currentPopout?.item?.popoutMargin ?? Tokens.padding.large) * (currentPopout?.item?.scaleOffset ?? 1.0)
+    readonly property real framePadding: root.contentMargin * 2
+    readonly property real availableWidth: Math.max(0, ((QsWindow.window as QsWindow)?.screen?.width ?? 0) - contentMargin * 2 - root.framePadding)
+    readonly property real availableHeight: Math.max(0, ((QsWindow.window as QsWindow)?.screen?.height ?? 0) - contentMargin * 2 - root.framePadding)
 
-    implicitWidth: Math.min(((currentPopout?.item?.width || currentPopout?.implicitWidth) ?? 0) + Tokens.padding.extraLargeIncreased * (currentPopout?.item?.scaleOffset ?? 1.0), availableWidth)
-    implicitHeight: Math.min(((currentPopout?.item?.height || currentPopout?.implicitHeight) ?? 0) + Tokens.padding.extraLargeIncreased * (currentPopout?.item?.scaleOffset ?? 1.0), availableHeight)
+    // Built-in popouts are handed the values they need one by one in their own
+    // entry. Plugin popouts are plain components, so the values they declare
+    // are filled in here instead and the rest are left alone.
+    function applyPopoutContext(popout: var): void {
+        if (!popout)
+            return;
+
+        const context = {
+            popouts: root.popouts,
+            visibilities: root.visibilities
+        };
+
+        for (const name in context)
+            if (popout.hasOwnProperty(name))
+                popout[name] = context[name];
+    }
+
+    implicitWidth: Math.min(((currentPopout?.item?.width || currentPopout?.implicitWidth) ?? 0) + root.framePadding, availableWidth)
+    implicitHeight: Math.min(((currentPopout?.item?.height || currentPopout?.implicitHeight) ?? 0) + root.framePadding, availableHeight)
 
     Flickable {
         id: viewport
@@ -28,6 +58,7 @@ Item {
         anchors.margins: root.contentMargin
 
         clip: true
+        boundsBehavior: Flickable.StopAtBounds
         contentWidth: width
         contentHeight: Math.max(height, content.implicitHeight)
 
@@ -48,9 +79,14 @@ Item {
 
         Popout {
             name: "greetercontext"
+            isContext: true
             previewKey: "greeter"
-            sourceComponent: GreeterContext {
+            sourceComponent: BarComponentContext {
                 popouts: root.popouts
+                label: qsTr("Greeter settings")
+                subPage: "barGreeter"
+                secondLabel: qsTr("Elements & Modules")
+                secondSubPage: "taskbarElements"
             }
         }
 
@@ -101,6 +137,69 @@ Item {
         }
 
         Popout {
+            name: "clock"
+            sourceComponent: CalendarPopout {
+                popouts: root.popouts
+            }
+        }
+
+        Popout {
+            name: "clockcontext"
+            isContext: true
+            previewKey: "clock"
+            sourceComponent: BarComponentContext {
+                popouts: root.popouts
+                label: qsTr("Clock settings")
+                subPage: "barClock"
+                secondLabel: qsTr("Elements & Modules")
+                secondSubPage: "taskbarElements"
+            }
+        }
+
+        Popout {
+            name: "appmenu"
+            sourceComponent: AppMenu {
+                popouts: root.popouts
+            }
+        }
+
+        Popout {
+            name: "appmenucontext"
+            isContext: true
+            sourceComponent: BarComponentContext {
+                popouts: root.popouts
+                label: qsTr("App menu settings")
+                subPage: "barAppMenu"
+                secondLabel: qsTr("Elements & Modules")
+                secondSubPage: "taskbarElements"
+            }
+        }
+
+        Popout {
+            name: "osiconcontext"
+            isContext: true
+            sourceComponent: BarComponentContext {
+                popouts: root.popouts
+                label: qsTr("Launcher settings")
+                subPage: "launcher"
+                secondLabel: qsTr("Elements & Modules")
+                secondSubPage: "taskbarElements"
+            }
+        }
+
+        Popout {
+            name: "statusiconscontext"
+            isContext: true
+            sourceComponent: BarComponentContext {
+                popouts: root.popouts
+                label: qsTr("Status icons settings")
+                subPage: "barStatusIcons"
+                secondLabel: qsTr("Elements & Modules")
+                secondSubPage: "taskbarElements"
+            }
+        }
+
+        Popout {
             name: "battery"
             sourceComponent: Battery {
                 popouts: root.popouts
@@ -110,12 +209,66 @@ Item {
         Popout {
             name: "peripheralBattery"
             sourceComponent: PeripheralBattery {
+                width: _isSidebarOpen
+                    ? Math.max(0, QsServices.Visibilities.sidebarWidthFor(Tokens.sizes.sidebar.width) - root.framePadding)
+                    : implicitWidth
             }
         }
 
         Popout {
             name: "github"
             sourceComponent: Github {
+                popouts: root.popouts
+            }
+        }
+
+        Popout {
+            name: "media"
+            sourceComponent: Media {
+                popouts: root.popouts
+            }
+        }
+
+        Popout {
+            name: "notes"
+            sourceComponent: Notes {
+                popouts: root.popouts
+            }
+        }
+
+        Popout {
+            name: "weather"
+            sourceComponent: Weather {
+                popouts: root.popouts
+            }
+        }
+
+        Popout {
+            name: "performance"
+            sourceComponent: Performance {
+                popouts: root.popouts
+            }
+        }
+
+        Popout {
+            name: "shortcuts"
+            sourceComponent: Shortcuts {
+                popouts: root.popouts
+                visibilities: root.visibilities
+            }
+        }
+
+        Popout {
+            name: "screencapture"
+            sourceComponent: ScreenCapture {
+                popouts: root.popouts
+                visibilities: root.visibilities
+            }
+        }
+
+        Popout {
+            name: "keepawake"
+            sourceComponent: KeepAwake {
                 popouts: root.popouts
             }
         }
@@ -129,10 +282,15 @@ Item {
 
         Popout {
             name: "audio"
-            // Audio controls need a readable minimum size even when bar
-            // preview scaling is configured for compact indicators.
             minScale: 0.9
             sourceComponent: Audio {
+                popouts: root.popouts
+            }
+        }
+
+        Popout {
+            name: "privacy"
+            sourceComponent: Privacy {
                 popouts: root.popouts
             }
         }
@@ -176,25 +334,187 @@ Item {
 
         Popout {
             name: "dockcontext"
+            isContext: true
             previewKey: "dock"
             sourceComponent: DockContext {
                 popouts: root.popouts
             }
         }
 
+        Popout {
+            name: "workspacescontext"
+            isContext: true
+            sourceComponent: BarComponentContext {
+                popouts: root.popouts
+                label: qsTr("Workspaces settings")
+                subPage: "barWorkspaces"
+                secondLabel: qsTr("Elements & Modules")
+                secondSubPage: "taskbarElements"
+            }
+        }
+
+        Popout {
+            name: "trayOverflow"
+            previewKey: "tray"
+            sourceComponent: TrayOverflow {
+                popouts: root.popouts
+            }
+        }
+
+        Popout {
+            name: "trayicons"
+            previewKey: "tray"
+            isContext: true
+            sourceComponent: TrayIcons {
+                popouts: root.popouts
+            }
+        }
+
+        Popout {
+            name: "githubcontext"
+            isContext: true
+            sourceComponent: BarComponentContext {
+                popouts: root.popouts
+                label: qsTr("GitHub settings")
+                subPage: "barGithub"
+                secondLabel: qsTr("Elements & Modules")
+                secondSubPage: "taskbarElements"
+            }
+        }
+
+        Popout {
+            name: "mediacontext"
+            isContext: true
+            sourceComponent: BarComponentContext {
+                popouts: root.popouts
+                label: qsTr("Media settings")
+                subPage: "barMedia"
+                secondLabel: qsTr("Elements & Modules")
+                secondSubPage: "taskbarElements"
+            }
+        }
+
+        Popout {
+            name: "performancecontext"
+            isContext: true
+            sourceComponent: BarComponentContext {
+                popouts: root.popouts
+                label: qsTr("Performance settings")
+                subPage: "barPerformance"
+                secondLabel: qsTr("Elements & Modules")
+                secondSubPage: "taskbarElements"
+            }
+        }
+        Popout {
+            name: "weathercontext"
+            isContext: true
+            sourceComponent: BarComponentContext {
+                popouts: root.popouts
+                label: qsTr("Weather settings")
+                subPage: "barWeather"
+                secondLabel: qsTr("Elements & Modules")
+                secondSubPage: "taskbarElements"
+            }
+        }
+        Popout {
+            name: "screencapturecontext"
+            isContext: true
+            sourceComponent: BarComponentContext {
+                popouts: root.popouts
+                label: qsTr("Screen Capture settings")
+                subPage: "barScreenCapture"
+                secondLabel: qsTr("Elements & Modules")
+                secondSubPage: "taskbarElements"
+            }
+        }
+        Popout {
+            name: "keepawakemenu"
+            isContext: true
+            previewKey: "keepawake"
+            sourceComponent: KeepAwakeMenu {
+                popouts: root.popouts
+            }
+        }
+        Popout {
+            name: "keepawakeexpiry"
+            isContext: true
+            previewKey: "keepawake"
+            sourceComponent: KeepAwakeExpiry {
+                popouts: root.popouts
+            }
+        }
+        Popout {
+            name: "keepawakecontext"
+            isContext: true
+            previewKey: "keepawake"
+            sourceComponent: BarComponentContext {
+                popouts: root.popouts
+                label: qsTr("Keep Awake settings")
+                subPage: "barKeepAwake"
+                secondLabel: qsTr("Elements & Modules")
+                secondSubPage: "taskbarElements"
+            }
+        }
+
+        Popout {
+            name: "dockbgcontext"
+            isContext: true
+            sourceComponent: BarComponentContext {
+                popouts: root.popouts
+                label: qsTr("Dock settings")
+                subPage: "barDock"
+                secondLabel: qsTr("Elements & Modules")
+                secondSubPage: "taskbarElements"
+            }
+        }
+
+        Popout {
+            name: "elementscontext"
+            isContext: true
+            sourceComponent: BarComponentContext {
+                popouts: root.popouts
+                label: qsTr("Elements & Modules")
+                subPage: "taskbarElements"
+            }
+        }
+
+        // Plugin widgets that declare a popout get one here, so they slide in
+        // through the same container the built-in popouts use instead of
+        // opening a window of their own.
         Repeater {
             model: ScriptModel {
-                values: SystemTray.items.values.filter(i => !GlobalConfig.bar.tray.hiddenIcons.includes(i.id))
+                values: QsServices.BarWidgetRegistry.widgets.filter(widget => widget.popoutUrl)
+            }
+
+            Popout {
+                required property var modelData
+
+                name: modelData.id
+                previewKey: modelData.id
+                source: modelData.popoutUrl
+
+                onItemChanged: root.applyPopoutContext(item)
+            }
+        }
+
+        // One menu per running icon, wherever the bar drew it: an icon in the overflow
+        // box asks for its menu by name too, and a name nothing answers leaves the box
+        // closed with nothing in its place.
+        Repeater {
+            model: ScriptModel {
+                values: QsServices.TrayRegistry.liveItems.filter(item => item.hasMenu)
             }
 
             Popout {
                 id: trayMenu
 
                 required property SystemTrayItem modelData
-                required property int index
 
-                name: `traymenu${index}`
+                name: QsServices.TrayRegistry.popoutNameOf(modelData)
                 previewKey: "trayMenu"
+                // The outgoing menu keeps its Loader alive until the fade ends;
+                // hide it instead so it cannot draw over the incoming one.
+                visible: shouldBeActive
                 sourceComponent: trayMenuComp
 
                 Connections {
@@ -225,12 +545,8 @@ Item {
         id: popout
 
         required property string name
-        // Key into GlobalConfig.bar.previewScales/previewFontScales. Defaults to
-        // the popout name; a missing key degrades to 0.0, matching the old
-        // hardcoded per-popout preambles.
+        property bool isContext: false
         property string previewKey: name
-        // Per-popout minimum scale clamp. Audio needs a readable minimum even
-        // when bar preview scaling is configured for compact indicators.
         property real minScale: 0.1
         readonly property bool shouldBeActive: root.popouts.currentName === name
 

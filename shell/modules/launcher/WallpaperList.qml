@@ -25,7 +25,6 @@ PathView {
         if (!screen)
             return 0;
 
-        // Screen width - 4x outer rounding - 2x max side thickness (cause centered)
         const isBarHorizontal = Config.bar.position === "top" || Config.bar.position === "bottom";
         const barThickness = isBarHorizontal ? panels.bar.implicitHeight : panels.bar.implicitWidth;
         const barMargins = Math.max(Config.border.thickness, barThickness);
@@ -77,7 +76,7 @@ PathView {
             }
         }
 
-        const maxWidth = screen.width - Config.border.rounding * 4 - (barMargins + outerMargins) * 2;
+        const maxWidth = screen.width - Surface.panelRounding * 4 - (barMargins + outerMargins) * 2;
 
         if (maxWidth <= 0)
             return 0;
@@ -132,8 +131,9 @@ PathView {
     Timer {
         id: previewTimer
 
-        interval: 100
+        interval: 500
         onTriggered: {
+            if (!root.visibilities.launcher) return;
             if (root.currentItem)
                 Wallpapers.preview((root.currentItem as WallpaperItem).modelData.path);
         }
