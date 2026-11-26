@@ -74,6 +74,7 @@ PageBase {
 
     readonly property bool usesBuiltInVisualizer: Config.background.visualiser.engine === "quickshell" || (Config.background.visualiser.engine !== "plasma" && !Config.background.disableQuickshellDesktop && (Config.background.wallpaperEnabled || !PlasmaWidgets.hasVisualizer))
     readonly property bool visualizerAvailable: usesBuiltInVisualizer ? Audio.cava !== null : (PlasmaWidgets.hasVisualizer && (Config.background.visualiser.engine === "plasma" || !Config.background.wallpaperEnabled))
+    readonly property bool hasMediaShapes: Object.values(DesktopLayout.widgets).some(widget => widget.type === "shapes")
 
     isSubPage: true
     title: qsTr("Desktop Addons")
@@ -170,6 +171,20 @@ PageBase {
                 onToggled: {
                     PlasmaWidgets.setWidgetEnabled("visualizer", checked);
                 }
+            }
+
+            ToggleRow {
+                Layout.fillWidth: true
+                visible: root.usesBuiltInVisualizer && !Config.background.disableQuickshellDesktop
+                enabled: root.visualizerAvailable && Config.background.visualiser.enabled && root.hasMediaShapes
+                opacity: enabled ? 1 : 0.5
+                text: qsTr("Circular visualizer and snowfall")
+                subtext: root.hasMediaShapes
+                    ? qsTr("Use circular bars and falling particles around the Media Shapes widget instead of bottom bars")
+                    : qsTr("Add a Media Shapes widget to use this style")
+                reset: ({ node: GlobalConfig.background.visualiser, setting: "immersiveMusic" })
+                checked: Config.background.visualiser.immersiveMusic
+                onToggled: GlobalConfig.background.visualiser.immersiveMusic = checked
             }
 
             SelectRow {
