@@ -1302,6 +1302,12 @@ QtObject {
             subPage: "desktopAddons"
         },
         {
+            label: qsTr("Circular visualizer and snowfall"),
+            section: qsTr("Desktop Addons"),
+            pageIdx: 1,
+            subPage: "desktopAddons"
+        },
+        {
             label: qsTr("Engine"),
             description: qsTr("Choose which visualizer renderer to use"),
             section: qsTr("Desktop Addons"),

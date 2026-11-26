@@ -7,13 +7,17 @@ import Caelestia.Components
 import Caelestia.Services
 import qs.components
 import qs.services
+import "MusicScene.js" as MusicScene
 
 Item {
     id: root
 
     required property ShellScreen screen
+    readonly property bool circularModeActive: Config.background.visualiser.immersiveMusic
+        && (Players.active?.isPlaying ?? false)
+        && MusicScene.hasMediaShape(DesktopLayout.widgets, DesktopLayout.positions, Screens.screens, root.screen?.name ?? "")
     readonly property bool windowHidesVisualiser: Kwin.windowHidesDesktopWidgets(root.screen ? root.screen.name : "", Config.background.visualiser.hideOnAllMonitors)
-    readonly property bool shouldBeActive: Config.background.visualiser.enabled && !Audio.muted && !(GameMode.enabled && GlobalConfig.utilities.gameMode.disableVisualizer) && (!Config.background.visualiser.autoHide || !windowHidesVisualiser)
+    readonly property bool shouldBeActive: Config.background.visualiser.enabled && !circularModeActive && !Audio.muted && !(GameMode.enabled && GlobalConfig.utilities.gameMode.disableVisualizer) && (!Config.background.visualiser.autoHide || !windowHidesVisualiser)
     property real offset: shouldBeActive ? 0 : screen.height * 0.2
     readonly property var barWrapper: {
         let name = root.screen ? root.screen.name : undefined;

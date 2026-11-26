@@ -147,6 +147,15 @@ Variants {
                 screen: win.modelData
             }
         }
+        Loader {
+            anchors.fill: parent
+            z: 2.5
+            active: !Config.background.disableQuickshellDesktop && !ContextMenuStore.editMode && Config.background.visualiser.enabled && Config.background.visualiser.immersiveMusic && (Config.background.visualiser.engine === "quickshell" || (Config.background.visualiser.engine !== "plasma" && (Config.background.wallpaperEnabled || !PlasmaWidgets.hasVisualizer)))
+
+            sourceComponent: MusicSnowfall {
+                screen: win.modelData
+            }
+        }
         DesktopIcons {
             id: desktopIcons
 
