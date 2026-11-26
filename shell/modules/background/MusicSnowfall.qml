@@ -35,7 +35,7 @@ Item {
         to: 1
         duration: 30000
         loops: Animation.Infinite
-        running: root.running
+        running: root.running && Tokens.anim.enabled
     }
 
     Repeater {

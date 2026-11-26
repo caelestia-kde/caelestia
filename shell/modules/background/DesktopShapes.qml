@@ -118,7 +118,7 @@ Item {
                 Rectangle {
                     width: Math.max(2, circularSpectrum.baseSize * 0.015)
                     height: Math.max(3, circularSpectrum.baseSize * (0.015 + (circularSpectrum.displayed[spoke.index] ?? 0) * 0.85))
-                    radius: width / 2
+                    radius: Tokens.rounding.full
                     x: (parent.width - width) / 2
                     // Maximum orb radius is 0.70 * 0.82 * 1.45 / 2 = 0.416.
                     y: parent.height / 2 - circularSpectrum.baseSize * 0.45 - height
@@ -163,14 +163,14 @@ Item {
 
                 width: Math.max(2, particles.width * (0.012 + level * 0.012))
                 height: width
-                radius: width / 2
+                radius: Tokens.rounding.full
                 x: particles.width / 2 + Math.cos(angle) * distance - width / 2
                 y: particles.height / 2 + Math.sin(angle) * distance - height / 2
                 opacity: 0.25 + level * 0.6
                 color: index % 2 ? Colours.palette.m3secondary : Colours.palette.m3primary
 
                 Behavior on opacity {
-                    NumberAnimation { duration: 180; easing.type: Easing.OutCubic }
+                    Anim { type: Anim.FastEffects }
                 }
             }
         }
