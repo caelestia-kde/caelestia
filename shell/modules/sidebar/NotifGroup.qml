@@ -26,6 +26,7 @@ StyledRect {
     readonly property int notifCount: activeNotifs.length
     readonly property string image: activeNotifs.find(n => n.image.length > 0)?.image ?? ""
     readonly property string appIcon: activeNotifs.find(n => n.appIcon.length > 0)?.appIcon ?? ""
+    readonly property string appIconSource: Icons.getNotifAppIcon(root.appIcon)
     readonly property int urgency: {
         if (activeNotifs.find(n => n.urgency === NotificationUrgency.Critical))
             return NotificationUrgency.Critical;
@@ -104,7 +105,7 @@ StyledRect {
 
                 ColouredIcon {
                     implicitSize: Math.round(TokenConfig.sizes.notifs.image * 0.6)
-                    source: Icons.getNotifAppIcon(root.appIcon)
+                    source: root.appIconSource
                     colour: root.urgency === NotificationUrgency.Critical ? Colours.palette.m3onError : root.urgency === NotificationUrgency.Low ? Colours.palette.m3onSurface : Colours.palette.m3onSecondaryContainer
                     layer.enabled: root.appIcon.endsWith("symbolic")
                 }
@@ -129,7 +130,7 @@ StyledRect {
                     asynchronous: true
                     anchors.centerIn: parent
                     anchors.verticalCenterOffset: sourceComponent === materialIconComp ? 1 : 0
-                    sourceComponent: root.image ? imageComp : root.appIcon ? appIconComp : materialIconComp
+                    sourceComponent: root.image ? imageComp : root.appIconSource ? appIconComp : materialIconComp
                 }
             }
 
@@ -137,7 +138,7 @@ StyledRect {
                 asynchronous: true
                 anchors.right: parent.right
                 anchors.bottom: parent.bottom
-                active: root.appIcon && root.image
+                active: root.appIconSource && root.image
 
                 sourceComponent: StyledRect {
                     implicitWidth: Tokens.sizes.notifs.badge
@@ -149,7 +150,7 @@ StyledRect {
                     ColouredIcon {
                         anchors.centerIn: parent
                         implicitSize: Math.round(Tokens.sizes.notifs.badge * 0.6)
-                        source: Icons.getNotifAppIcon(root.appIcon)
+                        source: root.appIconSource
                         colour: root.urgency === NotificationUrgency.Critical ? Colours.palette.m3onError : root.urgency === NotificationUrgency.Low ? Colours.palette.m3onSurface : Colours.palette.m3onSecondaryContainer
                         layer.enabled: root.appIcon.endsWith("symbolic")
                     }
