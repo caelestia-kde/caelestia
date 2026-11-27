@@ -66,7 +66,7 @@ StyledListView {
             }]);
         }
         case "actions":
-            return Actions.query(text);
+            return Actions.search(text);
         case "calc":
             return [0];
         case "scheme":

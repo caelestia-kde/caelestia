@@ -55,7 +55,20 @@ Searcher {
     })
 
     function transformSearch(search: string): string {
-        return search.slice(GlobalConfig.launcher.actionPrefix.length);
+        return search.slice(GlobalConfig.launcher.actionPrefix.length).trim();
+    }
+
+    function search(text: string): var {
+        const localized = query(text);
+        const term = transformSearch(text.trim().replace(/\s+/g, " "));
+        if (!term)
+            return localized;
+
+        const aliases = ActionAliases.query(term);
+        const lowerTerm = term.toLowerCase();
+        // A full command name should be selected ahead of partial localized matches.
+        const exactAliases = aliases.filter(action => action.sourceName.toLowerCase() === lowerTerm);
+        return [...new Set([...exactAliases, ...localized, ...aliases])];
     }
 
     list: variants.instances
@@ -74,7 +87,8 @@ Searcher {
 
     component Action: QtObject {
         required property var modelData
-        readonly property string name: root.labels[modelData.name] ?? modelData.name ?? qsTr("Unnamed")
+        readonly property string sourceName: modelData.name ?? ""
+        readonly property string name: root.labels[sourceName] ?? modelData.name ?? qsTr("Unnamed")
         readonly property string desc: root.labels[modelData.description] ?? modelData.description ?? qsTr("No description")
         readonly property string icon: modelData.icon ?? "help_outline"
         readonly property list<string> command: modelData.command ?? []
