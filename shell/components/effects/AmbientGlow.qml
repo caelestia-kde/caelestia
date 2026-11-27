@@ -172,8 +172,10 @@ Item {
                 height: root.deform ? parent.height : root.fitted
 
                 Component.onCompleted: {
+                    // KPipeWire takes -1 as "no stream"; a serial of 0 is a connect attempt that
+                    // fails with "target not found" every time a preview opens before its stream does.
                     if ("objectSerial" in this)
-                        this.objectSerial = Qt.binding(() => stream.objectSerial);
+                        this.objectSerial = Qt.binding(() => stream.objectSerial || -1);
                     else if ("nodeId" in this)
                         this.nodeId = Qt.binding(() => stream.nodeId);
                 }
