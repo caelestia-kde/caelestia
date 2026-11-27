@@ -332,7 +332,7 @@
     <message>
       <location line="+1"/>
       <source>Settings</source>
-      <translation type="unfinished"/>
+      <translation>設定</translation>
     </message>
     <message>
       <location line="+1"/>
