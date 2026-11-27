@@ -38,12 +38,17 @@ BarIcon {
     }
 
     // The menu belongs to the app, so it is asked for by name; an app without one has
-    // only its second action to offer.
+    // only its second action to offer. A menu opened with a click is there to pick
+    // from, so it stays open until it is dismissed rather than closing when the pointer
+    // leaves the icon before the app's entries have arrived and sized the panel.
     onContextMenuRequested: {
-        if (root.hasMenuEntries && root.popouts)
+        if (root.hasMenuEntries && root.popouts) {
             root.openPopout(root.popoutName);
-        else if (root.modelData)
+            if (root.popouts.hasCurrent && root.popouts.currentName === root.popoutName)
+                root.popouts.staysOpen = true;
+        } else if (root.modelData) {
             root.modelData.secondaryActivate();
+        }
     }
 
     glyphComponent: Component {
