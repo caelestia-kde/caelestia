@@ -46,15 +46,42 @@ set -uo pipefail
 
 private_mime_types='application/x-krita-|image/x-inkscape-svg'
 
-for helper in wl-paste cliphist wl-clip-persist; do
+for helper in wl-paste cliphist; do
     command -v "$helper" >/dev/null 2>&1 || { echo "missing: $helper" >&2; exit 1; }
 done
 
 wl-paste --type text --watch cliphist store &
+text_pid=$!
 wl-paste --type image --watch cliphist store &
-wl-clip-persist --clipboard regular \
-    --all-mime-type-regex "(?i)^(?!(?:${private_mime_types})).+" &
-wait -n
+image_pid=$!
+
+persist_pid=""
+if command -v wl-clip-persist >/dev/null 2>&1; then
+    wl-clip-persist --clipboard regular \
+        --all-mime-type-regex "(?i)^(?!(?:${private_mime_types})).+" &
+    persist_pid=$!
+else
+    echo "warning: missing: wl-clip-persist (continuing without clipboard persistence)" >&2
+fi
+
+trap 'kill "$text_pid" "$image_pid" ${persist_pid:+"$persist_pid"} 2>/dev/null || true; exit 0' INT TERM
+
+exited_pid=""
+while true; do
+    wait -n -p exited_pid "$text_pid" "$image_pid" ${persist_pid:+"$persist_pid"}
+    status=$?
+    if [[ -n "$persist_pid" && "$exited_pid" == "$persist_pid" ]]; then
+        if (( status != 0 )); then
+            echo "warning: wl-clip-persist exited with status $status; continuing without clipboard persistence" >&2
+        fi
+        persist_pid=""
+        continue
+    fi
+    break
+done
+
+kill "$text_pid" "$image_pid" ${persist_pid:+"$persist_pid"} 2>/dev/null || true
+exit "$status"
 RUNNER
     chmod +x "$HOME/.local/bin/caelestia-cliphist"
 

@@ -6,6 +6,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/helpers.sh"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 KDE_SCRIPT="$REPO_ROOT/scripts/04-deploy-kde.sh"
+SLEEP_BIN="$(command -v sleep)"
 
 SERVICE_SOURCE="$(extract_function "$KDE_SCRIPT" write_cliphist_service)"
 
@@ -44,9 +45,27 @@ start_service() {
 
 stub_helpers() {
     local root="$1"
-    recording_stub "$root/bin" wl-paste "$root/watchers.log"
+    stub_bin "$root/bin" wl-paste "printf 'wl-paste %s\n' \"\$*\" >> '$root/watchers.log'
+for _ in {1..40}; do
+    [[ -e '$root/persister.done' ]] && break
+    '$SLEEP_BIN' 0.05
+done
+exit 0"
     stub_bin "$root/bin" cliphist 'exit 0'
-    stub_bin "$root/bin" wl-clip-persist "printf '%s\n' \"\$@\" > '$root/persister-argv.txt'"
+    stub_bin "$root/bin" wl-clip-persist "printf '%s\n' \"\$@\" > '$root/persister-argv.txt'
+: > '$root/persister.done'"
+}
+
+wait_for_condition() {
+    local attempts="$1" check="$2"
+    local i
+    for ((i = 0; i < attempts; i++)); do
+        if eval "$check"; then
+            return 0
+        fi
+        "$SLEEP_BIN" 0.05
+    done
+    return 1
 }
 
 have_python() {
@@ -123,13 +142,100 @@ test_a_missing_helper_is_reported() {
     mkdir -p "$home"
     write_service "$home" >/dev/null
     stub_helpers "$root"
-    rm -f "$root/bin/wl-clip-persist"
+    rm -f "$root/bin/wl-paste"
 
     status="$(start_service "$home" "$root/bin")"
 
-    assert_status 1 "$status" "the unit should fail rather than run half a clipboard stack"
-    assert_contains "$(cat "$home/runner.log")" 'missing: wl-clip-persist' \
-        "the journal should name the helper that is missing"
+    assert_status 1 "$status" "the unit should fail when a required clipboard helper is missing"
+    assert_contains "$(cat "$home/runner.log")" 'missing: wl-paste' \
+        "the journal should name the required helper that is missing"
+}
+
+test_a_missing_persister_warns_without_stopping_watchers() {
+    local home root runner_pid status
+    root="$(new_tmpdir)"
+    home="$root/home"
+    mkdir -p "$home"
+    write_service "$home" >/dev/null
+    stub_helpers "$root"
+    rm -f "$root/bin/wl-clip-persist"
+    stub_bin "$root/bin" wl-paste "printf 'wl-paste %s\n' \"\$*\" >> '$root/watchers.log'
+exec '$SLEEP_BIN' 30"
+
+    HOME="$home" PATH="$root/bin" "$(runner_path "$home")" >"$home/runner.log" 2>&1 &
+    runner_pid=$!
+
+    wait_for_condition 40 "[[ -f '$root/watchers.log' ]] && [[ \$(wc -l < '$root/watchers.log') -ge 2 ]]" || true
+    "$SLEEP_BIN" 0.2
+
+    if ! kill -0 "$runner_pid" 2>/dev/null; then
+        fail "missing wl-clip-persist should not stop the cliphist runner"
+    fi
+
+    kill -TERM "$runner_pid" 2>/dev/null || true
+    wait "$runner_pid"
+    status=$?
+
+    assert_status 0 "$status" "SIGTERM should cleanly stop the running watchers"
+    assert_contains "$(cat "$home/runner.log")" 'warning: missing: wl-clip-persist' \
+        "the journal should warn when wl-clip-persist is absent"
+    assert_eq "--type image --watch cliphist store
+--type text --watch cliphist store" \
+        "$(calls_to "$root/watchers.log" wl-paste | sort)" \
+        "both clipboard watchers should run even without wl-clip-persist"
+}
+
+test_a_failing_persister_does_not_stop_the_watchers() {
+    local home root runner_pid status
+    root="$(new_tmpdir)"
+    home="$root/home"
+    mkdir -p "$home"
+    write_service "$home" >/dev/null
+    stub_helpers "$root"
+    stub_bin "$root/bin" wl-paste "printf 'wl-paste %s\n' \"\$*\" >> '$root/watchers.log'
+exec '$SLEEP_BIN' 30"
+    stub_bin "$root/bin" wl-clip-persist "echo 'Error: zwlr_data_control_manager_v1 not found' >&2
+exit 1"
+
+    HOME="$home" PATH="$root/bin" "$(runner_path "$home")" >"$home/runner.log" 2>&1 &
+    runner_pid=$!
+
+    wait_for_condition 40 "[[ -f '$root/watchers.log' ]] && [[ \$(wc -l < '$root/watchers.log') -ge 2 ]] && grep -q 'exited with status 1' '$home/runner.log'" || true
+    "$SLEEP_BIN" 0.3
+
+    if ! kill -0 "$runner_pid" 2>/dev/null; then
+        fail "wl-clip-persist failing should not kill the cliphist watcher loop"
+    fi
+
+    assert_contains "$(cat "$home/runner.log")" 'wl-clip-persist exited with status 1' \
+        "the runner should log when wl-clip-persist exits"
+    assert_eq "--type image --watch cliphist store
+--type text --watch cliphist store" \
+        "$(calls_to "$root/watchers.log" wl-paste | sort)" \
+        "both clipboard watchers should keep running after wl-clip-persist exits"
+
+    kill -TERM "$runner_pid" 2>/dev/null || true
+    wait "$runner_pid"
+    status=$?
+    assert_status 0 "$status" "SIGTERM should cleanly stop the runner and its watchers"
+}
+
+test_a_dying_watcher_still_exits_the_runner() {
+    local home root status
+    root="$(new_tmpdir)"
+    home="$root/home"
+    mkdir -p "$home"
+    write_service "$home" >/dev/null
+    stub_helpers "$root"
+    stub_bin "$root/bin" wl-paste "if [[ \"\$*\" == *\"--type text\"* ]]; then
+    '$SLEEP_BIN' 0.1
+    exit 1
+fi
+exec '$SLEEP_BIN' 30"
+    stub_bin "$root/bin" wl-clip-persist "exec '$SLEEP_BIN' 30"
+
+    status="$(start_service "$home" "$root/bin")"
+    assert_status 1 "$status" "a failing wl-paste watcher should still exit the runner so systemd restarts it"
 }
 
 test_the_private_formats_are_left_to_their_owner() {
