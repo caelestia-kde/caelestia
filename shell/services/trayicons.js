@@ -43,13 +43,13 @@ function iconNameOf(key) {
     return String(key ?? "").replace(/^(proc|icon):/, "");
 }
 
-// A title read by a person names the app ("Cachy-Update"); a notifier id or a bus name
-// names the plumbing, and the alias the icon name gives is longer than either.
+// A title read by a person names the app ("Cachy-Update"); a notifier id, bus name, or
+// Chromium status icon id names the plumbing, and the alias the icon name gives is longer than any of them.
 function readableTitle(title) {
-    const value = String(title ?? "");
+    const value = String(title ?? "").trim();
     if (value.length === 0)
         return "";
-    if (/^\d+-\d+$/.test(value) || value.startsWith("org.kde.StatusNotifierItem"))
+    if (/^\d+-\d+$/.test(value) || value.startsWith("org.kde.StatusNotifierItem") || /^chrome_status_icon_\d+$/.test(value))
         return "";
     return value;
 }

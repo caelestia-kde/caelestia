@@ -134,7 +134,9 @@ Singleton {
     }
 
     function displayName(item: var): string {
-        return TrayIcons.readableTitle(item.title) || TrayIcons.labelOf(root.keyOfItem(item)) || item.id;
+        if (!item)
+            return "";
+        return TrayIcons.readableTitle(item.title) || TrayIcons.readableTitle(item.tooltipTitle) || TrayIcons.labelOf(root.keyOfItem(item)) || item.id;
     }
 
     function fallbackIcon(key: string): string {

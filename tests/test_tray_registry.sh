@@ -9,6 +9,7 @@ MIGRATIONS="$SERVICES/ConfigMigrations.qml"
 ICONS="$REPO_ROOT/shell/utils/Icons.qml"
 BAR="$REPO_ROOT/shell/modules/bar/Bar.qml"
 TRAY="$REPO_ROOT/shell/modules/bar/components/Tray.qml"
+TRAY_ITEM="$REPO_ROOT/shell/modules/bar/components/TrayItem.qml"
 BOX="$REPO_ROOT/shell/modules/bar/popouts/TrayOverflow.qml"
 PLACEMENTS="$REPO_ROOT/shell/modules/bar/BarPlacements.qml"
 ICONS_PANEL="$REPO_ROOT/shell/modules/bar/popouts/TrayIcons.qml"
@@ -54,10 +55,20 @@ assert.strictEqual(Icons.iconNameOf("proc:kitty-terminal"), "kitty-terminal");
 test_a_title_names_the_app_when_it_says_something() {
     check_tray_icons "an app is called what it calls itself" '
 assert.strictEqual(Icons.readableTitle("Cachy-Update"), "Cachy-Update", "a title that happens to be the id is still the app name");
+assert.strictEqual(Icons.readableTitle("  ChatGPT  "), "ChatGPT", "leading and trailing spaces are trimmed");
 assert.strictEqual(Icons.readableTitle("2652-9"), "", "a notifier id is the plumbing, not a name");
 assert.strictEqual(Icons.readableTitle("org.kde.StatusNotifierItem-2652-1"), "", "a bus name says nothing either");
+assert.strictEqual(Icons.readableTitle("chrome_status_icon_1"), "", "a Chromium status icon id is plumbing, not a name");
+assert.strictEqual(Icons.readableTitle("   "), "", "blank whitespace is not a name");
 assert.strictEqual(Icons.readableTitle(""), "");
 '
+}
+
+test_tray_tooltips_use_registry_display_name() {
+    assert_file_contains "$REGISTRY" "TrayIcons.readableTitle(item.tooltipTitle)" \
+        "displayName falls back to tooltipTitle when title is empty or internal"
+    assert_file_contains "$TRAY_ITEM" "tooltip: root.modelData ? TrayRegistry.displayName(root.modelData) : \"\"" \
+        "tray icons get their hover label from the registry rather than raw title or id"
 }
 
 test_a_list_is_written_only_when_it_changes() {
