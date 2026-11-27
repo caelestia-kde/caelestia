@@ -52,7 +52,7 @@ Singleton {
             rows.push({
                 key: key,
                 id: "",
-                title: TrayIcons.labelOf(key),
+                title: root.labelOfKey(key),
                 icon: root.fallbackIcon(key),
                 running: false
             });
@@ -113,8 +113,37 @@ Singleton {
                 }));
     }
 
+    function desktopEntryById(id: string): var {
+        if (!id)
+            return null;
+        // Touch the model list so callers inside QML bindings re-evaluate once entries load.
+        const apps = DesktopEntries.applications.values;
+        return DesktopEntries.byId(id) ?? apps.find(entry => entry.id === id) ?? null;
+    }
+
+    function desktopEntryFor(candidates: var): var {
+        const apps = DesktopEntries.applications.values;
+        for (const name of candidates) {
+            const found = DesktopEntries.heuristicLookup(name);
+            if (found)
+                return found;
+            const lower = name.toLowerCase();
+            const byName = apps.find(entry => (entry.name ?? "").toLowerCase() === lower);
+            if (byName)
+                return byName;
+        }
+        return null;
+    }
+
+    function appIdOfItem(item: var): string {
+        if (!item || !TrayIcons.isGenericId(item.id) || TrayIcons.themeIconName(item.icon))
+            return "";
+        const entry = root.desktopEntryFor(TrayIcons.appLabelCandidates(item.title, item.tooltipTitle));
+        return entry ? entry.id : "";
+    }
+
     function keyOfItem(item: var): string {
-        return TrayIcons.keyOf(item.id, item.icon, root.procNames[TrayIcons.pidOf(item.id)] ?? "");
+        return TrayIcons.keyOf(item.id, item.icon, root.procNames[TrayIcons.pidOf(item.id)] ?? "", root.appIdOfItem(item));
     }
 
     // Every name one icon answers to. The process alias only exists once `ps` has said
@@ -127,10 +156,25 @@ Singleton {
             if (key && !keys.includes(key))
                 keys.push(key);
         };
-        push(root.keyOfItem(item));
-        push(TrayIcons.keyOf(item.id, item.icon, ""));
-        push(item.id);
+        const resolved = root.keyOfItem(item);
+        push(resolved);
+        // Generic ids like `chrome_status_icon_1` are shared across unrelated Electron/Chromium
+        // apps, so once an item resolves to its desktop app id it must not also claim the shared
+        // raw id or settings and bar rows for one app will match another.
+        if (!TrayIcons.isGenericId(item.id) || resolved === item.id) {
+            push(TrayIcons.keyOf(item.id, item.icon, ""));
+            push(item.id);
+        }
         return keys;
+    }
+
+    function labelOfKey(key: string): string {
+        if (key.startsWith("app:")) {
+            const entry = root.desktopEntryById(TrayIcons.iconNameOf(key));
+            if (entry?.name)
+                return entry.name;
+        }
+        return TrayIcons.labelOf(key);
     }
 
     function displayName(item: var): string {
@@ -138,6 +182,11 @@ Singleton {
     }
 
     function fallbackIcon(key: string): string {
+        if (key.startsWith("app:")) {
+            const entry = root.desktopEntryById(TrayIcons.iconNameOf(key));
+            if (entry?.icon)
+                return Quickshell.iconPath(entry.icon, "") || Quickshell.iconPath("application-x-executable", "");
+        }
         return Quickshell.iconPath(TrayIcons.iconNameOf(key), "") || Quickshell.iconPath("application-x-executable", "");
     }
 
@@ -286,6 +335,11 @@ Singleton {
         const aliases = {};
         let found = false;
         for (const item of SystemTray.items.values) {
+            // Generic ids such as `chrome_status_icon_1` are shared across unrelated Electron/Chromium
+            // apps, so rewriting a saved generic id to whichever app happens to be running could
+            // mis-attribute another app's settings or icon substitution.
+            if (TrayIcons.isGenericId(item.id))
+                continue;
             const key = root.keyOfItem(item);
             if (key === item.id)
                 continue;
