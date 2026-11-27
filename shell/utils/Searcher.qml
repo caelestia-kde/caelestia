@@ -1,5 +1,6 @@
 import "scripts/fzf.js" as Fzf
 import "scripts/fuzzysort.js" as Fuzzy
+import "scripts/pinyin.js" as Pinyin
 import QtQuick
 import Quickshell
 
@@ -37,17 +38,16 @@ Singleton {
         if (!search)
             return [...list];
 
-        if (useFuzzy)
-            return Fuzzy.go(search, fuzzyPrepped, Object.assign({
-                all: true,
-                keys,
-                scoreFn: r => weights.reduce((a, w, i) => a + r[i].score * w, 0)
-            }, extraOpts)).map(r => r.obj._item);
-
-        return fzf.find(search).sort((a, b) => {
+        const base = useFuzzy ? Fuzzy.go(search, fuzzyPrepped, Object.assign({
+            all: true,
+            keys,
+            scoreFn: r => weights.reduce((a, w, i) => a + r[i].score * w, 0)
+        }, extraOpts)).map(r => r.obj._item) : fzf.find(search).sort((a, b) => {
             if (a.score === b.score)
                 return selector(a.item).trim().length - selector(b.item).trim().length;
             return b.score - a.score;
         }).map(r => r.item);
+
+        return Pinyin.mergeResults([...list], base, selector, search);
     }
 }

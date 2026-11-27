@@ -11,6 +11,7 @@ import qs.components.misc
 import qs.services
 import qs.utils
 import "notifquery.js" as NotifQuery
+import "../utils/scripts/pinyin.js" as Pinyin
 
 Singleton {
     id: root
@@ -161,7 +162,7 @@ Singleton {
     /// Whether a search for `query` should show this notification. The fields it reads
     /// are stated in notifquery.js, where a test can run them without a shell.
     function matchesQuery(notif: NotifData, query: string): bool {
-        return NotifQuery.matches(notif.appName, notif.summaryPlain, notif.bodyPlain, query);
+        return NotifQuery.matches(notif.appName, notif.summaryPlain, notif.bodyPlain, query) || Pinyin.matches([notif.appName, notif.summaryPlain, notif.bodyPlain].filter(Boolean).join(" "), query);
     }
 
     /// Whether this app's notification must stay quiet right now. Both the popup and

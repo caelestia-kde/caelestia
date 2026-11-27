@@ -9,6 +9,7 @@ import qs.components.controls
 import qs.services
 import qs.modules.launcher.items
 import qs.modules.launcher.services
+import "../../utils/scripts/pinyin.js" as Pinyin
 
 StyledListView {
     id: root
@@ -86,7 +87,7 @@ StyledListView {
             if (!q)
                 return Clipboard.getSortedItems();
             return Clipboard.items.filter(function (item) {
-                return item.preview.toLowerCase().includes(q);
+                return item.preview.toLowerCase().includes(q) || Pinyin.matches(item.preview, q);
             });
         }
         case "windows":

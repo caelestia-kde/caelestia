@@ -3,6 +3,7 @@ pragma Singleton
 import QtQuick
 import qs.utils
 import "../../utils/scripts/fzf.js" as Fzf
+import "../../utils/scripts/pinyin.js" as Pinyin
 import qs.modules.nexus
 
 QtObject {
@@ -125,7 +126,8 @@ QtObject {
             }
             return b.score - a.score;
         });
-        return results.slice(0, 30).map(r => r.item);
+        const base = results.map(r => r.item);
+        return Pinyin.mergeResults(allPages, base, e => [e.page.label, e.page.description, e.page.key].filter(Boolean).join(" "), search).slice(0, 30);
     }
 
     function fuzzyEntries(query: string): list<var> {
@@ -139,7 +141,8 @@ QtObject {
                 return a.item.searchText.trim().length - b.item.searchText.trim().length;
             return b.score - a.score;
         });
-        return results.slice(0, 30).map(r => r.item);
+        const base = results.map(r => r.item);
+        return Pinyin.mergeResults(searchIndex, base, e => e.searchText, search).slice(0, 30);
     }
 
     function indexForKey(key: string): int {

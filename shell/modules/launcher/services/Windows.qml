@@ -4,6 +4,7 @@ import QtQuick
 import Quickshell
 import Caelestia.Config
 import qs.services
+import "../../../utils/scripts/pinyin.js" as Pinyin
 
 Singleton {
     id: root
@@ -142,7 +143,7 @@ Singleton {
         if (!search)
             return items;
         const lower = search.toLowerCase();
-        return items.filter(w => (w.title && w.title.toLowerCase().includes(lower)) || (w.class && w.class.toLowerCase().includes(lower)) || (w.desktopName && w.desktopName.toLowerCase().includes(lower)));
+        return items.filter(w => (w.title && (w.title.toLowerCase().includes(lower) || Pinyin.matches(w.title, search))) || (w.class && w.class.toLowerCase().includes(lower)) || (w.desktopName && (w.desktopName.toLowerCase().includes(lower) || Pinyin.matches(w.desktopName, search))));
     }
 
     function focusWindow(address: string): void {
