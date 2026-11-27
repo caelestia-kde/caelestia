@@ -23,7 +23,7 @@ BarIcon {
     draggable: true
     dragKind: "icon"
     dragKey: root.key
-    tooltip: root.modelData ? (root.modelData.title || root.modelData.id) : ""
+    tooltip: root.modelData ? TrayRegistry.displayName(root.modelData) : ""
     accessibleName: root.tooltip
     accessibleDescription: root.hasMenuEntries && root.popouts ? qsTr("Left-click activates, right-click opens the menu, middle-click runs the secondary action.") : qsTr("Left-click activates, middle- or right-click runs the secondary action.")
 
