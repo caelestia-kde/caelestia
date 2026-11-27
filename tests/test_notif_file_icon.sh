@@ -20,8 +20,10 @@ test_icons_defines_get_notif_app_icon() {
         "a theme icon name is the only thing that reaches Quickshell.iconPath unchecked"
     assert_contains "$content" 'notificationIconExtensions.includes(extension)' \
         "a path the sender chose is only opened when it names a picture"
-    assert_contains "$content" 'return Quickshell.iconPath(icon);' \
-        "getNotifAppIcon must fall back to Quickshell.iconPath for theme icon names"
+    assert_contains "$content" 'Quickshell.iconPath(icon, true)' \
+        "getNotifAppIcon must check theme icon existence via two-arg Quickshell.iconPath"
+    assert_contains "$content" 'function notifDesktopIcon(name: string): string' \
+        "Icons.qml must define notifDesktopIcon fallback for missing theme icons"
 }
 
 # The function is read out of the singleton rather than copied into the fixture, so this test
@@ -60,7 +62,9 @@ pragma Singleton
 import QtQml
 
 QtObject {
-    function iconPath(icon) {
+    function iconPath(icon, check) {
+        if (check === true && (icon === "wechat" || icon === "no-such-app"))
+            return "";
         return "THEME_ICON:" + icon;
     }
 }
@@ -69,12 +73,16 @@ EOF
     {
         printf 'import QtQml\nimport Quickshell\n\nQtObject {\n    id: root\n\n'
         printf '    %s\n\n' "$extensions"
+        printf '    function notifDesktopIcon(name) { return name === "wechat" ? "file:///opt/wechat/wechat.png" : ""; }\n\n'
         printf '%s\n\n' "$body"
         cat <<'EOF'
     Component.onCompleted: {
         print("TEST_FILE_URI:" + getNotifAppIcon("file:///home/user/app.png"));
         print("TEST_ABSOLUTE_PATH:" + getNotifAppIcon("/opt/google/chrome/icon.png"));
         print("TEST_THEME_NAME:" + getNotifAppIcon("firefox"));
+        print("TEST_DESKTOP_FALLBACK:" + getNotifAppIcon("wechat"));
+        print("TEST_MISSING:[" + getNotifAppIcon("no-such-app") + "]");
+        print("TEST_EMPTY:[" + getNotifAppIcon("") + "]");
         print("TEST_NOT_A_PICTURE:" + getNotifAppIcon("/home/user/.ssh/id_rsa"));
         print("TEST_FILE_URI_NOT_A_PICTURE:" + getNotifAppIcon("file:///etc/shadow"));
         Qt.quit();
@@ -91,6 +99,12 @@ EOF
         "getNotifAppIcon must prefix absolute paths with file://"
     assert_contains "$output" "TEST_THEME_NAME:THEME_ICON:firefox" \
         "getNotifAppIcon must delegate standard icon names to Quickshell.iconPath"
+    assert_contains "$output" "TEST_DESKTOP_FALLBACK:file:///opt/wechat/wechat.png" \
+        "getNotifAppIcon must fall back to notifDesktopIcon when the theme misses"
+    assert_contains "$output" "TEST_MISSING:[]" \
+        "getNotifAppIcon must return empty string when neither theme nor desktop entry resolves"
+    assert_contains "$output" "TEST_EMPTY:[]" \
+        "getNotifAppIcon must return empty string for empty input"
     assert_contains "$output" "TEST_NOT_A_PICTURE:THEME_ICON:application-x-executable" \
         "a path that is not a picture must not be opened on the sender's say-so"
     assert_contains "$output" "TEST_FILE_URI_NOT_A_PICTURE:THEME_ICON:application-x-executable" \
@@ -101,8 +115,10 @@ test_notification_popup_binds_get_notif_app_icon() {
     local popup
     popup="$(cat "$NOTIF_POPUP")"
 
-    assert_file_matches "$NOTIF_POPUP" 'source: Icons\.getNotifAppIcon\(root\.modelData(\?\.appIcon \?\? "")?(\.appIcon)?\)' \
-        "Notification popup ColouredIcon must bind Icons.getNotifAppIcon"
+    assert_contains "$popup" 'readonly property string appIconSource: Icons.getNotifAppIcon(root.modelData?.appIcon ?? "")' \
+        "Notification popup must resolve appIconSource via Icons.getNotifAppIcon"
+    assert_contains "$popup" 'source: root.appIconSource' \
+        "Notification popup ColouredIcon must bind root.appIconSource"
     assert_not_contains "$popup" 'source: Quickshell.iconPath(root.modelData' \
         "Notification popup ColouredIcon must not directly call Quickshell.iconPath"
     assert_file_matches "$NOTIF_POPUP" 'layer\.enabled: root\.modelData(\?\.appIcon\?\.endsWith\("symbolic"\) \?\? false|\.appIcon\.endsWith\("symbolic"\))' \
@@ -113,9 +129,11 @@ test_sidebar_notif_group_binds_get_notif_app_icon() {
     local sidebar
     sidebar="$(cat "$NOTIF_GROUP")"
 
+    assert_contains "$sidebar" 'readonly property string appIconSource: Icons.getNotifAppIcon(root.appIcon)' \
+        "NotifGroup must resolve appIconSource via Icons.getNotifAppIcon"
     local matches
-    matches="$(grep -c 'source: Icons.getNotifAppIcon(root.appIcon)' <<<"$sidebar" || true)"
-    assert_eq "2" "$matches" "NotifGroup must bind Icons.getNotifAppIcon(root.appIcon) for both group header and badge"
+    matches="$(grep -c 'source: root.appIconSource' <<<"$sidebar" || true)"
+    assert_eq "2" "$matches" "NotifGroup must bind root.appIconSource for both group header and badge"
 
     assert_not_contains "$sidebar" 'source: Quickshell.iconPath(root.appIcon)' \
         "NotifGroup must not directly call Quickshell.iconPath"

@@ -30,7 +30,8 @@ StyledRect {
         return img.startsWith("image://icon/") ? Quickshell.iconPath(img.slice("image://icon/".length), true) : img;
     }
     readonly property bool hasImage: root.imagePath !== ""
-    readonly property bool hasAppIcon: (modelData?.appIcon.length ?? 0) > 0
+    readonly property string appIconSource: Icons.getNotifAppIcon(root.modelData?.appIcon ?? "")
+    readonly property bool hasAppIcon: root.appIconSource !== ""
     readonly property int nonAnimHeight: appName.height + summary.implicitHeight + (root.expanded ? Tokens.spacing.extraSmall * 2 + body.height + actions.height + actions.anchors.topMargin : Tokens.spacing.extraSmall + bodyPreview.height) + inner.anchors.margins * 2
     property bool expanded: Config.notifs.openExpanded
     readonly property bool hovered: cardMouse.containsMouse
@@ -221,7 +222,7 @@ StyledRect {
 
                         sourceComponent: ColouredIcon {
                             anchors.fill: parent
-                            source: Icons.getNotifAppIcon(root.modelData?.appIcon ?? "")
+                            source: root.appIconSource
                             colour: root.isCritical ? Colours.palette.m3onError : root.isLow ? Colours.palette.m3onSurface : Colours.palette.m3onSecondaryContainer
                             layer.enabled: root.modelData?.appIcon?.endsWith("symbolic") ?? false
                         }

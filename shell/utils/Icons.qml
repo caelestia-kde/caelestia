@@ -181,8 +181,15 @@ Singleton {
     // that path, so it is only read when it names a picture: otherwise any file on the
     // machine is something a notification could ask the shell to open.
     function getNotifAppIcon(icon: string): string {
-        if (!icon.startsWith("file://") && !icon.startsWith("/"))
-            return Quickshell.iconPath(icon);
+        if (!icon)
+            return "";
+
+        if (!icon.startsWith("file://") && !icon.startsWith("/")) {
+            const themed = Quickshell.iconPath(icon, true);
+            if (themed)
+                return themed;
+            return root.notifDesktopIcon(icon);
+        }
 
         const path = icon.startsWith("/") ? icon : icon.slice("file://".length);
         const dot = path.lastIndexOf(".");
@@ -191,6 +198,35 @@ Singleton {
             return Quickshell.iconPath("application-x-executable");
 
         return icon.startsWith("/") ? `file://${path}` : icon;
+    }
+
+    // AppImage and Electron packages (e.g. WeChat, Signal) often emit an app_icon
+    // theme name that isn't installed in the active icon theme while their .desktop
+    // entry points directly to a bundled PNG/SVG.
+    function notifDesktopIcon(name: string): string {
+        const apps = DesktopEntries.applications.values;
+        const wanted = name.toLowerCase();
+        if (!wanted)
+            return "";
+
+        const entry = DesktopEntries.heuristicLookup(name)
+            ?? apps.find(e => e.id.toLowerCase().replace(/\.desktop$/, "").split(/[-._]/).includes(wanted)
+                || (e.startupClass ?? "").toLowerCase() === wanted)
+            ?? null;
+        const icon = entry?.icon ?? "";
+        if (!icon)
+            return "";
+
+        if (icon.startsWith("/") || icon.startsWith("file://")) {
+            const path = icon.startsWith("/") ? icon : icon.slice("file://".length);
+            const dot = path.lastIndexOf(".");
+            const extension = dot < 0 ? "" : path.slice(dot + 1).toLowerCase();
+            if (!notificationIconExtensions.includes(extension))
+                return "";
+            return `file://${path}`;
+        }
+
+        return Quickshell.iconPath(icon, true);
     }
 
     function getNotifIcon(summary: string, urgency: int): string {
