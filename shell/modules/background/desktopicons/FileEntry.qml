@@ -109,7 +109,7 @@ Scope {
 
     function launch(): void {
         if (!isDesktopFile) {
-            Launch.exec(["xdg-open", path]);
+            executableCheck.running = true;
             return;
         }
         root.pendingLaunchPaths = [];
@@ -126,6 +126,24 @@ Scope {
 
     function reloadDesktopFile(): void {
         desktopFile.reload();
+    }
+
+    // xdg-open hands a file to KIO, which refuses to run executables from that path
+    // ("launching executables is not allowed in this context"). An AppImage or other
+    // native binary that already carries the executable bit is run directly instead,
+    // trusted the same way as a launcher above. Scripts and everything else still
+    // open with their app.
+    Process {
+        id: executableCheck
+
+        running: false
+        command: ["sh", "-c", 'f=$(readlink -f -- "$1" 2>/dev/null) || exit 1; [ -f "$f" ] && [ -x "$f" ] || exit 1; case "$f" in *.[Aa]pp[Ii]mage) exit 0 ;; esac; [ "$(head -c 4 -- "$f" | od -An -c | tr -d " ")" = "177ELF" ] && exit 0; exit 1', "exec-check", root.path]
+        onExited: code => {
+            if (code === 0)
+                Launch.exec([root.path]);
+            else
+                Launch.exec(["xdg-open", root.path]);
+        }
     }
 
     // KDE treats a launcher as trusted when it is owned by root or carries the
