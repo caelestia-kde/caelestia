@@ -12,6 +12,13 @@ function pidOf(id) {
     return match ? match[1] : "";
 }
 
+// Chromium and Electron register every tray icon in a process under a sequential
+// `chrome_status_icon_<n>` id with no pid and no theme icon name, so multiple apps
+// collide on the same id unless resolved to their desktop application.
+function isGenericId(id) {
+    return /^chrome_status_icon_\d+$/.test(String(id ?? ""));
+}
+
 // A notifier that ships no theme icon (a pixmap) names nothing stable, so it keeps
 // its id as its key.
 function themeIconName(icon) {
@@ -25,22 +32,54 @@ function prettify(name) {
     return String(name ?? "").replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
 }
 
-// `comm` is the process behind the notifier, when it is known. Both forms name the
-// app rather than the process hosting it, which is what changes between launches.
-function keyOf(id, icon, comm) {
+// `comm` is the process behind the notifier, when it is known; `app` is the desktop
+// entry id resolved for generic Chromium/Electron notifiers that carry neither a pid
+// nor a theme icon name.
+function keyOf(id, icon, comm, app) {
     if (comm)
         return `proc:${comm}`;
     const name = themeIconName(icon);
-    return name ? `icon:${name}` : id;
+    if (name)
+        return `icon:${name}`;
+    const appId = String(app ?? "").replace(/\.desktop$/i, "").trim();
+    return appId ? `app:${appId}` : id;
 }
 
 function labelOf(key) {
     const value = String(key ?? "");
-    return /^(proc|icon):/.test(value) ? prettify(value.replace(/^(proc|icon):/, "")) : value;
+    return /^(proc|icon|app):/.test(value) ? prettify(value.replace(/^(proc|icon|app):/, "")) : value;
 }
 
 function iconNameOf(key) {
-    return String(key ?? "").replace(/^(proc|icon):/, "");
+    return String(key ?? "").replace(/^(proc|icon|app):/, "");
+}
+
+// Candidate application names derived from a tray item's title and tooltip, ordered from
+// most specific to broadest so desktop-entry lookup can still recognize apps that append
+// unread counts or status text (e.g. "Discord (3)", "Slack - Workspace") without splitting
+// hyphenated names like "Cachy-Update".
+function appLabelCandidates(title, tooltipTitle) {
+    const out = [];
+    const push = value => {
+        const cleaned = readableTitle(String(value ?? "").trim());
+        if (!cleaned || isGenericId(cleaned) || out.includes(cleaned))
+            return;
+        out.push(cleaned);
+    };
+
+    for (const raw of [title, tooltipTitle]) {
+        const base = String(raw ?? "").trim();
+        if (!base)
+            continue;
+        push(base);
+        const withoutBadge = base.replace(/\s*[\(\[]\d+\+?[\)\]]\s*$/, "").trim();
+        if (withoutBadge !== base)
+            push(withoutBadge);
+        const sep = withoutBadge.search(/\s+(?:-|—|–|\|)\s+|:\s+/);
+        if (sep > 0)
+            push(withoutBadge.slice(0, sep));
+    }
+    return out;
 }
 
 // A title read by a person names the app ("Cachy-Update"); a notifier id or a bus name

@@ -39,6 +39,10 @@ assert.strictEqual(Icons.keyOf("2407-1", "image://icon/firefox", ""), "icon:fire
 assert.strictEqual(Icons.keyOf("2407-1", "image://qspixmap/abc", ""), "2407-1", "a pixmap names nothing, so the id stays");
 assert.strictEqual(Icons.keyOf("2407-1", "", ""), "2407-1", "an icon with no name keeps its id");
 assert.strictEqual(Icons.keyOf("2407-1", "image://icon/a/absolute/path", "kitty"), "proc:kitty", "a process name wins over a path-like icon");
+assert.strictEqual(Icons.keyOf("chrome_status_icon_1", "image://qspixmap/abc", "", "chatgpt"), "app:chatgpt", "a desktop entry id disambiguates generic Chromium pixmap icons");
+assert.strictEqual(Icons.keyOf("chrome_status_icon_1", "image://qspixmap/abc", "", "com.discordapp.Discord.desktop"), "app:com.discordapp.Discord", "a trailing .desktop suffix is stripped");
+assert.strictEqual(Icons.keyOf("chrome_status_icon_1", "image://icon/chatgpt", "", "chatgpt"), "icon:chatgpt", "a theme icon still wins over a desktop entry fallback");
+assert.strictEqual(Icons.keyOf("2407-1", "image://qspixmap/abc", "firefox", "firefox"), "proc:firefox", "a process name still wins over a desktop entry fallback");
 '
 }
 
@@ -46,8 +50,10 @@ test_labels_are_readable() {
     check_tray_icons "row labels come from the alias" '
 assert.strictEqual(Icons.labelOf("proc:kitty-terminal"), "kitty terminal");
 assert.strictEqual(Icons.labelOf("icon:org_kde_plasma"), "org kde plasma");
+assert.strictEqual(Icons.labelOf("app:google-chrome"), "google chrome");
 assert.strictEqual(Icons.labelOf("2407-1"), "2407-1", "a raw id is not prettified");
 assert.strictEqual(Icons.iconNameOf("proc:kitty-terminal"), "kitty-terminal");
+assert.strictEqual(Icons.iconNameOf("app:google-chrome"), "google-chrome");
 '
 }
 
@@ -182,6 +188,28 @@ test_config_is_the_only_store() {
     assert_file_not_contains "$REGISTRY" "FileView" "tray settings live in config, not in a second file"
     assert_file_not_contains "$REGISTRY" "unseenTtl" "there is nothing to expire"
     assert_file_contains "$REGISTRY" "GlobalConfig.bar.tray.order" "the bar order is the saved order"
+}
+
+test_chromium_generic_ids_resolve_via_app_candidates() {
+    check_tray_icons "generic Chromium ids and app label candidates" '
+assert.strictEqual(Icons.isGenericId("chrome_status_icon_1"), true);
+assert.strictEqual(Icons.isGenericId("chrome_status_icon_12"), true);
+assert.strictEqual(Icons.isGenericId("2652-9"), false);
+assert.strictEqual(Icons.isGenericId("firefox"), false);
+assert.deepStrictEqual(Icons.appLabelCandidates("", "ChatGPT"), ["ChatGPT"]);
+assert.deepStrictEqual(Icons.appLabelCandidates("chrome_status_icon_1", "ChatGPT"), ["ChatGPT"]);
+assert.deepStrictEqual(Icons.appLabelCandidates("", "Discord (3)"), ["Discord (3)", "Discord"]);
+assert.deepStrictEqual(Icons.appLabelCandidates("", "Discord [12+]"), ["Discord [12+]", "Discord"]);
+assert.deepStrictEqual(Icons.appLabelCandidates("", "Slack - Acme Corp"), ["Slack - Acme Corp", "Slack"]);
+assert.deepStrictEqual(Icons.appLabelCandidates("Cachy-Update", ""), ["Cachy-Update"]);
+assert.deepStrictEqual(Icons.appLabelCandidates("2652-9", "org.kde.StatusNotifierItem-2652-1"), []);
+'
+    assert_file_contains "$REGISTRY" "function appIdOfItem(item: var): string" \
+        "the registry resolves desktop app ids for generic Chromium tray items"
+    assert_file_contains "$REGISTRY" "if (!TrayIcons.isGenericId(item.id) || resolved === item.id)" \
+        "resolved generic Chromium items do not keep claiming the shared raw id in keysOf"
+    assert_file_contains "$REGISTRY" "if (TrayIcons.isGenericId(item.id))" \
+        "legacy key migration skips shared generic ids so one app cannot claim another app'\''s saved key"
 }
 
 run_tests
