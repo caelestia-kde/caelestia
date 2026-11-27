@@ -39,9 +39,13 @@ QtObject {
     property string materialIcon
     property string appName
     property string image
+    // Chromium-based browsers lead a site's notification body with its origin
+    // (`<a href="https://web.whatsapp.com/">web.whatsapp.com</a>` and a blank line),
+    // which pushes the message itself down. Drop that line for display only.
+    readonly property string displayBody: /chrom/i.test(appName) ? notif.stripOrigin(body) : body
     // Body with markup stripped, for single-line previews (eliding raw markup cuts tags in half)
-    readonly property string bodyPlain: notif.cleanPreview(body)
-    readonly property string bodyStyled: notif.cleanBody(body)
+    readonly property string bodyPlain: notif.cleanPreview(displayBody)
+    readonly property string bodyStyled: notif.cleanBody(displayBody)
     // Summary is always shown on a single line, so collapse any whitespace too
     readonly property string summaryPlain: summary.replace(/<\/?([a-zA-Z][a-zA-Z0-9]*)\b[^>]*\/?>/gi, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, "\"").replace(/&#39;|&apos;/g, "'").replace(/&amp;/g, "&").replace(/\s+/g, " ").trim()
     property var hints
@@ -177,6 +181,14 @@ QtObject {
         }
 
         target: notif.notification
+    }
+
+    function stripOrigin(raw: string): string {
+        if (!raw)
+            return "";
+
+        const stripped = raw.replace(/^\s*(?:<a\b[^>]*>\s*)?[a-z0-9-]+(?:\.[a-z0-9-]+)+(?::\d+)?\/?[ \t]*(?:<\/a>)?[ \t]*(?:\r?\n|<br\s*\/?>)+\s*/i, "");
+        return stripped.length > 0 ? stripped : raw;
     }
 
     function cleanPreview(raw: string): string {
