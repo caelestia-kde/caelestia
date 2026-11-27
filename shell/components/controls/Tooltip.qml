@@ -120,7 +120,9 @@ Popup {
     contentItem: StyledRect {
         id: tooltipRect
 
-        implicitWidth: Math.min(tooltipMetrics.width, root._maxContentWidth) + Tokens.padding.medium * 2
+        readonly property real _contentWidth: Math.min(Math.ceil(tooltipMeasure.implicitWidth), root._maxContentWidth)
+
+        implicitWidth: _contentWidth + Tokens.padding.medium * 2
         implicitHeight: tooltipText.implicitHeight + Tokens.padding.large
 
         color: Colours.palette.m3surfaceContainerHighest
@@ -134,11 +136,15 @@ Popup {
             level: 3
         }
 
-        // Measures the unwrapped string, so the rect can cap the text without the
-        // text's own implicitWidth feeding back into the width that caps it.
-        TextMetrics {
-            id: tooltipMetrics
+        // Measures the unwrapped string with the same StyledText shaping and native
+        // rendering as tooltipText, so the rect can cap the text without tooltipText's
+        // own implicitWidth feeding back into the width that caps it.
+        // TextMetrics.width returns the ink bounding box, which can be narrower than
+        // the laid-out advance width (especially for CJK glyphs) and wrap short labels.
+        StyledText {
+            id: tooltipMeasure
 
+            visible: false
             font: tooltipText.font
             text: root.text
         }
@@ -148,7 +154,7 @@ Popup {
 
             anchors.centerIn: parent
 
-            width: Math.min(tooltipMetrics.width, root._maxContentWidth)
+            width: tooltipRect._contentWidth
             wrapMode: Text.WordWrap
             text: root.text
             color: Colours.palette.m3onSurface
