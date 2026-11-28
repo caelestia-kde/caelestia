@@ -64,6 +64,8 @@ test_nexus_session_page_supports_rearrange_media_and_add_remove() {
         "predefined entry commands stay locked while custom entry commands are editable"
     assert_file_contains "$ENTRY_LIST" "Images.validImageExtensions.concat(Images.validVideoExtensions)" \
         "media picker accepts all supported image and video extensions"
+    assert_file_contains "$SESSION_PAGE" "root.predefinedIds.filter(id => !present.includes(id))" \
+        "SessionPage only offers predefined entries not yet in the menu"
     assert_file_contains "$ADD_BTN" "DialogRowButton" \
         "AddSessionEntryButton uses Nexus DialogRowButton"
 }

@@ -20,12 +20,15 @@ PageBase {
         lock: qsTr("Lock"),
         changeUser: qsTr("Switch user")
     })
-    readonly property var predefinedItems: root.predefinedIds.map(id => ({
-        id: id,
-        label: root.defaultLabels[id],
-        icon: Config.session.icons[id] || "help_outline",
-        commandText: (Config.session.commands[id] ?? []).join(" ")
-    }))
+    readonly property var predefinedItems: {
+        const present = (Config.session.entries.values ?? []).filter(e => e?.id).map(e => e.id);
+        return root.predefinedIds.filter(id => !present.includes(id)).map(id => ({
+            id: id,
+            label: root.defaultLabels[id],
+            icon: Config.session.icons[id] || "help_outline",
+            commandText: (Config.session.commands[id] ?? []).join(" ")
+        }));
+    }
     readonly property bool hasMediaEntry: (Config.session.entries.values ?? []).some(e => e?.type === "media")
 
     function commandList(text: string): var {

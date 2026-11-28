@@ -29,7 +29,7 @@ DialogRowButton {
     signal addMedia(label: string, mediaPath: string)
 
     function resetDraft(): void {
-        mode = "predefined";
+        mode = root.predefinedItems.length > 0 ? "predefined" : "custom";
         selectedPredefinedId = "";
         customLabel = "";
         customIcon = "terminal";
@@ -104,81 +104,109 @@ DialogRowButton {
             Component {
                 id: predefinedComp
 
-                VerticalFadeListView {
-                    spacing: 0
-                    topMargin: Tokens.padding.small
-                    bottomMargin: Tokens.padding.small
-                    model: root.predefinedItems
+                Item {
+                    ColumnLayout {
+                        anchors.centerIn: parent
+                        width: parent.width - Tokens.padding.large * 2
+                        visible: root.predefinedItems.length === 0
+                        spacing: Tokens.spacing.extraSmall
 
-                    delegate: StyledRect {
-                        id: item
-
-                        required property var modelData
-                        readonly property bool selected: root.selectedPredefinedId === modelData.id
-
-                        anchors.left: ListView.view.contentItem.left
-                        anchors.right: ListView.view.contentItem.right
-                        anchors.margins: 1
-                        implicitHeight: predefRow.implicitHeight + Tokens.padding.medium * 2
-                        radius: stateLayer.pressed ? Tokens.rounding.extraSmall : selected ? Tokens.rounding.largeIncreased : Tokens.rounding.medium
-                        color: Qt.alpha(Colours.palette.m3tertiaryContainer, selected ? 1 : 0)
-
-                        Behavior on radius {
-                            Anim {
-                                type: Anim.SlowEffects
-                            }
+                        MaterialIcon {
+                            Layout.alignment: Qt.AlignHCenter
+                            text: "check_circle"
+                            color: Colours.palette.m3onSurfaceVariant
+                            fontStyle: Tokens.font.icon.large
                         }
 
-                        StateLayer {
-                            id: stateLayer
-
-                            onClicked: root.selectedPredefinedId = item.modelData.id
+                        StyledText {
+                            Layout.alignment: Qt.AlignHCenter
+                            Layout.fillWidth: true
+                            text: qsTr("All predefined entries are already in the menu")
+                            color: Colours.palette.m3onSurfaceVariant
+                            font: Tokens.font.body.medium
+                            horizontalAlignment: Text.AlignHCenter
+                            wrapMode: Text.WordWrap
                         }
+                    }
 
-                        RowLayout {
-                            id: predefRow
+                    VerticalFadeListView {
+                        anchors.fill: parent
+                        visible: root.predefinedItems.length > 0
+                        spacing: 0
+                        topMargin: Tokens.padding.small
+                        bottomMargin: Tokens.padding.small
+                        model: root.predefinedItems
 
-                            anchors.left: parent.left
-                            anchors.right: parent.right
-                            anchors.verticalCenter: parent.verticalCenter
-                            anchors.margins: Tokens.padding.large
-                            spacing: Tokens.spacing.medium
+                        delegate: StyledRect {
+                            id: item
 
-                            MaterialIcon {
-                                text: item.modelData.icon
-                                color: item.selected ? Colours.palette.m3onTertiaryContainer : Colours.palette.m3primary
-                                fontStyle: Tokens.font.icon.medium
-                            }
+                            required property var modelData
+                            readonly property bool selected: root.selectedPredefinedId === modelData.id
 
-                            ColumnLayout {
-                                Layout.fillWidth: true
-                                spacing: 0
+                            anchors.left: ListView.view.contentItem.left
+                            anchors.right: ListView.view.contentItem.right
+                            anchors.margins: 1
+                            implicitHeight: predefRow.implicitHeight + Tokens.padding.medium * 2
+                            radius: stateLayer.pressed ? Tokens.rounding.extraSmall : selected ? Tokens.rounding.largeIncreased : Tokens.rounding.medium
+                            color: Qt.alpha(Colours.palette.m3tertiaryContainer, selected ? 1 : 0)
 
-                                StyledText {
-                                    Layout.fillWidth: true
-                                    text: item.modelData.label
-                                    color: item.selected ? Colours.palette.m3onTertiaryContainer : Colours.palette.m3onSurface
-                                    elide: Text.ElideRight
-                                }
-
-                                StyledText {
-                                    Layout.fillWidth: true
-                                    text: item.modelData.commandText
-                                    color: item.selected ? Colours.palette.m3onTertiaryContainer : Colours.palette.m3onSurfaceVariant
-                                    font: NexusStyle.secondaryFont
-                                    elide: Text.ElideRight
+                            Behavior on radius {
+                                Anim {
+                                    type: Anim.SlowEffects
                                 }
                             }
 
-                            MaterialIcon {
-                                text: "check"
-                                color: Colours.palette.m3onTertiaryContainer
-                                fontStyle: Tokens.font.icon.medium
-                                opacity: item.selected ? 1 : 0
+                            StateLayer {
+                                id: stateLayer
 
-                                Behavior on opacity {
-                                    Anim {
-                                        type: Anim.SlowEffects
+                                onClicked: root.selectedPredefinedId = item.modelData.id
+                            }
+
+                            RowLayout {
+                                id: predefRow
+
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.verticalCenter: parent.verticalCenter
+                                anchors.margins: Tokens.padding.large
+                                spacing: Tokens.spacing.medium
+
+                                MaterialIcon {
+                                    text: item.modelData.icon
+                                    color: item.selected ? Colours.palette.m3onTertiaryContainer : Colours.palette.m3primary
+                                    fontStyle: Tokens.font.icon.medium
+                                }
+
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 0
+
+                                    StyledText {
+                                        Layout.fillWidth: true
+                                        text: item.modelData.label
+                                        color: item.selected ? Colours.palette.m3onTertiaryContainer : Colours.palette.m3onSurface
+                                        elide: Text.ElideRight
+                                    }
+
+                                    StyledText {
+                                        Layout.fillWidth: true
+                                        text: item.modelData.commandText
+                                        color: item.selected ? Colours.palette.m3onTertiaryContainer : Colours.palette.m3onSurfaceVariant
+                                        font: NexusStyle.secondaryFont
+                                        elide: Text.ElideRight
+                                    }
+                                }
+
+                                MaterialIcon {
+                                    text: "check"
+                                    color: Colours.palette.m3onTertiaryContainer
+                                    fontStyle: Tokens.font.icon.medium
+                                    opacity: item.selected ? 1 : 0
+
+                                    Behavior on opacity {
+                                        Anim {
+                                            type: Anim.SlowEffects
+                                        }
                                     }
                                 }
                             }
