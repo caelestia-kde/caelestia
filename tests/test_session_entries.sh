@@ -15,14 +15,16 @@ SESSION_PAGE="$REPO_ROOT/shell/modules/nexus/pages/SessionPage.qml"
 ENTRY_LIST="$REPO_ROOT/shell/modules/nexus/common/SessionEntryList.qml"
 ADD_BTN="$REPO_ROOT/shell/modules/nexus/common/AddSessionEntryButton.qml"
 
-test_six_predefined_session_commands_and_default_five_entries() {
-    for key in logout reboot shutdown hibernate lock changeUser; do
+test_predefined_session_commands_and_default_five_entries() {
+    for key in logout reboot shutdown sleep hibernate lock changeUser; do
         assert_file_contains "$CONFIG_HPP" "$key" \
             "SessionConfig defines predefined command/icon key $key"
     done
 
     assert_file_contains "$CONFIG_HPP" "CONFIG_LIST(SessionEntryList, entries" \
         "SessionConfig exposes dynamic entries list"
+    assert_file_contains "$CONFIG_HPP" '{ u"id"_s, u"sleep"_s }' \
+        "default session entries use sleep instead of hibernate"
     assert_file_contains "$CONFIG_HPP" '{ u"id"_s, u"gif"_s }' \
         "default session entries include the media slot"
     assert_file_contains "$CONFIG_HPP" "bool syncJson(" \
@@ -32,6 +34,8 @@ test_six_predefined_session_commands_and_default_five_entries() {
 test_launcher_uses_session_commands() {
     assert_file_contains "$LAUNCHER_CONTENT" "Config.session.commands.logout" \
         "Launcher Log Out action uses Config.session.commands.logout"
+    assert_file_contains "$LAUNCHER_CONTENT" "Config.session.commands.sleep" \
+        "Launcher Sleep action uses Config.session.commands.sleep"
     assert_file_contains "$LAUNCHER_CONTENT" "Config.session.commands.reboot" \
         "Launcher Restart action uses Config.session.commands.reboot"
     assert_file_contains "$LAUNCHER_CONTENT" "Config.session.commands.shutdown" \

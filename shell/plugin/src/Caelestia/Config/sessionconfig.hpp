@@ -16,7 +16,8 @@ class SessionIcons : public settings::ObjectNode {
 
     CONFIG_PROPERTY(QString, logout, u"logout"_s)
     CONFIG_PROPERTY(QString, shutdown, u"power_settings_new"_s)
-    CONFIG_PROPERTY(QString, hibernate, u"bedtime"_s)
+    CONFIG_PROPERTY(QString, sleep, u"bedtime"_s)
+    CONFIG_PROPERTY(QString, hibernate, u"ac_unit"_s)
     CONFIG_PROPERTY(QString, reboot, u"cached"_s)
     CONFIG_PROPERTY(QString, lock, u"lock"_s)
     CONFIG_PROPERTY(QString, changeUser, u"manage_accounts"_s)
@@ -27,6 +28,7 @@ class SessionCommands : public settings::ObjectNode {
 
     CONFIG_PROPERTY(QStringList, logout, { u"logout"_s })
     CONFIG_PROPERTY(QStringList, shutdown, { u"poweroff"_s })
+    CONFIG_PROPERTY(QStringList, sleep, { u"suspendThenHibernate"_s })
     CONFIG_PROPERTY(QStringList, hibernate, { u"hibernate"_s })
     CONFIG_PROPERTY(QStringList, reboot, { u"reboot"_s })
     CONFIG_PROPERTY(QStringList, lock, QStringList({ u"loginctl"_s, u"lock-session"_s }))
@@ -79,8 +81,8 @@ class SessionConfig : public settings::ObjectNode {
             }),
             vmap({
                 { u"type"_s, u"button"_s },
-                { u"id"_s, u"hibernate"_s },
-                { u"label"_s, u"Hibernate"_s },
+                { u"id"_s, u"sleep"_s },
+                { u"label"_s, u"Sleep"_s },
             }),
             vmap({
                 { u"type"_s, u"button"_s },

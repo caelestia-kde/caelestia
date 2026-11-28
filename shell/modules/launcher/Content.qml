@@ -222,7 +222,7 @@ Item {
                     type: TextButton.Tonal
                     icon: "bedtime"
                     text: qsTr("Sleep")
-                    onClicked: root.triggerSessionCommand(["suspendThenHibernate"])
+                    onClicked: root.triggerSessionCommand(Config.session.commands.sleep)
                 }
 
                 IconTextButton {
@@ -354,7 +354,7 @@ Item {
 
                 onClicked: {
                     powerMenu.expanded = false;
-                    root.triggerSessionCommand(["suspendThenHibernate"]);
+                    root.triggerSessionCommand(Config.session.commands.sleep);
                 }
             },
             MenuItem {

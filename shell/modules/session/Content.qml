@@ -16,10 +16,11 @@ Column {
 
     required property DrawerVisibilities visibilities
 
-    readonly property var predefinedIds: ["logout", "reboot", "shutdown", "hibernate", "lock", "changeUser"]
+    readonly property var predefinedIds: ["logout", "reboot", "shutdown", "sleep", "hibernate", "lock", "changeUser"]
     readonly property var defaultLabels: ({
         logout: qsTr("Log out"),
         shutdown: qsTr("Shut down"),
+        sleep: qsTr("Sleep"),
         hibernate: qsTr("Hibernate"),
         reboot: qsTr("Restart"),
         lock: qsTr("Lock"),

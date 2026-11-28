@@ -10,11 +10,12 @@ import qs.modules.nexus.common
 PageBase {
     id: root
 
-    readonly property var predefinedIds: ["logout", "reboot", "shutdown", "hibernate", "lock", "changeUser"]
+    readonly property var predefinedIds: ["logout", "reboot", "shutdown", "sleep", "hibernate", "lock", "changeUser"]
     readonly property var defaultLabels: ({
         logout: qsTr("Log out"),
         reboot: qsTr("Restart"),
         shutdown: qsTr("Shut down"),
+        sleep: qsTr("Sleep"),
         hibernate: qsTr("Hibernate"),
         lock: qsTr("Lock"),
         changeUser: qsTr("Switch user")
