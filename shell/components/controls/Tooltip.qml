@@ -18,7 +18,9 @@ Popup {
     // cannot draw itself off the edge of whatever it was anchored to. The floor keeps the
     // width inside the parent, which is what lets updatePosition clamp in one step.
     readonly property real _maxContentWidth: {
-        const available = (root.parent ? root.parent.width : root.width) - Tokens.padding.medium * 4;
+        if (!root.parent || root.parent.width <= 0)
+            return 360;
+        const available = root.parent.width - Tokens.padding.medium * 4;
         return Math.max(Tokens.padding.medium, Math.min(available, 360));
     }
 
