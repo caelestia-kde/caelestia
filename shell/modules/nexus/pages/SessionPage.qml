@@ -202,8 +202,9 @@ PageBase {
             destructive: true
             onConfirmed: {
                 entryList.collapse();
-                GlobalConfig.session.resetOption("entries");
-                GlobalConfig.session.resetOption("icons");
+                const session = GlobalConfig.session;
+                session.resetOption("entries");
+                session.resetOption("icons");
                 GlobalConfig.save();
             }
         }
