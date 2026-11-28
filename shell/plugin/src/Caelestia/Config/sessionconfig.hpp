@@ -34,7 +34,7 @@ class SessionCommands : public settings::ObjectNode {
     CONFIG_PROPERTY(QStringList, lock, QStringList({ u"loginctl"_s, u"lock-session"_s }))
     CONFIG_PROPERTY(QStringList, changeUser,
         QStringList({ u"sh"_s, u"-c"_s,
-            u"qdbus6 org.kde.ksmserver /KSMServer org.kde.KSMServerInterface.openSwitchUser 2>/dev/null || dm-tool switch-to-greeter 2>/dev/null"_s }))
+            u"loginctl lock-session 2>/dev/null; qdbus6 --system org.freedesktop.DisplayManager \"${XDG_SEAT_PATH:-/org/freedesktop/DisplayManager/Seat0}\" org.freedesktop.DisplayManager.Seat.SwitchToGreeter 2>/dev/null || dm-tool switch-to-greeter 2>/dev/null"_s }))
 
 public:
     // Predefined session commands are fixed by the shell and shared with the Launcher;

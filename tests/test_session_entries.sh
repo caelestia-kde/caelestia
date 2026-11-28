@@ -29,6 +29,8 @@ test_predefined_session_commands_and_default_five_entries() {
         "default session entries include the media slot"
     assert_file_contains "$CONFIG_HPP" "bool syncJson(" \
         "SessionCommands preserves predefined shell commands against legacy JSON overrides"
+    assert_file_contains "$CONFIG_HPP" "org.freedesktop.DisplayManager.Seat.SwitchToGreeter" \
+        "changeUser command uses DisplayManager SwitchToGreeter on Plasma 6 / SDDM"
 }
 
 test_launcher_uses_session_commands() {
