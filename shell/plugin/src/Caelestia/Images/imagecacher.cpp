@@ -1,7 +1,5 @@
 #include "imagecacher.hpp"
 
-#include <algorithm>
-
 #include <qcryptographichash.h>
 #include <qdatetime.h>
 #include <qdir.h>
@@ -14,6 +12,8 @@
 #include <qsavefile.h>
 #include <qstringlist.h>
 #include <qthreadpool.h>
+
+#include <algorithm>
 
 #if defined(Q_OS_UNIX)
 #include <sys/stat.h>
@@ -74,19 +74,17 @@ ImageCacher::SourceMetadata sourceMetadataFor(const QString& path) {
     metadata.mtimeMs = info.lastModified().toMSecsSinceEpoch();
 
 #if defined(Q_OS_UNIX)
-    struct stat statInfo {};
+    struct stat statInfo{};
     if (::stat(QFile::encodeName(path).constData(), &statInfo) == 0) {
         metadata.device = static_cast<quint64>(statInfo.st_dev);
         metadata.inode = static_cast<quint64>(statInfo.st_ino);
     }
 #endif
 
-    const QString raw = QStringLiteral("%1|%2|%3|%4|%5")
-                            .arg(info.absoluteFilePath(),
-                                 QString::number(metadata.size),
-                                 QString::number(metadata.mtimeMs),
-                                 QString::number(metadata.device),
-                                 QString::number(metadata.inode));
+    const QString raw =
+        QStringLiteral("%1|%2|%3|%4|%5")
+            .arg(info.absoluteFilePath(), QString::number(metadata.size), QString::number(metadata.mtimeMs),
+                QString::number(metadata.device), QString::number(metadata.inode));
     metadata.key = hashMetadata(raw);
     return metadata;
 }
@@ -145,8 +143,8 @@ QString ImageCacher::metadataKeyFor(const QString& sourcePath) {
 QString ImageCacher::cachePathFor(const QString& sourcePath, const QSize& size, FillMode fillMode) {
     const QString key = instance()->metadataKeyFor(sourcePath);
     const QSize cacheSize = quantisedSize(size);
-    if (key.isEmpty() || cacheSize.isEmpty() || cacheSize.width() < minCacheExtent
-        || cacheSize.height() < minCacheExtent)
+    if (key.isEmpty() || cacheSize.isEmpty() || cacheSize.width() < minCacheExtent ||
+        cacheSize.height() < minCacheExtent)
         return {};
 
     const QString filename =
@@ -300,7 +298,7 @@ void ImageCacher::pruneLocked() {
     };
 
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
-    const QFileInfoList files = QDir(cacheDir()).entryInfoList(QStringList{QStringLiteral("*.png")}, QDir::Files);
+    const QFileInfoList files = QDir(cacheDir()).entryInfoList(QStringList{ QStringLiteral("*.png") }, QDir::Files);
     QList<Entry> entries;
     entries.reserve(files.size());
     qint64 total = 0;
@@ -313,7 +311,7 @@ void ImageCacher::pruneLocked() {
         const qint64 size = info.size();
         const qint64 mtimeMs = info.lastModified().toMSecsSinceEpoch();
         const bool obsolete = !info.fileName().startsWith(QStringLiteral("v2-"));
-        entries.append({path, size, mtimeMs, obsolete || now - mtimeMs >= minimumFileAgeMs, obsolete});
+        entries.append({ path, size, mtimeMs, obsolete || now - mtimeMs >= minimumFileAgeMs, obsolete });
         total += size;
     }
 
