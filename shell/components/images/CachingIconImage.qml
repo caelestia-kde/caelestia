@@ -1,6 +1,7 @@
 pragma ComponentBehavior: Bound
 
 import QtQuick
+import Quickshell
 import Quickshell.Widgets
 import qs.utils
 
@@ -9,8 +10,12 @@ Item {
 
     readonly property int status: loader.item?.status ?? Image.Null // qmllint disable missing-property
     readonly property real actualSize: Math.min(width, height)
+    readonly property real dpr: (QsWindow.window as QsWindow)?.devicePixelRatio ?? 1
     property real implicitSize
     property url source
+    // Items whose size animates can pin this to their maximum size so the
+    // image provider keeps returning one cached texture while they scale.
+    property size cacheSourceSize: Qt.size(-1, -1)
 
     implicitWidth: implicitSize
     implicitHeight: implicitSize
@@ -33,6 +38,9 @@ Item {
         CachingImage {
             path: Paths.toLocalFile(root.source)
             fillMode: Image.PreserveAspectFit
+            sourceSize: root.cacheSourceSize.width > 0 && root.cacheSourceSize.height > 0
+                ? root.cacheSourceSize
+                : Qt.size(root.width * root.dpr, root.height * root.dpr)
         }
     }
 

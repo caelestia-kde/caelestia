@@ -15,6 +15,15 @@ namespace caelestia::images {
 
 namespace {
 
+// Cache entries are stored at a quantised size, so scale the decoded image back
+// to exactly what the item asked for before handing it to the texture factory.
+QImage atRequestedSize(QImage image, const QSize& requestedSize) {
+    if (image.isNull() || requestedSize.isEmpty() || image.size() == requestedSize)
+        return image;
+
+    return image.scaled(requestedSize, Qt::IgnoreAspectRatio, Qt::FastTransformation);
+}
+
 class CachingImageResponse final : public QQuickImageResponse, public QRunnable {
 public:
     CachingImageResponse(const QString& id, const QSize& requestedSize, ImageCacher::FillMode fillMode)
@@ -80,18 +89,22 @@ private:
         if (!cachePath.isEmpty()) {
             QImageReader cacheReader(cachePath);
             if (cacheReader.canRead()) {
-                m_image = cacheReader.read();
-                if (!m_image.isNull())
+                m_image = atRequestedSize(cacheReader.read(), size);
+                if (!m_image.isNull()) {
+                    ImageCacher::noteAccess(cachePath);
                     return;
+                }
             }
 
             ImageCacher::runJob(path, cachePath, size, m_fillMode);
 
             QImageReader built(cachePath);
             if (built.canRead()) {
-                m_image = built.read();
-                if (!m_image.isNull())
+                m_image = atRequestedSize(built.read(), size);
+                if (!m_image.isNull()) {
+                    ImageCacher::noteAccess(cachePath);
                     return;
+                }
             }
         }
 

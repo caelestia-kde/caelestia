@@ -376,6 +376,7 @@ Item {
 
                 itemSize: container.itemSize
                 iconSize: root.iconSize
+                maxMagnification: 1.0
                 recolourIcons: Config.bar.dock.recolourIcons
                 showBadges: Config.bar.dock.showBadges
                 launchingStyle: Config.bar.dock.launchingStyle ?? "circle"
