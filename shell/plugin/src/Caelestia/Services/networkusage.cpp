@@ -13,8 +13,10 @@ NetworkUsage::NetworkUsage(QObject* parent)
     : TickingService(parent)
     , m_downloadBuffer(new CircularBuffer(this))
     , m_uploadBuffer(new CircularBuffer(this)) {
-    m_downloadBuffer->setCapacity(m_historyLength + 1);
-    m_uploadBuffer->setCapacity(m_historyLength + 1);
+    m_downloadBuffer->setCapacity(m_historyLength + 2);
+    m_uploadBuffer->setCapacity(m_historyLength + 2);
+    m_downloadBuffer->push(0.0);
+    m_uploadBuffer->push(0.0);
 }
 
 qreal NetworkUsage::downloadSpeed() const {
@@ -107,6 +109,7 @@ void NetworkUsage::tick() {
 
                 m_downloadBuffer->push(m_downloadSpeed);
                 m_uploadBuffer->push(m_uploadSpeed);
+                emit samplesUpdated();
             }
 
             emit changed();

@@ -36,6 +36,7 @@ public:
 
 signals:
     void changed();
+    void samplesUpdated();
 
 protected:
     void tick() override;

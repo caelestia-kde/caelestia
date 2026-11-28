@@ -55,8 +55,9 @@ StyledRect {
             SparklineItem {
                 id: sparkline
 
-                property real targetMax: 1024
+                property real targetMax: Math.max(NetworkUsage.downloadBuffer.maximum, NetworkUsage.uploadBuffer.maximum, 1024)
                 property real smoothMax: targetMax
+                property real phaseError: 0
 
                 anchors.fill: parent
                 line1: NetworkUsage.uploadBuffer // qmllint disable missing-type
@@ -67,25 +68,55 @@ StyledRect {
                 line2FillAlpha: 0.2
                 maxValue: smoothMax
                 historyLength: NetworkUsage.historyLength
+                slideProgress: NetworkUsage.downloadBuffer.count >= 4 ? 0.25 : 0.0
 
-                Connections {
-                    function onValuesChanged(): void {
-                        sparkline.targetMax = Math.max(NetworkUsage.downloadBuffer.maximum, NetworkUsage.uploadBuffer.maximum, 1024);
-                        slideAnim.restart();
+                onVisibleChanged: {
+                    if (visible) {
+                        targetMax = Math.max(NetworkUsage.downloadBuffer.maximum, NetworkUsage.uploadBuffer.maximum, 1024);
+                        phaseError = 0;
+                        slideProgress = NetworkUsage.downloadBuffer.count >= 4 ? 0.25 : 0.0;
                     }
-
-                    target: NetworkUsage.downloadBuffer
                 }
 
-                NumberAnimation {
-                    id: slideAnim
+                Connections {
+                    function onSamplesUpdated(): void {
+                        sparkline.targetMax = Math.max(NetworkUsage.downloadBuffer.maximum, NetworkUsage.uploadBuffer.maximum, 1024);
 
-                    target: sparkline
-                    property: "slideProgress"
-                    from: 0
-                    to: 1
-                    easing.type: Easing.Linear
-                    duration: GlobalConfig.dashboard.resourceUpdateInterval
+                        const count = NetworkUsage.downloadBuffer.count;
+                        if (!sparkline.visible || count < 2) {
+                            sparkline.phaseError = 0;
+                            sparkline.slideProgress = count >= 4 ? 0.25 : 0.0;
+                            return;
+                        }
+
+                        if (count === 2) {
+                            sparkline.phaseError = 0;
+                            sparkline.slideProgress = 0.0;
+                            return;
+                        }
+
+                        // Shift slideProgress by -1.0 when a new sample enters so every point keeps its exact screen X.
+                        const shifted = sparkline.slideProgress - 1.0;
+                        const targetPostTick = count >= 4 ? -0.25 : 0.0;
+                        sparkline.slideProgress = shifted;
+                        sparkline.phaseError = Math.max(-1.0, Math.min(1.0, targetPostTick - shifted));
+                    }
+
+                    target: NetworkUsage
+                }
+
+                FrameAnimation {
+                    running: sparkline.visible && NetworkUsage.downloadBuffer.count >= 2
+                    onTriggered: {
+                        const dt = Math.min(frameTime, 0.1);
+                        const intervalSec = Math.max(GlobalConfig.dashboard.resourceUpdateInterval, 100) / 1000.0;
+                        const correction = Math.max(0.75, Math.min(1.35, 1.0 + sparkline.phaseError * 0.6));
+                        const step = (dt / intervalSec) * correction;
+
+                        sparkline.phaseError *= Math.exp(-dt / intervalSec);
+                        const next = sparkline.slideProgress + step;
+                        sparkline.slideProgress = next > 0.85 ? 0.85 + 0.15 * (1.0 - Math.exp(-(next - 0.85) / 0.15)) : next;
+                    }
                 }
 
                 Behavior on smoothMax {

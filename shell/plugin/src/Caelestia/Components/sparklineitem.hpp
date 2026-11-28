@@ -2,15 +2,19 @@
 
 #include <qcolor.h>
 #include <qobject.h>
+#include <qpoint.h>
 #include <qqmlintegration.h>
-#include <qquickpainteditem.h>
-#include <qtimer.h>
+#include <qquickitem.h>
+
+#include <vector>
 
 #include "../circularbuffer.hpp"
 
+class QSGGeometry;
+
 namespace caelestia::components {
 
-class SparklineItem : public QQuickPaintedItem {
+class SparklineItem : public QQuickItem {
     Q_OBJECT
     QML_ELEMENT
 
@@ -24,11 +28,10 @@ class SparklineItem : public QQuickPaintedItem {
     Q_PROPERTY(qreal slideProgress READ slideProgress WRITE setSlideProgress NOTIFY slideProgressChanged)
     Q_PROPERTY(int historyLength READ historyLength WRITE setHistoryLength NOTIFY historyLengthChanged)
     Q_PROPERTY(qreal lineWidth READ lineWidth WRITE setLineWidth NOTIFY lineWidthChanged)
+    Q_PROPERTY(bool smooth READ smooth WRITE setSmooth NOTIFY smoothChanged)
 
 public:
     explicit SparklineItem(QQuickItem* parent = nullptr);
-
-    void paint(QPainter* painter) override;
 
     [[nodiscard]] CircularBuffer* line1() const;
     void setLine1(CircularBuffer* buffer);
@@ -60,6 +63,9 @@ public:
     [[nodiscard]] qreal lineWidth() const;
     void setLineWidth(qreal width);
 
+    [[nodiscard]] bool smooth() const;
+    void setSmooth(bool smooth);
+
 signals:
     void line1Changed();
     void line2Changed();
@@ -71,11 +77,16 @@ signals:
     void slideProgressChanged();
     void historyLengthChanged();
     void lineWidthChanged();
+    void smoothChanged();
+
+protected:
+    QSGNode* updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData* data) override;
+    void geometryChange(const QRectF& newGeometry, const QRectF& oldGeometry) override;
 
 private:
-    void drawLine(QPainter* painter, CircularBuffer* buffer, const QColor& color, qreal fillAlpha);
     void connectBuffer(CircularBuffer* buffer);
-    void scheduleUpdate();
+    void scheduleGeometryUpdate();
+    void buildLineGeometry(CircularBuffer* buffer, const QColor& color, QSGGeometry* fillGeom, QSGGeometry* strokeGeom);
 
     CircularBuffer* m_line1 = nullptr;
     CircularBuffer* m_line2 = nullptr;
@@ -87,8 +98,14 @@ private:
     qreal m_slideProgress = 0.0;
     int m_historyLength = 30;
     qreal m_lineWidth = 2.0;
-    bool m_updatePending = false;
-    QTimer m_updateTimer;
+    bool m_smooth = true;
+
+    bool m_geometryDirty = true;
+    bool m_materialDirty = true;
+    bool m_transformDirty = true;
+
+    std::vector<QPointF> m_curvePoints;
+    std::vector<QPointF> m_samplePoints;
 };
 
 } // namespace caelestia::components
