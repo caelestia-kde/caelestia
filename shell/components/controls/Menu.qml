@@ -528,7 +528,7 @@ MouseArea {
                 bottomRightRadius: parent.bottomRightRadius
 
                 color: Colours.palette.m3onSurface
-                disabled: !root.expanded
+                disabled: !(root?.expanded ?? false)
                 onContainsMouseChanged: {
                     if (!containsMouse || item.inSubmenu)
                         return;
@@ -565,7 +565,7 @@ MouseArea {
                 StyledText {
                     Layout.alignment: Qt.AlignVCenter
                     Layout.fillWidth: true
-                    text: root.optionText(item.modelData)
+                    text: root?.optionText(item.modelData) ?? ""
                     color: Colours.palette.m3onSurface
                 }
 
