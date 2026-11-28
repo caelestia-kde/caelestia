@@ -192,19 +192,19 @@ PageBase {
                 GlobalConfig.save();
             }
         }
-    }
 
-    NexusDialog {
-        id: resetDialog
+        NexusDialog {
+            id: resetDialog
 
-        title: qsTr("Reset session entries?")
-        message: qsTr("This will restore the default 5 session menu entries and their original order.")
-        confirmText: qsTr("Reset")
-        destructive: true
-        onConfirmed: {
-            entryList.collapse();
-            GlobalConfig.session.resetOption("entries");
-            GlobalConfig.save();
+            title: qsTr("Reset session entries?")
+            message: qsTr("This will restore the default 5 session menu entries and their original order.")
+            confirmText: qsTr("Reset")
+            destructive: true
+            onConfirmed: {
+                entryList.collapse();
+                GlobalConfig.session.resetOption("entries");
+                GlobalConfig.save();
+            }
         }
     }
 }

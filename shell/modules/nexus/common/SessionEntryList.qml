@@ -366,10 +366,10 @@ ColumnLayout {
                     MouseArea {
                         id: dragMouse
 
-                        anchors.left: headerContainer.left
-                        anchors.right: actionButtons.left
-                        anchors.top: headerContainer.top
-                        anchors.bottom: headerContainer.bottom
+                        anchors.left: parent.left
+                        anchors.top: parent.top
+                        anchors.bottom: parent.bottom
+                        width: Math.max(0, headerContainer.width - actionButtons.width - Tokens.spacing.medium)
                         preventStealing: true
                         cursorShape: pressed ? Qt.ClosedHandCursor : Qt.OpenHandCursor
 
