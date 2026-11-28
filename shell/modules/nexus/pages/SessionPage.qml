@@ -4,19 +4,31 @@ import QtQuick
 import QtQuick.Layouts
 import Caelestia.Config
 import qs.components
-import qs.components.controls
 import qs.services
 import qs.modules.nexus.common
 
 PageBase {
     id: root
 
-    function commandString(list: var): string {
-        return (list || []).join(" ");
-    }
+    readonly property var predefinedIds: ["logout", "reboot", "shutdown", "hibernate", "lock", "changeUser"]
+    readonly property var defaultLabels: ({
+        logout: qsTr("Log out"),
+        reboot: qsTr("Restart"),
+        shutdown: qsTr("Shut down"),
+        hibernate: qsTr("Hibernate"),
+        lock: qsTr("Lock"),
+        changeUser: qsTr("Switch user")
+    })
+    readonly property var predefinedItems: root.predefinedIds.map(id => ({
+        id: id,
+        label: root.defaultLabels[id],
+        icon: Config.session.icons[id] || "help_outline",
+        commandText: (Config.session.commands[id] ?? []).join(" ")
+    }))
+    readonly property bool hasMediaEntry: (Config.session.entries.values ?? []).some(e => e?.type === "media")
 
     function commandList(text: string): var {
-        return text.split(" ").filter(s => s.length > 0);
+        return text.trim().split(/\s+/).filter(s => s.length > 0);
     }
 
     title: qsTr("Session")
@@ -52,7 +64,7 @@ PageBase {
         }
 
         StepperRow {
-            last: true
+            last: !root.hasMediaEntry
             label: qsTr("Drag threshold")
             subtext: qsTr("Pixels to drag before the menu moves")
             reset: ({ node: GlobalConfig.session, setting: "dragThreshold" })
@@ -63,124 +75,137 @@ PageBase {
             onMoved: v => GlobalConfig.session.dragThreshold = v
         }
 
-        SectionHeader {
-            text: qsTr("Icons")
+        StepperRow {
+            visible: root.hasMediaEntry
+            last: true
+            label: qsTr("Media speed")
+            subtext: qsTr("Playback speed multiplier for animated session media")
+            reset: ({ node: GlobalConfig.general, setting: "sessionGifSpeed" })
+            value: Config.general.sessionGifSpeed
+            from: 0.2
+            to: 2.5
+            stepSize: 0.1
+            onMoved: v => GlobalConfig.general.sessionGifSpeed = v
+        }
+
+        SectionHeaderAction {
+            text: qsTr("Menu entries")
+            actionText: qsTr("Reset defaults")
+            onActionClicked: resetDialog.open()
         }
 
         StyledText {
             Layout.fillWidth: true
-            Layout.leftMargin: Tokens.padding.largeIncreased
-            Layout.rightMargin: Tokens.padding.largeIncreased
-            text: qsTr("Material icon names used by the session menu")
+            Layout.leftMargin: Tokens.padding.small
+            Layout.rightMargin: Tokens.padding.small
+            Layout.bottomMargin: Tokens.spacing.extraSmall
+            text: qsTr("Drag entries to rearrange the session menu. Predefined actions keep their shared Launcher commands; custom entries and media are fully configurable.")
             color: Colours.palette.m3onSurfaceVariant
             font: NexusStyle.secondaryFont
             wrapMode: Text.Wrap
         }
 
-        LabeledField {
+        SessionEntryList {
+            id: entryList
+
             first: true
-            iconField: true
-            label: qsTr("Logout")
-            value: Config.session.icons.logout
-            onCommitted: v => GlobalConfig.session.icons.logout = v
-        }
+            last: false
+            entries: Config.session.entries.values
+            predefinedIds: root.predefinedIds
+            defaultLabels: root.defaultLabels
+            mediaSpeed: Config.general.sessionGifSpeed
 
-        LabeledField {
-            iconField: true
-            label: qsTr("Shutdown")
-            value: Config.session.icons.shutdown
-            onCommitted: v => GlobalConfig.session.icons.shutdown = v
-        }
-
-        LabeledField {
-            iconField: true
-            label: qsTr("Hibernate")
-            value: Config.session.icons.hibernate
-            onCommitted: v => GlobalConfig.session.icons.hibernate = v
-        }
-
-        LabeledField {
-            last: true
-            iconField: true
-            label: qsTr("Reboot")
-            value: Config.session.icons.reboot
-            onCommitted: v => GlobalConfig.session.icons.reboot = v
-        }
-
-        SectionHeader {
-            text: qsTr("Commands")
-        }
-
-        LabeledField {
-            first: true
-            label: qsTr("Logout")
-            value: root.commandString(Config.session.commands.logout)
-            onCommitted: v => GlobalConfig.session.commands.logout = root.commandList(v)
-        }
-
-        LabeledField {
-            label: qsTr("Shutdown")
-            value: root.commandString(Config.session.commands.shutdown)
-            onCommitted: v => GlobalConfig.session.commands.shutdown = root.commandList(v)
-        }
-
-        LabeledField {
-            label: qsTr("Hibernate")
-            value: root.commandString(Config.session.commands.hibernate)
-            onCommitted: v => GlobalConfig.session.commands.hibernate = root.commandList(v)
-        }
-
-        LabeledField {
-            last: true
-            label: qsTr("Reboot")
-            value: root.commandString(Config.session.commands.reboot)
-            onCommitted: v => GlobalConfig.session.commands.reboot = root.commandList(v)
-        }
-    }
-
-    component LabeledField: ConnectedRect {
-        id: field
-
-        property string label
-        property string value
-        property bool iconField
-
-        signal committed(string v)
-
-        Layout.fillWidth: true
-        implicitHeight: row.implicitHeight + Tokens.padding.medium * 2
-
-        RowLayout {
-            id: row
-
-            anchors.fill: parent
-            anchors.margins: Tokens.padding.medium
-            anchors.leftMargin: Tokens.padding.largeIncreased
-            anchors.rightMargin: Tokens.padding.largeIncreased
-            spacing: Tokens.spacing.medium
-
-            StyledText {
-                text: field.label
-                font: Tokens.font.body.small
-                color: Colours.palette.m3onSurface
-                Layout.preferredWidth: 128
+            onEntryMoved: (from, to) => {
+                GlobalConfig.session.entries.move(from, to);
+                GlobalConfig.save();
             }
 
-            MaterialIcon {
-                visible: field.iconField
-                text: input.text.length > 0 ? input.text : "help"
-                color: Colours.palette.m3onSurfaceVariant
-                fontStyle: Tokens.font.icon.medium
+            onEntryRemoved: index => {
+                GlobalConfig.session.entries.remove(index);
+                GlobalConfig.save();
             }
 
-            StyledTextField {
-                id: input
+            onEntryLabelChanged: (index, label) => {
+                const entry = GlobalConfig.session.entries.at(index);
+                if (entry) {
+                    entry.label = label;
+                    GlobalConfig.save();
+                }
+            }
 
-                type: StyledTextField.Boxed
-                Layout.fillWidth: true
-                horizontalAlignment: TextInput.AlignLeft
-                text: field.value
-                onEditingFinished: field.committed(text)
+            onEntryIconChanged: (index, icon) => {
+                const entry = GlobalConfig.session.entries.at(index);
+                if (entry) {
+                    entry.icon = icon;
+                    GlobalConfig.save();
+                }
+            }
+
+            onEntryCommandChanged: (index, command) => {
+                const entry = GlobalConfig.session.entries.at(index);
+                if (entry && (!entry.id || !root.predefinedIds.includes(entry.id))) {
+                    entry.command = command;
+                    GlobalConfig.save();
+                }
+            }
+
+            onEntryMediaChanged: (index, media) => {
+                const entry = GlobalConfig.session.entries.at(index);
+                if (entry) {
+                    entry.media = media;
+                    GlobalConfig.save();
+                }
+            }
+        }
+
+        AddSessionEntryButton {
+            rootParent: root.flickable
+            predefinedItems: root.predefinedItems
+
+            onAddPredefined: id => {
+                GlobalConfig.session.entries.insert({
+                    type: "button",
+                    id: id,
+                    label: root.defaultLabels[id] ?? ""
+                });
+                GlobalConfig.save();
+            }
+
+            onAddCustom: (label, icon, command) => {
+                GlobalConfig.session.entries.insert({
+                    type: "button",
+                    id: "",
+                    label: label,
+                    icon: icon,
+                    command: root.commandList(command)
+                });
+                GlobalConfig.save();
+            }
+
+            onAddMedia: (label, mediaPath) => {
+                GlobalConfig.session.entries.insert({
+                    type: "media",
+                    id: mediaPath === "" ? "gif" : "",
+                    label: label,
+                    media: mediaPath
+                });
+                GlobalConfig.save();
+            }
+        }
+
+        NexusDialog {
+            id: resetDialog
+
+            title: qsTr("Reset session entries?")
+            message: qsTr("This will restore the default 5 session menu entries and their original order.")
+            confirmText: qsTr("Reset")
+            destructive: true
+            onConfirmed: {
+                entryList.collapse();
+                const session = GlobalConfig.session;
+                session.resetOption("entries");
+                session.resetOption("icons");
+                GlobalConfig.save();
             }
         }
     }

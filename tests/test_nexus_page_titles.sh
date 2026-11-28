@@ -65,12 +65,16 @@ test_the_notification_page_uses_the_same_words_as_its_card() {
 
 test_the_session_icon_fields_show_what_they_change() {
     local session="$REPO_ROOT/shell/modules/nexus/pages/SessionPage.qml"
-    assert_file_contains "$session" 'property bool iconField' \
-        "icon fields are distinguishable from command fields"
-    assert_file_contains "$session" 'text: input.text.length > 0 ? input.text : "help"' \
-        "the icon name is previewed live"
-    assert_file_contains "$session" 'Material icon names used by the session menu' \
-        "the field says what kind of name it wants"
+    local list="$REPO_ROOT/shell/modules/nexus/common/SessionEntryList.qml"
+    local add_btn="$REPO_ROOT/shell/modules/nexus/common/AddSessionEntryButton.qml"
+    assert_file_contains "$session" 'SessionEntryList' \
+        "session page embeds the reorderable entry list"
+    assert_file_contains "$list" 'text: iconField.text.length > 0 ? iconField.text : "help"' \
+        "the entry editor previews the Material icon live"
+    assert_file_contains "$list" 'qsTr("Material icon name")' \
+        "the icon field says what kind of name it wants"
+    assert_file_contains "$add_btn" 'qsTr("Material icon name")' \
+        "the add entry dialog also labels the icon field"
 }
 
 test_game_mode_uses_the_hyprland_fact_and_explains_kde() {
