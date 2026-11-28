@@ -62,12 +62,14 @@ test_nexus_session_page_supports_rearrange_media_and_add_remove() {
         "SessionPage supports removing entries"
     assert_file_contains "$SESSION_PAGE" "GlobalConfig.session.entries.insert" \
         "SessionPage supports adding predefined, custom, and media entries"
-    assert_file_contains "$ENTRY_LIST" "visible: !card.isPredefined" \
+    assert_file_contains "$ENTRY_LIST" "visible: !editorHost.isPredefined" \
         "predefined entry commands stay locked while custom entry commands are editable"
     assert_file_contains "$ENTRY_LIST" "Images.validImageExtensions.concat(Images.validVideoExtensions)" \
         "media picker accepts all supported image and video extensions"
     assert_file_contains "$SESSION_PAGE" "root.predefinedIds.filter(id => !present.includes(id))" \
         "SessionPage only offers predefined entries not yet in the menu"
+    assert_file_contains "$ENTRY_LIST" "ListEditor {" \
+        "SessionEntryList reuses the shared ListEditor component"
     assert_file_contains "$ADD_BTN" "DialogRowButton" \
         "AddSessionEntryButton uses Nexus DialogRowButton"
 }

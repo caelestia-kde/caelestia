@@ -15,14 +15,23 @@ ListView {
 
     property alias values: valuesModel.values
     property bool first
+    property bool last
     property bool allowRemove: true
     property bool allowToggle: true
+    property bool allowExpand: false
+    property int expandedIndex: -1
+    property Component leadingComponent
     // A control that sits between the label and the switch, e.g. a per-row menu.
     property Component trailingComponent
+    property Component expandedComponent
 
     signal itemMoved(from: int, to: int)
     signal itemRemoved(index: int)
     signal itemToggled(index: int, checked: bool)
+
+    function collapse(): void {
+        expandedIndex = -1;
+    }
 
     function labelFor(item: var): string {
         return item.label;
@@ -49,6 +58,11 @@ ListView {
 
     spacing: Tokens.spacing.extraSmall / 2
     interactive: false
+
+    onCountChanged: {
+        if (expandedIndex >= count)
+            expandedIndex = -1;
+    }
 
     model: DelegateModel {
         id: visualModel
@@ -107,12 +121,15 @@ ListView {
         id: item
 
         required property var modelData
+        readonly property int itemIndex: DelegateModel.itemsIndex
+        readonly property bool isExpanded: !held && (root?.allowExpand ?? false) && (root?.expandedIndex ?? -1) === itemIndex
         property bool held
         property point pressPos
         property int pressIndex
         property real lastMoveY
 
-        property real topRadius: root?.first && DelegateModel.itemsIndex === 0 ? Tokens.rounding.extraLarge : Tokens.rounding.extraSmall
+        property real topRadius: root?.first && itemIndex === 0 ? Tokens.rounding.extraLarge : Tokens.rounding.extraSmall
+        property real bottomRadius: root?.last && itemIndex === (root?.count ?? 0) - 1 ? Tokens.rounding.extraLarge : Tokens.rounding.extraSmall
         property real radiusLerpProg
 
         function lerpRadius(a: real, b: real): real {
@@ -121,7 +138,7 @@ ListView {
 
         anchors.left: root?.contentItem.left
         anchors.right: root?.contentItem.right
-        implicitHeight: row.implicitHeight + row.anchors.margins * 2
+        implicitHeight: cardColumn.implicitHeight + cardColumn.anchors.topMargin * 2
         z: held || returnAnim.running ? 1 : 0
 
         state: held ? "held" : ""
@@ -155,6 +172,12 @@ ListView {
             }
         }
 
+        Behavior on bottomRadius {
+            Anim {
+                type: Anim.DefaultEffects
+            }
+        }
+
         StyledRect {
             id: placeholder
 
@@ -163,16 +186,23 @@ ListView {
             radius: Tokens.rounding.extraSmall
             topLeftRadius: item.topRadius
             topRightRadius: item.topRadius
+            bottomLeftRadius: item.bottomRadius
+            bottomRightRadius: item.bottomRadius
             opacity: 0
         }
 
         MouseArea {
             id: mouse
 
-            anchors.fill: parent
+            anchors.left: parent.left
+            anchors.top: parent.top
+            width: Math.max(0, item.width - trailingControls.width - cardColumn.anchors.rightMargin - row.spacing)
+            height: row.height + cardColumn.anchors.topMargin * 2
             preventStealing: true
+            cursorShape: pressed ? Qt.ClosedHandCursor : Qt.OpenHandCursor
 
             onPressed: e => {
+                root?.collapse();
                 returnAnim.stop();
                 item.pressPos = Qt.point(e.x, e.y);
                 item.pressIndex = item.DelegateModel.itemsIndex;
@@ -205,6 +235,9 @@ ListView {
             }
 
             onPositionChanged: e => {
+                if (!root)
+                    return;
+
                 item.lastMoveY = item.y;
                 const absY = item.mapToItem(root.contentItem, 0, e.y).y;
 
@@ -225,7 +258,7 @@ ListView {
 
                 const idx = item.DelegateModel.itemsIndex;
                 if (idx !== item.pressIndex)
-                    root.itemMoved(item.pressIndex, idx);
+                    root?.itemMoved(item.pressIndex, idx);
             }
         }
 
@@ -250,6 +283,8 @@ ListView {
                 radius: itemBg.radius
                 topLeftRadius: itemBg.topLeftRadius
                 topRightRadius: itemBg.topRightRadius
+                bottomLeftRadius: itemBg.bottomLeftRadius
+                bottomRightRadius: itemBg.bottomRightRadius
                 level: 3
                 opacity: 0
             }
@@ -258,10 +293,16 @@ ListView {
                 id: itemBg
 
                 anchors.fill: parent
-                color: Colours.tPalette.m3surfaceContainer
+                color: item.isExpanded ? Colours.layer(Colours.palette.m3surfaceContainerHigh, 1) : Colours.tPalette.m3surfaceContainer
                 radius: item.lerpRadius(Tokens.rounding.extraSmall, Tokens.rounding.large)
                 topLeftRadius: item.lerpRadius(item.topRadius, Tokens.rounding.large)
                 topRightRadius: item.lerpRadius(item.topRadius, Tokens.rounding.large)
+                bottomLeftRadius: item.lerpRadius(item.bottomRadius, Tokens.rounding.large)
+                bottomRightRadius: item.lerpRadius(item.bottomRadius, Tokens.rounding.large)
+
+                Behavior on color {
+                    CAnim {}
+                }
             }
 
             MouseArea {
@@ -270,15 +311,17 @@ ListView {
                 anchors.fill: parent
                 acceptedButtons: Qt.NoButton
                 hoverEnabled: true
-                cursorShape: mouse.pressed ? Qt.ClosedHandCursor : Qt.OpenHandCursor
+                cursorShape: mouse.pressed ? Qt.ClosedHandCursor : (mouse.containsMouse ? Qt.OpenHandCursor : Qt.ArrowCursor)
 
                 StyledRect {
                     anchors.fill: parent
                     radius: itemBg.radius
                     topLeftRadius: itemBg.topLeftRadius
                     topRightRadius: itemBg.topRightRadius
+                    bottomLeftRadius: itemBg.bottomLeftRadius
+                    bottomRightRadius: itemBg.bottomRightRadius
                     color: Colours.palette.m3onSurface
-                    opacity: parent.containsMouse && !item.held ? 0.08 : 0
+                    opacity: parent.containsMouse && !item.held && !item.isExpanded ? 0.08 : 0
 
                     Behavior on opacity {
                         Anim {
@@ -288,92 +331,152 @@ ListView {
                 }
             }
 
-            RowLayout {
-                id: row
+            ColumnLayout {
+                id: cardColumn
 
-                anchors.fill: parent
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
                 anchors.margins: Tokens.padding.medium
                 anchors.leftMargin: Tokens.padding.largeIncreased
                 anchors.rightMargin: Tokens.padding.large
-
                 spacing: Tokens.spacing.medium
 
-                MaterialIcon {
-                    id: dragIcon
+                RowLayout {
+                    id: row
 
-                    text: "drag_indicator"
-                    color: Qt.alpha(Colours.palette.m3onSurfaceVariant, root.allowToggle && !enabledSwitch.checked ? 0.5 : 1)
-                    fontStyle: Tokens.font.icon.medium
-                }
-
-                IconImage {
-                    id: rowIcon
-
-                    readonly property string iconSource: root.iconFor(item.modelData)
-
-                    visible: iconSource !== ""
-                    Layout.alignment: Qt.AlignVCenter
-                    implicitSize: Tokens.font.icon.large.pointSize * 1.5
-                    source: iconSource
-                }
-
-                ColumnLayout {
                     Layout.fillWidth: true
-                    spacing: 0
+                    spacing: Tokens.spacing.medium
 
-                    StyledText {
-                        id: label
+                    MaterialIcon {
+                        id: dragIcon
 
-                        Layout.fillWidth: true
-                        text: root.labelFor(item.modelData)
-                        color: Qt.alpha(Colours.palette.m3onSurface, root.allowToggle && !enabledSwitch.checked ? 0.5 : 1)
-                        elide: Text.ElideRight
+                        text: "drag_indicator"
+                        color: Qt.alpha(Colours.palette.m3onSurfaceVariant, (root?.allowToggle ?? false) && !enabledSwitch.checked ? 0.5 : 1)
+                        fontStyle: Tokens.font.icon.medium
                     }
 
-                    StyledText {
-                        id: subtext
+                    Loader {
+                        id: leadingLoader
 
-                        readonly property string value: root.subtextFor(item.modelData)
+                        active: root?.leadingComponent !== null && root?.leadingComponent !== undefined
+                        visible: active && status === Loader.Ready
+                        Layout.alignment: Qt.AlignVCenter
+                        sourceComponent: root?.leadingComponent ?? null
 
+                        onLoaded: {
+                            leadingLoader.item.modelData = Qt.binding(() => item.modelData);
+                            leadingLoader.item.itemIndex = Qt.binding(() => item.itemIndex);
+                        }
+                    }
+
+                    IconImage {
+                        id: rowIcon
+
+                        readonly property string iconSource: root?.iconFor(item.modelData) ?? ""
+
+                        visible: !leadingLoader.active && iconSource !== ""
+                        Layout.alignment: Qt.AlignVCenter
+                        implicitSize: Tokens.font.icon.large.pointSize * 1.5
+                        source: iconSource
+                    }
+
+                    ColumnLayout {
                         Layout.fillWidth: true
-                        visible: value !== ""
-                        text: value
-                        color: Qt.alpha(Colours.palette.m3onSurfaceVariant, root.allowToggle && !enabledSwitch.checked ? 0.5 : 1)
-                        font: NexusStyle.secondaryFont
-                        elide: Text.ElideRight
+                        spacing: 0
+
+                        StyledText {
+                            id: label
+
+                            Layout.fillWidth: true
+                            text: root?.labelFor(item.modelData) ?? ""
+                            color: Qt.alpha(Colours.palette.m3onSurface, (root?.allowToggle ?? false) && !enabledSwitch.checked ? 0.5 : 1)
+                            elide: Text.ElideRight
+                        }
+
+                        StyledText {
+                            id: subtext
+
+                            readonly property string value: root?.subtextFor(item.modelData) ?? ""
+
+                            Layout.fillWidth: true
+                            visible: value !== ""
+                            text: value
+                            color: Qt.alpha(Colours.palette.m3onSurfaceVariant, (root?.allowToggle ?? false) && !enabledSwitch.checked ? 0.5 : 1)
+                            font: NexusStyle.secondaryFont
+                            elide: Text.ElideRight
+                        }
+                    }
+
+                    RowLayout {
+                        id: trailingControls
+
+                        spacing: Tokens.spacing.extraSmall
+
+                        IconButton {
+                            visible: root?.allowExpand ?? false
+                            type: IconButton.Text
+                            isRound: true
+                            icon: item.isExpanded ? "expand_less" : "edit"
+                            accessibleName: item.isExpanded ? qsTr("Collapse entry") : qsTr("Edit entry")
+                            font: Tokens.font.icon.medium
+                            label.fill: 0
+
+                            onClicked: {
+                                if (root)
+                                    root.expandedIndex = item.isExpanded ? -1 : item.itemIndex;
+                            }
+                        }
+
+                        Loader {
+                            id: trailingLoader
+
+                            active: root?.trailingComponent !== null && root?.trailingComponent !== undefined
+                            visible: active && status === Loader.Ready
+                            sourceComponent: root?.trailingComponent ?? null
+
+                            onLoaded: {
+                                trailingLoader.item.modelData = Qt.binding(() => item.modelData);
+                                trailingLoader.item.isLast = Qt.binding(() => item.itemIndex === (root?.count ?? 0) - 1);
+                            }
+                        }
+
+                        StyledSwitch {
+                            id: enabledSwitch
+
+                            visible: root?.allowToggle ?? false
+                            checked: root?.toggledFor(item.modelData) ?? false
+                            font: Tokens.font.icon.medium
+                            onToggled: root?.itemToggled(item.itemIndex, checked)
+                        }
+
+                        IconButton {
+                            visible: root?.allowRemove ?? false
+                            type: IconButton.Text
+                            isRound: true
+                            icon: "delete"
+                            accessibleName: qsTr("Remove entry")
+                            inactiveOnColour: Colours.palette.m3error
+                            font: Tokens.font.icon.medium
+                            label.fill: 0
+
+                            onClicked: root?.itemRemoved(item.itemIndex)
+                        }
                     }
                 }
 
                 Loader {
-                    id: trailingLoader
+                    id: expandedLoader
 
-                    sourceComponent: root.trailingComponent
+                    Layout.fillWidth: true
+                    active: item.isExpanded && root?.expandedComponent !== null && root?.expandedComponent !== undefined
+                    visible: active
+                    sourceComponent: root?.expandedComponent ?? null
 
                     onLoaded: {
-                        trailingLoader.item.modelData = Qt.binding(() => item.modelData);
-                        trailingLoader.item.isLast = Qt.binding(() => item.DelegateModel.itemsIndex === root.count - 1);
+                        expandedLoader.item.modelData = Qt.binding(() => item.modelData);
+                        expandedLoader.item.itemIndex = Qt.binding(() => item.itemIndex);
                     }
-                }
-
-                StyledSwitch {
-                    id: enabledSwitch
-
-                    visible: root.allowToggle
-                    checked: root.toggledFor(item.modelData)
-                    font: Tokens.font.icon.medium
-                    onToggled: root.itemToggled(item.DelegateModel.itemsIndex, checked)
-                }
-
-                IconButton {
-                    visible: root.allowRemove
-                    type: IconButton.Text
-                    isRound: true
-                    icon: "delete"
-                    inactiveOnColour: Colours.palette.m3error
-                    font: Tokens.font.icon.medium
-                    label.fill: 0
-
-                    onClicked: root.itemRemoved(item.DelegateModel.itemsIndex)
                 }
             }
         }
