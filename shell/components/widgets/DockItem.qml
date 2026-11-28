@@ -446,7 +446,6 @@ Item {
                 implicitSize: Math.round(root.iconSize * root.currentScale)
                 width: Math.round(root.iconSize * root.currentScale)
                 height: Math.round(root.iconSize * root.currentScale)
-                sourceSize: Qt.size(root.iconCacheExtent, root.iconCacheExtent)
                 source: visible ? icon.source : ""
                 colour: Colours.palette.m3secondary
                 layer.enabled: visible

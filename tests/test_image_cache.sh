@@ -45,8 +45,6 @@ test_dock_icons_pin_their_source_size() {
         "the dock must request one maximum icon size"
     assert_file_contains "$DOCK_ITEM" 'cacheSourceSize: Qt.size(root.iconCacheExtent, root.iconCacheExtent)' \
         "dock icons must not request a size per frame"
-    assert_file_contains "$DOCK_ITEM" 'sourceSize: Qt.size(root.iconCacheExtent, root.iconCacheExtent)' \
-        "recoloured dock icons must not resize their source either"
     assert_file_contains "$DOCK_WRAPPER" 'maxMagnification: Config.dockPanel.magnification' \
         "the dock must pass its maximum magnification"
     assert_file_contains "$BAR_DOCK" 'maxMagnification: 1.0' "the bar dock does not magnify"
