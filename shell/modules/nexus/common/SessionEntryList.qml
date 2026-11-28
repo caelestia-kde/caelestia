@@ -570,7 +570,8 @@ ColumnLayout {
                         type: StyledTextField.Boxed
                         Layout.fillWidth: true
                         horizontalAlignment: TextInput.AlignLeft
-                        placeholderText: qsTr("Button label")
+                        Accessible.name: qsTr("Button label")
+                        placeholderText: text.length === 0 ? qsTr("Button label") : ""
                         text: card.resolvedLabel
                         onEditingFinished: root.entryLabelChanged(card.itemIndex, text)
                     }
@@ -599,7 +600,8 @@ ColumnLayout {
                         type: StyledTextField.Boxed
                         Layout.fillWidth: true
                         horizontalAlignment: TextInput.AlignLeft
-                        placeholderText: qsTr("Material icon name")
+                        Accessible.name: qsTr("Material icon name")
+                        placeholderText: text.length === 0 ? qsTr("Material icon name") : ""
                         text: card.resolvedIcon
                         onEditingFinished: root.entryIconChanged(card.itemIndex, text)
                     }
@@ -621,7 +623,8 @@ ColumnLayout {
                         type: StyledTextField.Boxed
                         Layout.fillWidth: true
                         horizontalAlignment: TextInput.AlignLeft
-                        placeholderText: qsTr("e.g. systemctl suspend")
+                        Accessible.name: qsTr("Command")
+                        placeholderText: text.length === 0 ? qsTr("e.g. systemctl suspend") : ""
                         text: card.commandText
                         onEditingFinished: root.entryCommandChanged(card.itemIndex, root.commandList(text))
                     }

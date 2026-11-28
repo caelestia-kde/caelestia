@@ -71,9 +71,9 @@ test_the_session_icon_fields_show_what_they_change() {
         "session page embeds the reorderable entry list"
     assert_file_contains "$list" 'text: iconField.text.length > 0 ? iconField.text : "help"' \
         "the entry editor previews the Material icon live"
-    assert_file_contains "$list" 'placeholderText: qsTr("Material icon name")' \
+    assert_file_contains "$list" 'qsTr("Material icon name")' \
         "the icon field says what kind of name it wants"
-    assert_file_contains "$add_btn" 'placeholderText: qsTr("Material icon name")' \
+    assert_file_contains "$add_btn" 'qsTr("Material icon name")' \
         "the add entry dialog also labels the icon field"
 }
 

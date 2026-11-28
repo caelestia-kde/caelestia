@@ -215,7 +215,8 @@ DialogRowButton {
                             type: StyledTextField.Boxed
                             Layout.fillWidth: true
                             horizontalAlignment: TextInput.AlignLeft
-                            placeholderText: qsTr("e.g. Suspend")
+                            Accessible.name: qsTr("Button label")
+                            placeholderText: text.length === 0 ? qsTr("e.g. Suspend") : ""
                             text: root.customLabel
                             onTextChanged: root.customLabel = text
                         }
@@ -241,7 +242,8 @@ DialogRowButton {
                             type: StyledTextField.Boxed
                             Layout.fillWidth: true
                             horizontalAlignment: TextInput.AlignLeft
-                            placeholderText: qsTr("Material icon name")
+                            Accessible.name: qsTr("Material icon name")
+                            placeholderText: text.length === 0 ? qsTr("Material icon name") : ""
                             text: root.customIcon
                             onTextChanged: root.customIcon = text
                         }
@@ -261,7 +263,8 @@ DialogRowButton {
                             type: StyledTextField.Boxed
                             Layout.fillWidth: true
                             horizontalAlignment: TextInput.AlignLeft
-                            placeholderText: qsTr("e.g. systemctl suspend")
+                            Accessible.name: qsTr("Command")
+                            placeholderText: text.length === 0 ? qsTr("e.g. systemctl suspend") : ""
                             text: root.customCommand
                             onTextChanged: root.customCommand = text
                         }
