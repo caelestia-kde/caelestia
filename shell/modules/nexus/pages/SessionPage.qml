@@ -203,6 +203,7 @@ PageBase {
             onConfirmed: {
                 entryList.collapse();
                 GlobalConfig.session.resetOption("entries");
+                GlobalConfig.session.resetOption("icons");
                 GlobalConfig.save();
             }
         }
