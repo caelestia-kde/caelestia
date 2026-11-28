@@ -261,10 +261,6 @@ ColumnLayout {
             }
         }
 
-        Behavior on implicitHeight {
-            Anim {}
-        }
-
         StyledRect {
             id: placeholder
 
@@ -284,6 +280,74 @@ ColumnLayout {
             target: cardContent
             properties: "x,y"
             to: 0
+        }
+
+        MouseArea {
+            id: dragMouse
+
+            anchors.left: parent.left
+            anchors.top: parent.top
+            width: Math.max(0, card.width - actionButtons.width - Tokens.padding.large - Tokens.spacing.medium)
+            height: headerContainer.height + Tokens.padding.medium * 2
+            preventStealing: true
+            cursorShape: pressed ? Qt.ClosedHandCursor : Qt.OpenHandCursor
+
+            onPressed: e => {
+                root.collapse();
+                returnAnim.stop();
+                card.pressPos = Qt.point(e.x, e.y);
+                card.pressIndex = card.DelegateModel.itemsIndex;
+                card.lastMoveY = card.y;
+                card.held = true;
+
+                cardContent.x = Qt.binding(() => {
+                    if (!root)
+                        return 0;
+
+                    const maxOvershoot = Tokens.padding.extraExtraLarge;
+                    const x = dragMouse.mouseX - card.pressPos.x;
+                    return root.dampOvershoot(Math.abs(x), maxOvershoot) * Math.sign(x);
+                });
+                cardContent.y = Qt.binding(() => {
+                    if (!root || !listView)
+                        return 0;
+
+                    const maxOvershoot = Tokens.padding.extraLarge;
+                    const yDiff = card.y - card.lastMoveY;
+                    const y = dragMouse.mouseY - card.pressPos.y - yDiff;
+                    const absY = card.mapToItem(listView.contentItem, 0, y).y;
+                    const maxY = listView.implicitHeight - card.implicitHeight;
+                    if (absY < 0)
+                        return y - absY - root.dampOvershoot(-absY, maxOvershoot);
+                    if (absY > maxY)
+                        return y - absY + maxY + root.dampOvershoot(absY - maxY, maxOvershoot);
+                    return y;
+                });
+            }
+
+            onPositionChanged: e => {
+                card.lastMoveY = card.y;
+                const absY = card.mapToItem(listView.contentItem, 0, e.y).y;
+
+                const swap = listView.itemAt(0, absY);
+                if (!swap || swap === card)
+                    return;
+
+                const idx = card.DelegateModel.itemsIndex;
+                const swapIdx = swap.DelegateModel.itemsIndex;
+                visualModel.items.move(idx, swapIdx);
+            }
+
+            onReleased: {
+                cardContent.x = cardContent.x;
+                cardContent.y = cardContent.y;
+                returnAnim.start();
+                card.held = false;
+
+                const idx = card.DelegateModel.itemsIndex;
+                if (idx !== card.pressIndex)
+                    root.entryMoved(card.pressIndex, idx);
+            }
         }
 
         Item {
@@ -362,68 +426,6 @@ ColumnLayout {
 
                     Layout.fillWidth: true
                     implicitHeight: headerRow.implicitHeight
-
-                    MouseArea {
-                        id: dragMouse
-
-                        anchors.left: parent.left
-                        anchors.top: parent.top
-                        anchors.bottom: parent.bottom
-                        width: Math.max(0, headerContainer.width - actionButtons.width - Tokens.spacing.medium)
-                        preventStealing: true
-                        cursorShape: pressed ? Qt.ClosedHandCursor : Qt.OpenHandCursor
-
-                        onPressed: e => {
-                            root.collapse();
-                            returnAnim.stop();
-                            card.pressPos = Qt.point(e.x, e.y);
-                            card.pressIndex = card.DelegateModel.itemsIndex;
-                            card.lastMoveY = card.y;
-                            card.held = true;
-
-                            cardContent.x = Qt.binding(() => {
-                                const maxOvershoot = Tokens.padding.extraExtraLarge;
-                                const x = dragMouse.mouseX - card.pressPos.x;
-                                return root.dampOvershoot(Math.abs(x), maxOvershoot) * Math.sign(x);
-                            });
-                            cardContent.y = Qt.binding(() => {
-                                const maxOvershoot = Tokens.padding.extraLarge;
-                                const yDiff = card.y - card.lastMoveY;
-                                const y = dragMouse.mouseY - card.pressPos.y - yDiff;
-                                const absY = card.mapToItem(listView.contentItem, 0, y).y;
-                                const maxY = listView.implicitHeight - card.implicitHeight;
-                                if (absY < 0)
-                                    return y - absY - root.dampOvershoot(-absY, maxOvershoot);
-                                if (absY > maxY)
-                                    return y - absY + maxY + root.dampOvershoot(absY - maxY, maxOvershoot);
-                                return y;
-                            });
-                        }
-
-                        onPositionChanged: e => {
-                            card.lastMoveY = card.y;
-                            const absY = card.mapToItem(listView.contentItem, 0, e.y).y;
-
-                            const swap = listView.itemAt(0, absY);
-                            if (!swap || swap === card)
-                                return;
-
-                            const idx = card.DelegateModel.itemsIndex;
-                            const swapIdx = swap.DelegateModel.itemsIndex;
-                            visualModel.items.move(idx, swapIdx);
-                        }
-
-                        onReleased: {
-                            cardContent.x = cardContent.x;
-                            cardContent.y = cardContent.y;
-                            returnAnim.start();
-                            card.held = false;
-
-                            const idx = card.DelegateModel.itemsIndex;
-                            if (idx !== card.pressIndex)
-                                root.entryMoved(card.pressIndex, idx);
-                        }
-                    }
 
                     RowLayout {
                         id: headerRow
