@@ -2838,6 +2838,13 @@ QtObject {
             subPage: "session"
         },
         {
+            label: qsTr("Media speed"),
+            description: qsTr("Playback speed multiplier for animated session media"),
+            section: qsTr("Session"),
+            pageIdx: 7,
+            subPage: "session"
+        },
+        {
             label: qsTr("Enabled"),
             description: qsTr("Pixels dragged before the sidebar opens"),
             section: qsTr("Sidebar"),

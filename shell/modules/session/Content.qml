@@ -7,7 +7,7 @@ import Caelestia.Config
 import Caelestia.Services
 import qs.components
 import qs.components.controls
-import qs.components.effects
+import qs.components.images
 import qs.services
 import qs.utils
 
@@ -16,136 +16,173 @@ Column {
 
     required property DrawerVisibilities visibilities
 
+    readonly property var predefinedIds: ["logout", "reboot", "shutdown", "hibernate", "lock", "changeUser"]
+    readonly property var defaultLabels: ({
+        logout: qsTr("Log out"),
+        shutdown: qsTr("Shut down"),
+        hibernate: qsTr("Hibernate"),
+        reboot: qsTr("Restart"),
+        lock: qsTr("Lock"),
+        changeUser: qsTr("Switch user")
+    })
+
     // Localised labels vary a lot in width ("Log out" vs "Перезагрузка"), so the
     // buttons share the width of the longest one instead of a fixed square.
-    readonly property real buttonWidth: Math.max(
-        logout.preferredWidth,
-        shutdown.preferredWidth,
-        hibernate.preferredWidth,
-        reboot.preferredWidth
-    )
+    readonly property real buttonWidth: {
+        let maxW = Tokens.sizes.session.button;
+        for (let i = 0; i < entriesRepeater.count; i++) {
+            const item = entriesRepeater.itemAt(i) as EntryDelegate;
+            if (item && !item.isMedia)
+                maxW = Math.max(maxW, item.buttonPreferredWidth);
+        }
+        return maxW;
+    }
+
+    function resolvedLabel(entry: var): string {
+        if (!entry)
+            return "";
+        if (entry.label && entry.label.length > 0)
+            return entry.label;
+        return root.defaultLabels[entry.id] ?? "";
+    }
+
+    function resolvedIcon(entry: var): string {
+        if (!entry)
+            return "help_outline";
+        if (entry.icon && entry.icon.length > 0)
+            return entry.icon;
+        if (entry.id && root.predefinedIds.includes(entry.id))
+            return Config.session.icons[entry.id] || "help_outline";
+        return "help_outline";
+    }
+
+    function resolvedCommand(entry: var): var {
+        if (!entry)
+            return [];
+        if (entry.id && root.predefinedIds.includes(entry.id))
+            return Config.session.commands[entry.id] ?? [];
+        return entry.command ?? [];
+    }
+
+    function resolvedMedia(entry: var): string {
+        if (!entry)
+            return "";
+        if (entry.media && entry.media.length > 0)
+            return entry.media;
+        if (entry.id === "gif")
+            return Config.paths.sessionGif;
+        return "";
+    }
+
+    function firstButtonItem(): Item {
+        for (let i = 0; i < entriesRepeater.count; i++) {
+            const item = entriesRepeater.itemAt(i) as EntryDelegate;
+            if (item && !item.isMedia && item.buttonItem)
+                return item.buttonItem;
+        }
+        return null;
+    }
+
+    function adjacentButtonItem(fromIndex: int, step: int): Item {
+        for (let i = fromIndex + step; i >= 0 && i < entriesRepeater.count; i += step) {
+            const item = entriesRepeater.itemAt(i) as EntryDelegate;
+            if (item && !item.isMedia && item.buttonItem)
+                return item.buttonItem;
+        }
+        return null;
+    }
+
+    function focusFirstButton(): void {
+        Qt.callLater(() => {
+            const first = root.firstButtonItem();
+            if (first)
+                first.forceActiveFocus();
+        });
+    }
 
     padding: Tokens.padding.large
     rightPadding: CUtils.clamp(padding - Config.border.thickness, 0, padding)
     spacing: Tokens.spacing.large
 
-    SessionButton {
-        id: logout
+    Component.onCompleted: focusFirstButton()
 
-        label: qsTr("Log out")
-        icon: Config.session.icons.logout
-        command: ["sh", "-c", "qdbus6 org.kde.Shutdown /Shutdown org.kde.Shutdown.logout 2>/dev/null"]
-
-        KeyNavigation.down: shutdown
-
-        Component.onCompleted: forceActiveFocus()
-
-        Connections {
-            function onLauncherChanged(): void {
-                if (!root.visibilities.launcher)
-                    logout.forceActiveFocus();
-            }
-
-            target: root.visibilities
+    Connections {
+        function onLauncherChanged(): void {
+            if (!root.visibilities.launcher)
+                root.focusFirstButton();
         }
+
+        target: root.visibilities
     }
 
-    SessionButton {
-        id: shutdown
+    Repeater {
+        id: entriesRepeater
 
-        label: qsTr("Shut down")
-        icon: Config.session.icons.shutdown
-        command: Config.session.commands.shutdown
+        model: Config.session.entries.values
 
-        KeyNavigation.up: logout
-        KeyNavigation.down: hibernate
+        delegate: EntryDelegate {}
     }
 
-    Item {
+    component EntryDelegate: Item {
+        id: entryDelegate
+
+        required property var modelData
+        required property int index
+
+        readonly property bool isMedia: modelData?.type === "media"
+        readonly property Item buttonItem: entryLoader.status === Loader.Ready && !isMedia ? entryLoader.item : null
+        readonly property real buttonPreferredWidth: (buttonItem as SessionButton)?.preferredWidth ?? 0
+
         width: root.buttonWidth
-        height: Tokens.sizes.session.button
+        height: entryLoader.status === Loader.Ready && entryLoader.item ? entryLoader.item.implicitHeight : Tokens.sizes.session.button
 
-        AnimatedImage {
-            anchors.centerIn: parent
-            width: Tokens.sizes.session.button
-            height: Tokens.sizes.session.button
-            sourceSize.width: width * ((QsWindow.window as QsWindow)?.devicePixelRatio ?? 1)
-            playing: visible
-            asynchronous: true
-            speed: Config.general.sessionGifSpeed
-            source: Paths.absolutePath(Config.paths.sessionGif)
-            fillMode: AnimatedImage.PreserveAspectFit
-            opacity: GlobalConfig.general.caelestiaMode ? 0 : 1
+        Loader {
+            id: entryLoader
 
-            Behavior on opacity { Anim { type: Anim.Standard } }
+            anchors.fill: parent
+            sourceComponent: entryDelegate.isMedia ? mediaComponent : buttonComponent
 
-            visible: Config.paths.sessionGif !== ""
-        }
-
-        AnimatedImage {
-            anchors.centerIn: parent
-            width: Tokens.sizes.session.button
-            height: Tokens.sizes.session.button
-            sourceSize.width: width * ((QsWindow.window as QsWindow)?.devicePixelRatio ?? 1)
-            playing: visible
-            asynchronous: true
-            speed: Config.general.sessionGifSpeed
-            source: Paths.absolutePath("root:/assets/dino.gif")
-            fillMode: AnimatedImage.PreserveAspectFit
-            opacity: GlobalConfig.general.caelestiaMode ? 1 : 0
-
-            Behavior on opacity { Anim { type: Anim.Standard } }
-
-            layer.enabled: true
-
-            layer.effect: Colouriser {
-                colorizationColor: Colours.palette.m3onSurface
-                sourceColor: "white"
+            onLoaded: {
+                if (entryDelegate.index === 0 || entryDelegate.buttonItem === root.firstButtonItem())
+                    root.focusFirstButton();
             }
         }
 
-        AnimatedImage {
-            anchors.centerIn: parent
-            width: Tokens.sizes.session.button
-            height: Tokens.sizes.session.button
-            sourceSize.width: width * ((QsWindow.window as QsWindow)?.devicePixelRatio ?? 1)
-            playing: visible
-            asynchronous: true
-            speed: Config.general.sessionGifSpeed
-            source: Paths.absolutePath("root:/assets/dino.gif")
-            fillMode: AnimatedImage.PreserveAspectFit
-            opacity: GlobalConfig.general.caelestiaMode ? 1 : 0
+        Component {
+            id: buttonComponent
 
-            Behavior on opacity { Anim { type: Anim.Standard } }
+            SessionButton {
+                label: root.resolvedLabel(entryDelegate.modelData)
+                icon: root.resolvedIcon(entryDelegate.modelData)
+                command: root.resolvedCommand(entryDelegate.modelData)
 
-            layer.enabled: true
-
-            layer.effect: Colouriser {
-                colorizationColor: Colours.palette.m3onSurface
-                sourceColor: "white"
+                KeyNavigation.up: root.adjacentButtonItem(entryDelegate.index, -1)
+                KeyNavigation.down: root.adjacentButtonItem(entryDelegate.index, 1)
             }
         }
-    }
 
-    SessionButton {
-        id: hibernate
+        Component {
+            id: mediaComponent
 
-        label: qsTr("Hibernate")
-        icon: Config.session.icons.hibernate
-        command: Config.session.commands.hibernate
+            Item {
+                readonly property bool useDino: GlobalConfig.general.caelestiaMode && entryDelegate.modelData?.id === "gif" && !(entryDelegate.modelData?.media)
+                readonly property string mediaSource: useDino ? "root:/assets/dino.gif" : root.resolvedMedia(entryDelegate.modelData)
 
-        KeyNavigation.up: shutdown
-        KeyNavigation.down: reboot
-    }
+                implicitWidth: root.buttonWidth
+                implicitHeight: Tokens.sizes.session.button
 
-    SessionButton {
-        id: reboot
-
-        label: qsTr("Restart")
-        icon: Config.session.icons.reboot
-        command: Config.session.commands.reboot
-
-        KeyNavigation.up: hibernate
+                MediaView {
+                    anchors.centerIn: parent
+                    width: Tokens.sizes.session.button
+                    height: Tokens.sizes.session.button
+                    path: parent.mediaSource
+                    speed: Config.general.sessionGifSpeed
+                    playing: root.visible && visible
+                    colourise: parent.useDino
+                    visible: parent.mediaSource !== ""
+                }
+            }
+        }
     }
 
     component SessionButton: ButtonBase {
