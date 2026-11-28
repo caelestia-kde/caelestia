@@ -25,6 +25,8 @@ test_six_predefined_session_commands_and_default_five_entries() {
         "SessionConfig exposes dynamic entries list"
     assert_file_contains "$CONFIG_HPP" '{ u"id"_s, u"gif"_s }' \
         "default session entries include the media slot"
+    assert_file_contains "$CONFIG_HPP" "bool syncJson(" \
+        "SessionCommands preserves predefined shell commands against legacy JSON overrides"
 }
 
 test_launcher_uses_session_commands() {
