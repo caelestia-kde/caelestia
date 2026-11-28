@@ -59,6 +59,11 @@ StyledRect {
                 property real smoothMax: targetMax
                 property real phaseError: 0
 
+                function resetScrollState(): void {
+                    phaseError = 0;
+                    slideProgress = Tokens.anim.enabled ? (NetworkUsage.downloadBuffer.count >= 4 ? 0.25 : 0.0) : 1.0;
+                }
+
                 anchors.fill: parent
                 line1: NetworkUsage.uploadBuffer // qmllint disable missing-type
                 line1Color: Colours.palette.m3secondary
@@ -68,13 +73,12 @@ StyledRect {
                 line2FillAlpha: 0.2
                 maxValue: smoothMax
                 historyLength: NetworkUsage.historyLength
-                slideProgress: NetworkUsage.downloadBuffer.count >= 4 ? 0.25 : 0.0
+                slideProgress: Tokens.anim.enabled ? (NetworkUsage.downloadBuffer.count >= 4 ? 0.25 : 0.0) : 1.0
 
                 onVisibleChanged: {
                     if (visible) {
                         targetMax = Math.max(NetworkUsage.downloadBuffer.maximum, NetworkUsage.uploadBuffer.maximum, 1024);
-                        phaseError = 0;
-                        slideProgress = NetworkUsage.downloadBuffer.count >= 4 ? 0.25 : 0.0;
+                        resetScrollState();
                     }
                 }
 
@@ -83,9 +87,8 @@ StyledRect {
                         sparkline.targetMax = Math.max(NetworkUsage.downloadBuffer.maximum, NetworkUsage.uploadBuffer.maximum, 1024);
 
                         const count = NetworkUsage.downloadBuffer.count;
-                        if (!sparkline.visible || count < 2) {
-                            sparkline.phaseError = 0;
-                            sparkline.slideProgress = count >= 4 ? 0.25 : 0.0;
+                        if (!Tokens.anim.enabled || !sparkline.visible || count < 2) {
+                            sparkline.resetScrollState();
                             return;
                         }
 
@@ -106,7 +109,12 @@ StyledRect {
                 }
 
                 FrameAnimation {
-                    running: sparkline.visible && NetworkUsage.downloadBuffer.count >= 2
+                    running: Tokens.anim.enabled && sparkline.visible && NetworkUsage.downloadBuffer.count >= 2
+                    onRunningChanged: {
+                        if (!running) {
+                            sparkline.resetScrollState();
+                        }
+                    }
                     onTriggered: {
                         const dt = Math.min(frameTime, 0.1);
                         const intervalSec = Math.max(GlobalConfig.dashboard.resourceUpdateInterval, 100) / 1000.0;
