@@ -192,14 +192,14 @@ ColumnLayout {
 
         readonly property int itemIndex: DelegateModel.itemsIndex
         readonly property bool isMedia: modelData?.type === "media"
-        readonly property bool isPredefined: !isMedia && Boolean(modelData?.id) && root.predefinedIds.includes(modelData.id)
-        readonly property bool isExpanded: !held && root.expandedIndex === itemIndex
+        readonly property bool isPredefined: !isMedia && Boolean(modelData?.id) && (root?.predefinedIds?.includes(modelData.id) ?? false)
+        readonly property bool isExpanded: !held && (root?.expandedIndex ?? -1) === itemIndex
         readonly property bool useDino: isMedia && GlobalConfig.general.caelestiaMode && modelData?.id === "gif" && !(modelData?.media)
-        readonly property string resolvedLabel: root.resolvedLabel(modelData)
-        readonly property string resolvedIcon: root.resolvedIcon(modelData)
-        readonly property string commandText: root.commandString(root.resolvedCommand(modelData))
+        readonly property string resolvedLabel: root?.resolvedLabel(modelData) ?? ""
+        readonly property string resolvedIcon: root?.resolvedIcon(modelData) ?? "help_outline"
+        readonly property string commandText: root?.commandString(root?.resolvedCommand(modelData)) ?? ""
         readonly property string rawMedia: modelData?.media ?? ""
-        readonly property string mediaSource: useDino ? "root:/assets/dino.gif" : root.resolvedMedia(modelData)
+        readonly property string mediaSource: useDino ? "root:/assets/dino.gif" : (root?.resolvedMedia(modelData) ?? "")
         readonly property string mediaDisplayName: {
             if (useDino)
                 return qsTr("dino.gif (Caelestia mode)");
@@ -212,16 +212,16 @@ ColumnLayout {
         property point pressPos
         property int pressIndex
         property real lastMoveY
-        property real topRadius: root.first && itemIndex === 0 ? Tokens.rounding.extraLarge : Tokens.rounding.extraSmall
-        property real bottomRadius: root.last && itemIndex === listView.count - 1 ? Tokens.rounding.extraLarge : Tokens.rounding.extraSmall
+        property real topRadius: root?.first && itemIndex === 0 ? Tokens.rounding.extraLarge : Tokens.rounding.extraSmall
+        property real bottomRadius: root?.last && itemIndex === (listView?.count ?? 0) - 1 ? Tokens.rounding.extraLarge : Tokens.rounding.extraSmall
         property real radiusLerpProg
 
         function lerpRadius(a: real, b: real): real {
             return a + (b - a) * radiusLerpProg;
         }
 
-        anchors.left: listView.contentItem.left
-        anchors.right: listView.contentItem.right
+        anchors.left: listView?.contentItem.left
+        anchors.right: listView?.contentItem.right
         implicitHeight: cardColumn.implicitHeight + Tokens.padding.medium * 2
         z: held || returnAnim.running ? 1 : 0
         state: held ? "held" : ""
@@ -458,8 +458,8 @@ ColumnLayout {
                                 anchors.margins: Tokens.padding.extraSmall
                                 visible: card.isMedia && card.mediaSource !== ""
                                 path: card.mediaSource
-                                speed: root.mediaSpeed
-                                playing: root.visible && visible
+                                speed: root?.mediaSpeed ?? 1.0
+                                playing: (root?.visible ?? false) && visible
                                 colourise: card.useDino
                             }
 
