@@ -27,9 +27,12 @@ Item {
     property bool activeIndicators: true
     property string indicatorStyle: "pill"
     readonly property real indicatorThickness: Math.max(2, Math.round(root.iconSize * 0.08 * root.currentScale))
+    readonly property real dpr: (QsWindow.window as QsWindow)?.devicePixelRatio ?? 1
+    readonly property int iconCacheExtent: Math.round(root.iconSize * Math.max(1, root.maxMagnification) * root.dpr)
     property string position: "bottom"
     property bool isHorizontal: root.position === "top" || root.position === "bottom"
     property real magnificationScale: 1.0
+    property real maxMagnification: 1.0
     property bool isHovered: false
     property string sourcePanel: "dockPanel"
     property var popouts: null
@@ -414,6 +417,7 @@ Item {
                 implicitSize: Math.round(root.iconSize * root.currentScale)
                 width: Math.round(root.iconSize * root.currentScale)
                 height: Math.round(root.iconSize * root.currentScale)
+                cacheSourceSize: Qt.size(root.iconCacheExtent, root.iconCacheExtent)
                 source: root.modelData ? WinIcons.sourceFor(root.modelData.entry, root.modelData.appClass, root.modelData.iconName, root.modelData.pid ?? 0) : ""
                 visible: !root.recolourIcons
 
@@ -442,6 +446,7 @@ Item {
                 implicitSize: Math.round(root.iconSize * root.currentScale)
                 width: Math.round(root.iconSize * root.currentScale)
                 height: Math.round(root.iconSize * root.currentScale)
+                sourceSize: Qt.size(root.iconCacheExtent, root.iconCacheExtent)
                 source: visible ? icon.source : ""
                 colour: Colours.palette.m3secondary
                 layer.enabled: visible

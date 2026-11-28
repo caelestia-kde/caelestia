@@ -501,6 +501,7 @@ Item {
 
             itemSize: root.itemSize
             iconSize: root.iconSize
+            maxMagnification: Config.dockPanel.magnification ? (Config.dockPanel.maxMagnification ?? 1.0) : 1.0
             recolourIcons: Config.dockPanel.recolourIcons
             showBadges: Config.dockPanel.showBadges
             activeIndicators: Config.dockPanel.activeIndicators
